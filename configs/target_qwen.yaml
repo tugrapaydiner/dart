@@ -1,0 +1,21 @@
+# Real-model target example for a GPU box.  The doc's Gemma-4/Qwen3.6-class
+# targets slot in the same way; availability changes fast, so pin what you
+# can actually pull (docs/design.md §4 cautions).
+mode: exact
+verifier: block
+
+target:
+  model: "hf:Qwen/Qwen2.5-0.5B-Instruct"
+  device: cuda
+  precision: bf16
+
+lanes:
+  ngram: {}
+  ar_draft:
+    # A smaller same-family model as the classic speculative drafter:
+    model: "hf:Qwen/Qwen2.5-0.5B"   # pair with a larger target in practice
+    device: cuda
+    precision: bf16
+
+scheduler:
+  draft_len: 5

@@ -1,0 +1,45 @@
+# Long-context KV mode (docs/design.md §11): compressed/sparse KV drafting,
+# full-KV verification.  Memory numbers only mean something on a GPU box.
+mode: exact
+verifier: block
+
+# Park the full-precision verifier KV in pinned host memory and stage it back
+# per verify round, overlapped with drafting (docs/design.md §11).
+verification:
+  full_kv_prefetch: async
+
+target:
+  model: "tiny:1234"   # e.g. "hf:Qwen/Qwen2.5-7B" on real hardware
+  device: cpu
+
+lanes:
+  compressed_kv:
+    bits: 4
+    sink_tokens: 16
+    sink_token_bits: 8
+    recent_window: 32
+    # Fine-grained KV precision policy (docs/design.md §9.4).  Raises bits
+    # for sensitive positions/layers; never lowers them.  Sink + last-2-layer
+    # rules are free; syntax/high-entropy rules activate when you supply ids /
+    # a threshold (the entropy rule costs one extra draft-model forward/round).
+    precision_policy:
+      default_kv_bits: 4
+      sink_tokens_bits: 8
+      last_2_layers_bits: 8
+      syntax_tokens_bits: 8
+      high_entropy_bits: 8
+      # syntax_token_ids: [123, 124]    # braces / JSON punctuation / delimiters
+      # high_entropy_threshold: 2.5     # nats; omit to disable the entropy rule
+  sparse_kv:
+    sink_tokens: 16
+    window: 256
+
+scheduler:
+  type: contextual_bandit
+  draft_len: 16
+  long_context_threshold: 4096
+  min_lane_acceptance: 0.30
+  # Hard constraints + reward shaping from docs/design.md §11.
+  memory_penalty: 0.05      # reward -= memory_penalty * observed_kv_gb
+  max_gpu_kv_gb: 20         # bench any lane whose KV footprint exceeds this
+  max_rejection_rate: 0.35  # bench any lane rejecting more than this

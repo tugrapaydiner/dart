@@ -1,0 +1,44 @@
+{
+  "run": {
+    "target": "tiny-seeded",
+    "device": "cpu",
+    "prompts": 12,
+    "max_new": 48,
+    "draft_len": 4,
+    "sink_len": 4,
+    "window_len": 8,
+    "note": "exact-match rate is hardware-independent (argmax comparisons)"
+  },
+  "rows": [
+    {
+      "bits": 8,
+      "unverified_exact_rate": 0.9167,
+      "dart_exact_rate": 1.0,
+      "dart_acceptance_rate": 1.0
+    },
+    {
+      "bits": 6,
+      "unverified_exact_rate": 0.8333,
+      "dart_exact_rate": 1.0,
+      "dart_acceptance_rate": 0.9896
+    },
+    {
+      "bits": 4,
+      "unverified_exact_rate": 0.1667,
+      "dart_exact_rate": 1.0,
+      "dart_acceptance_rate": 0.913
+    },
+    {
+      "bits": 3,
+      "unverified_exact_rate": 0.0833,
+      "dart_exact_rate": 1.0,
+      "dart_acceptance_rate": 0.8456
+    },
+    {
+      "bits": 2,
+      "unverified_exact_rate": 0.0,
+      "dart_exact_rate": 1.0,
+      "dart_acceptance_rate": 0.6711
+    }
+  ]
+}

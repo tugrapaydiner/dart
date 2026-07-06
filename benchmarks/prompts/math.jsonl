@@ -1,0 +1,3 @@
+{"id": "math-001", "kind": "math", "prompt": "Compute step by step: 17 * 23 = ?\nStep 1:", "reference": 391}
+{"id": "math-002", "kind": "math", "prompt": "Solve for x and show each step: 3x + 7 = 22\n", "reference": 5}
+{"id": "math-003", "kind": "math", "prompt": "A train travels 240 km in 3 hours. At the same speed, how long does 400 km take? Reason step by step.\n", "reference": 5}

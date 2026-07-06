@@ -1,0 +1,26 @@
+cff-version: 1.2.0
+message: "If you use DART in your research, please cite it as below."
+title: "DART: Diffusion-Augmented Reliable Transformer Serving"
+type: software
+authors:
+  - family-names: "Aydiner"
+    given-names: "Tugrap"
+repository-code: "https://github.com/tugrapaydiner/dart"
+license: Apache-2.0
+version: 0.1.0
+date-released: "2026-06-17"
+keywords:
+  - speculative decoding
+  - diffusion language models
+  - KV-cache compression
+  - LLM inference
+  - exact verification
+abstract: >-
+  DART is a single-sequence LLM inference engine that decouples throughput
+  from fidelity: lossy draft lanes (block-diffusion canvases, multi-token
+  prediction, n-gram retrieval, compressed- and sparse-KV self-drafting)
+  propose token blocks that a full-precision target model verifies in one
+  forward pass, so exact mode is byte-identical to the target's greedy
+  decode by construction. Canvas reconciliation, a diffusion-specific
+  recovery step, re-noises and repairs the unverified canvas suffix after a
+  rejection instead of redrafting it.

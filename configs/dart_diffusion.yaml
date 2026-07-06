@@ -1,0 +1,17 @@
+# Diffusion exact mode (docs/design.md §11): canvas drafting + reconciliation.
+mode: exact
+verifier: block
+
+target:
+  model: "tiny:1234"
+  device: cpu
+
+lanes:
+  diffusion:
+    canvas_length: 32
+    max_denoise_steps: 8
+    min_confidence: 0.65
+    adaptive_stop: true
+    reconcile: reconcile      # or "discard" for the ablation baseline
+    repair_steps: 4
+    # checkpoint: checkpoints/diffusion_drafter.pt   # from scripts/train_drafter.py

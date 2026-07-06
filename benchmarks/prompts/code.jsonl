@@ -1,0 +1,6 @@
+{"id": "code-001", "kind": "code", "prompt": "def binary_search(arr, target):\n    \"\"\"Return the index of target in sorted list arr, or -1 if absent.\"\"\"\n"}
+{"id": "code-002", "kind": "code", "prompt": "# Python: parse a CSV line respecting quoted commas\ndef parse_csv_line(line: str) -> list[str]:\n"}
+{"id": "code-003", "kind": "code", "prompt": "import torch\n\nclass MLP(torch.nn.Module):\n    def __init__(self, dim_in, dim_hidden, dim_out):\n        super().__init__()\n"}
+{"id": "code-004", "kind": "code", "prompt": "// TypeScript: debounce a function\nfunction debounce<T extends (...args: any[]) => void>(fn: T, ms: number) {\n"}
+{"id": "code-005", "kind": "code", "prompt": "fn quicksort<T: Ord + Clone>(v: &mut Vec<T>) {\n"}
+{"id": "code-006", "kind": "code", "prompt": "def fibonacci(n: int) -> int:\n    \"\"\"Iterative Fibonacci.\"\"\"\n    a, b = 0, 1\n    for _ in range(n):\n        a, b = b, a + b\n    return a\n\n\ndef fibonacci_memo(n: int) -> int:\n    \"\"\"Memoized recursive Fibonacci.\"\"\"\n"}

@@ -1,0 +1,3 @@
+{"id": "chat-001", "kind": "chat", "prompt": "Explain in two short paragraphs why the sky is blue.\n"}
+{"id": "chat-002", "kind": "chat", "prompt": "Give three practical tips for onboarding a new engineer to a large codebase.\n"}
+{"id": "chat-003", "kind": "chat", "prompt": "Summarize the trade-offs between speculative decoding and plain autoregressive decoding.\n"}

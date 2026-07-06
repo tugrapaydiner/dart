@@ -1,0 +1,29 @@
+# Train MTP heads on teacher traces (docs/design.md §6.2 "small
+# learned MTP head").  Heads read the target's last hidden state and
+# predict offsets +2, +3, +4 (offset +1 is the pending token, already known).
+target:
+  model: "tiny:1234"
+  device: cpu
+  record_hidden: true
+
+heads:
+  num_offsets: 3
+
+data:
+  num_prompts: 96
+  prompt_len: 24
+  continuation_len: 32
+  seed: 7
+
+training:
+  steps: 800
+  batch_size: 64
+  lr: 1.0e-3
+
+eval:
+  num_prompts: 8
+  max_new_tokens: 32
+  draft_len: 3
+
+output:
+  checkpoint: checkpoints/mtp_heads_tiny.pt

@@ -1,0 +1,4 @@
+{"id": "json-001", "kind": "json", "prompt": "Output a JSON object describing a user with fields name (string), age (integer), tags (array of strings). Respond with JSON only.\n{\"name\": "}
+{"id": "json-002", "kind": "json", "prompt": "Tool call schema: {\"tool\": \"search\", \"arguments\": {\"query\": string, \"top_k\": int}}. Emit a call searching for 'rust async runtime comparison' with top_k 5.\n"}
+{"id": "json-003", "kind": "json", "prompt": "Convert to JSON: name=widget-a; price=19.99; in_stock=true; sizes=S,M,L\n{"}
+{"id": "json-004", "kind": "json", "prompt": "Emit a JSON Schema (draft 2020-12) for an object with required string field 'id' and optional integer field 'count'.\n{"}

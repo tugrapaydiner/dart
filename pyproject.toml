@@ -1,0 +1,49 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "dart-serving"
+version = "0.1.0"
+description = "DART: Diffusion-Augmented Reliable Transformer Serving - exact LLM acceleration via verified draft lanes"
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "Apache-2.0" }
+dependencies = [
+    "torch>=2.1",
+    "transformers>=4.40",
+    "numpy>=1.24",
+    "pyyaml>=6.0",
+]
+
+[project.urls]
+Repository = "https://github.com/tugrapaydiner/dart"
+
+[project.optional-dependencies]
+dev = ["pytest>=7.0", "pytest-timeout", "ruff>=0.4"]
+
+[tool.setuptools.packages.find]
+include = ["dart*"]
+
+[tool.setuptools.package-data]
+dart = ["py.typed"]
+
+[tool.ruff]
+line-length = 88
+target-version = "py310"
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "B"]
+ignore = [
+    "E731",  # lambda assignment: used deliberately for tiny local closures
+    "E501",  # long lines: mostly docstrings/tables where a hard wrap hurts
+    "B905",  # zip(strict=): several zips are intentionally unequal-length
+]
+
+[tool.ruff.lint.isort]
+known-first-party = ["dart", "benchmarks", "tests"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"
+pythonpath = ["."]  # repo root on sys.path so `pytest` resolves dart/benchmarks/tests imports

@@ -1,0 +1,17 @@
+# Exact low-risk mode (docs/design.md §11): cheapest reliable lanes only.
+mode: exact
+verifier: block
+
+target:
+  model: "tiny:1234"   # swap for "hf:Qwen/Qwen2.5-0.5B" or larger on a GPU box
+  device: cpu
+  precision: fp32
+
+lanes:
+  ngram:
+    max_ngram: 4
+    min_ngram: 1
+
+scheduler:
+  draft_len: 4
+  min_lane_acceptance: 0.30

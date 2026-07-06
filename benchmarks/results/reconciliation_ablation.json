@@ -1,0 +1,130 @@
+{
+  "mean_improvement_pct": 55.21,
+  "std_improvement_pct": 8.1,
+  "min_improvement_pct": 45.96,
+  "max_improvement_pct": 63.91,
+  "n_prompt_seeds": 5,
+  "trained": true,
+  "per_seed": [
+    {
+      "discard": {
+        "exact_match_rate": 1.0,
+        "draft_tokens_accepted": 216,
+        "diffusion_forwards": 3091,
+        "warm_rounds": 0,
+        "rounds": 797,
+        "accepted_per_forward": 0.0699,
+        "recovery_success_rate": null,
+        "wall_s": 4.36
+      },
+      "reconcile": {
+        "exact_match_rate": 1.0,
+        "draft_tokens_accepted": 170,
+        "diffusion_forwards": 1622,
+        "warm_rounds": 818,
+        "rounds": 842,
+        "accepted_per_forward": 0.1048,
+        "recovery_success_rate": 0.1174,
+        "wall_s": 3.13
+      },
+      "improvement_pct": 49.93,
+      "prompt_seed": 17
+    },
+    {
+      "discard": {
+        "exact_match_rate": 1.0,
+        "draft_tokens_accepted": 200,
+        "diffusion_forwards": 3168,
+        "warm_rounds": 0,
+        "rounds": 814,
+        "accepted_per_forward": 0.0631,
+        "recovery_success_rate": null,
+        "wall_s": 4.45
+      },
+      "reconcile": {
+        "exact_match_rate": 1.0,
+        "draft_tokens_accepted": 152,
+        "diffusion_forwards": 1651,
+        "warm_rounds": 841,
+        "rounds": 862,
+        "accepted_per_forward": 0.0921,
+        "recovery_success_rate": 0.1249,
+        "wall_s": 3.15
+      },
+      "improvement_pct": 45.96,
+      "prompt_seed": 18
+    },
+    {
+      "discard": {
+        "exact_match_rate": 1.0,
+        "draft_tokens_accepted": 128,
+        "diffusion_forwards": 3451,
+        "warm_rounds": 0,
+        "rounds": 881,
+        "accepted_per_forward": 0.0371,
+        "recovery_success_rate": null,
+        "wall_s": 4.69
+      },
+      "reconcile": {
+        "exact_match_rate": 1.0,
+        "draft_tokens_accepted": 103,
+        "diffusion_forwards": 1817,
+        "warm_rounds": 889,
+        "rounds": 906,
+        "accepted_per_forward": 0.0567,
+        "recovery_success_rate": 0.1001,
+        "wall_s": 3.36
+      },
+      "improvement_pct": 52.83,
+      "prompt_seed": 19
+    },
+    {
+      "discard": {
+        "exact_match_rate": 1.0,
+        "draft_tokens_accepted": 161,
+        "diffusion_forwards": 2666,
+        "warm_rounds": 0,
+        "rounds": 685,
+        "accepted_per_forward": 0.0604,
+        "recovery_success_rate": null,
+        "wall_s": 3.72
+      },
+      "reconcile": {
+        "exact_match_rate": 1.0,
+        "draft_tokens_accepted": 138,
+        "diffusion_forwards": 1394,
+        "warm_rounds": 687,
+        "rounds": 709,
+        "accepted_per_forward": 0.099,
+        "recovery_success_rate": 0.1106,
+        "wall_s": 2.68
+      },
+      "improvement_pct": 63.91,
+      "prompt_seed": 20
+    },
+    {
+      "discard": {
+        "exact_match_rate": 1.0,
+        "draft_tokens_accepted": 286,
+        "diffusion_forwards": 2812,
+        "warm_rounds": 0,
+        "rounds": 726,
+        "accepted_per_forward": 0.1017,
+        "recovery_success_rate": null,
+        "wall_s": 4.07
+      },
+      "reconcile": {
+        "exact_match_rate": 1.0,
+        "draft_tokens_accepted": 247,
+        "diffusion_forwards": 1486,
+        "warm_rounds": 737,
+        "rounds": 766,
+        "accepted_per_forward": 0.1662,
+        "recovery_success_rate": 0.1547,
+        "wall_s": 2.98
+      },
+      "improvement_pct": 63.42,
+      "prompt_seed": 21
+    }
+  ]
+}

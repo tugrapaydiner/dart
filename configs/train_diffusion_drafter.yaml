@@ -1,0 +1,47 @@
+# Train the small diffusion drafter against teacher traces
+# (docs/design.md §8 and §16).
+target:
+  model: "tiny:1234"
+  device: cpu
+
+drafter:
+  hidden_size: 128
+  num_layers: 2
+  num_heads: 4
+  ctx_window: 32
+  max_canvas: 16
+
+data:
+  num_prompts: 64
+  prompt_len: 24
+  continuation_len: 32
+  seed: 7
+  # On a real (tokenizer-backed) target, train on the domain mixture from
+  # docs/design.md §8.1 instead of random tokens. Ignored for tiny targets.
+  # prompt_files:
+  #   - benchmarks/prompts/code.jsonl
+  #   - benchmarks/prompts/json_tool.jsonl
+  #   - benchmarks/prompts/math.jsonl
+  #   - benchmarks/prompts/long_context.jsonl
+
+training:
+  steps: 900
+  canvas_length: 8
+  batch_size: 16
+  lr: 3.0e-4
+  noise_min: 0.5
+  noise_max: 1.0
+  weights:
+    denoise: 1.0
+    kl: 0.3
+    accept: 0.5
+    calibration: 0.1
+
+eval:
+  num_prompts: 8
+  max_new_tokens: 32
+  canvas_length: 8
+  denoise_steps: 4
+
+output:
+  checkpoint: checkpoints/diffusion_drafter_tiny.pt

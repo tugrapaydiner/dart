@@ -1,0 +1,22 @@
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.ruff_cache/
+.venv/
+venv/
+dist/
+build/
+*.log
+runs/
+.DS_Store
+
+# Scratch training runs are ignored; the two tiny reference checkpoints that
+# reproduce the committed results (ablation, trained-lane benches) are kept.
+checkpoints/*
+!checkpoints/diffusion_drafter_tiny.pt
+!checkpoints/mtp_heads_tiny.pt
+*.safetensors
+*.bin
+
+# Scratch benchmark runs are ignored; curated resul

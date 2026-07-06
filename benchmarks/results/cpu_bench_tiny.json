@@ -1,0 +1,365 @@
+{
+  "run": {
+    "target": "tiny-seeded",
+    "device": "cpu",
+    "hardware": "CPU",
+    "dtype": "torch.float32",
+    "prompts": 8,
+    "prompts_file": null,
+    "max_new": 48,
+    "draft_len": 4,
+    "torch": "2.12.1+cu130"
+  },
+  "lanes": {
+    "target_only": {
+      "prompts": 8,
+      "exact_match_rate": 1.0,
+      "mean_acceptance_rate": 0.0,
+      "mean_accept_run": 1.0199999999999998,
+      "baseline_ms_total": 298.2,
+      "dart_ms_total": 321.7,
+      "baseline_tok_per_s": 1287.84,
+      "dart_tok_per_s": 1193.8,
+      "speedup_wall": 0.927,
+      "mismatch_count": 0,
+      "rejections": 0,
+      "rejection_position_hist": {},
+      "mean_rejection_position": null,
+      "bench_wall_s": 0.62
+    },
+    "ngram": {
+      "prompts": 8,
+      "exact_match_rate": 1.0,
+      "mean_acceptance_rate": 0.6570499999999999,
+      "mean_accept_run": 1.8,
+      "baseline_ms_total": 294.8,
+      "dart_ms_total": 199.9,
+      "baseline_tok_per_s": 1302.79,
+      "dart_tok_per_s": 1920.93,
+      "speedup_wall": 1.474,
+      "mismatch_count": 0,
+      "rejections": 31,
+      "rejection_position_hist": {
+        "0": 23,
+        "1": 5,
+        "3": 3
+      },
+      "mean_rejection_position": 0.452,
+      "bench_wall_s": 0.49
+    },
+    "ar_draft": {
+      "prompts": 8,
+      "exact_match_rate": 1.0,
+      "mean_acceptance_rate": 0.010549999999999999,
+      "mean_accept_run": 1.05875,
+      "baseline_ms_total": 292.5,
+      "dart_ms_total": 1587.2,
+      "baseline_tok_per_s": 1312.62,
+      "dart_tok_per_s": 241.93,
+      "speedup_wall": 0.184,
+      "mismatch_count": 0,
+      "rejections": 362,
+      "rejection_position_hist": {
+        "0": 349,
+        "1": 13
+      },
+      "mean_rejection_position": 0.036,
+      "bench_wall_s": 1.88
+    },
+    "compressed_kv_int8": {
+      "prompts": 8,
+      "exact_match_rate": 1.0,
+      "mean_acceptance_rate": 1.0,
+      "mean_accept_run": 4.8,
+      "baseline_ms_total": 286.7,
+      "dart_ms_total": 467.9,
+      "baseline_tok_per_s": 1339.34,
+      "dart_tok_per_s": 820.72,
+      "speedup_wall": 0.613,
+      "mismatch_count": 0,
+      "rejections": 0,
+      "rejection_position_hist": {},
+      "mean_rejection_position": null,
+      "bench_wall_s": 0.75,
+      "kv_stats": {
+        "seq_len": 86,
+        "store": "QuantStore",
+        "quantized_tokens": 72,
+        "window_tokens": 14,
+        "logical_compressed_bytes": 20992,
+        "spec": {
+          "bits": 8,
+          "sink_len": 8,
+          "sink_bits": 8,
+          "window_len": 16
+        },
+        "precision_policy": false,
+        "physical_bytes_v0_unpacked": 20992
+      }
+    },
+    "compressed_kv_int4": {
+      "prompts": 8,
+      "exact_match_rate": 1.0,
+      "mean_acceptance_rate": 0.9325249999999999,
+      "mean_accept_run": 4.635,
+      "baseline_ms_total": 285.8,
+      "dart_ms_total": 478.9,
+      "baseline_tok_per_s": 1343.57,
+      "dart_tok_per_s": 801.86,
+      "speedup_wall": 0.597,
+      "mismatch_count": 0,
+      "rejections": 8,
+      "rejection_position_hist": {
+        "0": 4,
+        "1": 1,
+        "2": 2,
+        "3": 1
+      },
+      "mean_rejection_position": 1.0,
+      "bench_wall_s": 0.76,
+      "kv_stats": {
+        "seq_len": 85,
+        "store": "QuantStore",
+        "quantized_tokens": 72,
+        "window_tokens": 13,
+        "logical_compressed_bytes": 16384,
+        "spec": {
+          "bits": 4,
+          "sink_len": 8,
+          "sink_bits": 8,
+          "window_len": 16
+        },
+        "precision_policy": false,
+        "physical_bytes_v0_unpacked": 20480
+      }
+    },
+    "sparse_kv": {
+      "prompts": 8,
+      "exact_match_rate": 1.0,
+      "mean_acceptance_rate": 0.8648,
+      "mean_accept_run": 4.28,
+      "baseline_ms_total": 283.5,
+      "dart_ms_total": 431.3,
+      "baseline_tok_per_s": 1354.53,
+      "dart_tok_per_s": 890.3,
+      "speedup_wall": 0.657,
+      "mismatch_count": 0,
+      "rejections": 22,
+      "rejection_position_hist": {
+        "0": 7,
+        "1": 4,
+        "2": 5,
+        "3": 6
+      },
+      "mean_rejection_position": 1.455,
+      "bench_wall_s": 0.71
+    },
+    "block_sparse_kv": {
+      "prompts": 8,
+      "exact_match_rate": 1.0,
+      "mean_acceptance_rate": 0.4937,
+      "mean_accept_run": 2.91625,
+      "baseline_ms_total": 284.3,
+      "dart_ms_total": 717.9,
+      "baseline_tok_per_s": 1350.59,
+      "dart_tok_per_s": 534.92,
+      "speedup_wall": 0.396,
+      "mismatch_count": 0,
+      "rejections": 110,
+      "rejection_position_hist": {
+        "0": 60,
+        "1": 16,
+        "2": 20,
+        "3": 14
+      },
+      "mean_rejection_position": 0.891,
+      "bench_wall_s": 1.0
+    },
+    "diffusion_discard": {
+      "prompts": 8,
+      "exact_match_rate": 1.0,
+      "mean_acceptance_rate": 0.000725,
+      "mean_accept_run": 1.025,
+      "baseline_ms_total": 308.1,
+      "dart_ms_total": 1810.2,
+      "baseline_tok_per_s": 1246.54,
+      "dart_tok_per_s": 212.14,
+      "speedup_wall": 0.17,
+      "mismatch_count": 0,
+      "rejections": 374,
+      "rejection_position_hist": {
+        "0": 372,
+        "1": 2
+      },
+      "mean_rejection_position": 0.005,
+      "bench_wall_s": 2.12,
+      "drafter_stats": {
+        "diffusion_forwards": 1448,
+        "rounds": 374,
+        "warm_rounds": 0,
+        "warm_rounds_recovered": 0,
+        "proposed_tokens": 2768
+      },
+      "accepted_tokens_per_diffusion_forward": 0.0014
+    },
+    "diffusion_reconcile": {
+      "prompts": 8,
+      "exact_match_rate": 1.0,
+      "mean_acceptance_rate": 0.000725,
+      "mean_accept_run": 1.025,
+      "baseline_ms_total": 298.9,
+      "dart_ms_total": 1150.9,
+      "baseline_tok_per_s": 1284.51,
+      "dart_tok_per_s": 333.66,
+      "speedup_wall": 0.26,
+      "mismatch_count": 0,
+      "rejections": 374,
+      "rejection_position_hist": {
+        "0": 372,
+        "1": 2
+      },
+      "mean_rejection_position": 0.005,
+      "bench_wall_s": 1.45,
+      "drafter_stats": {
+        "diffusion_forwards": 756,
+        "rounds": 374,
+        "warm_rounds": 366,
+        "warm_rounds_recovered": 2,
+        "proposed_tokens": 2768
+      },
+      "accepted_tokens_per_diffusion_forward": 0.0026
+    },
+    "compressed_kv_vq1bit": {
+      "prompts": 8,
+      "exact_match_rate": 1.0,
+      "mean_acceptance_rate": 0.5615375,
+      "mean_accept_run": 3.1537499999999996,
+      "baseline_ms_total": 300.0,
+      "dart_ms_total": 928.2,
+      "baseline_tok_per_s": 1279.9,
+      "dart_tok_per_s": 413.7,
+      "speedup_wall": 0.323,
+      "mismatch_count": 0,
+      "rejections": 85,
+      "rejection_position_hist": {
+        "0": 39,
+        "1": 16,
+        "2": 20,
+        "3": 10
+      },
+      "mean_rejection_position": 1.012,
+      "bench_wall_s": 1.23,
+      "kv_stats": {
+        "seq_len": 87,
+        "store": "PolarVQStore",
+        "quantized_tokens": 72,
+        "window_tokens": 15,
+        "logical_compressed_bytes": 12288,
+        "spec": {
+          "bits": 2,
+          "sink_len": 8,
+          "sink_bits": 8,
+          "window_len": 16
+        },
+        "precision_policy": false
+      }
+    },
+    "mtp_untrained": {
+      "prompts": 8,
+      "exact_match_rate": 1.0,
+      "mean_acceptance_rate": 0.0,
+      "mean_accept_run": 1.0199999999999998,
+      "baseline_ms_total": 304.3,
+      "dart_ms_total": 385.7,
+      "baseline_tok_per_s": 1261.88,
+      "dart_tok_per_s": 995.49,
+      "speedup_wall": 0.789,
+      "mismatch_count": 0,
+      "rejections": 376,
+      "rejection_position_hist": {
+        "0": 376
+      },
+      "mean_rejection_position": 0.0,
+      "bench_wall_s": 0.69
+    },
+    "mtp_trained": {
+      "prompts": 8,
+      "exact_match_rate": 1.0,
+      "mean_acceptance_rate": 0.18887499999999996,
+      "mean_accept_run": 1.57375,
+      "baseline_ms_total": 297.1,
+      "dart_ms_total": 285.6,
+      "baseline_tok_per_s": 1292.32,
+      "dart_tok_per_s": 1344.52,
+      "speedup_wall": 1.04,
+      "mismatch_count": 0,
+      "rejections": 256,
+      "rejection_position_hist": {
+        "0": 229,
+        "1": 23,
+        "2": 4
+      },
+      "mean_rejection_position": 0.121,
+      "bench_wall_s": 0.58
+    },
+    "diffusion_trained_discard": {
+      "prompts": 8,
+      "exact_match_rate": 1.0,
+      "mean_acceptance_rate": 0.11075,
+      "mean_accept_run": 1.8712499999999999,
+      "baseline_ms_total": 300.4,
+      "dart_ms_total": 1316.1,
+      "baseline_tok_per_s": 1278.19,
+      "dart_tok_per_s": 291.77,
+      "speedup_wall": 0.228,
+      "mismatch_count": 0,
+      "rejections": 268,
+      "rejection_position_hist": {
+        "0": 234,
+        "1": 27,
+        "2": 6,
+        "6": 1
+      },
+      "mean_rejection_position": 0.168,
+      "bench_wall_s": 1.62,
+      "drafter_stats": {
+        "diffusion_forwards": 1059,
+        "rounds": 277,
+        "warm_rounds": 0,
+        "warm_rounds_recovered": 0,
+        "proposed_tokens": 2045
+      },
+      "accepted_tokens_per_diffusion_forward": 0.0963
+    },
+    "diffusion_trained_reconcile": {
+      "prompts": 8,
+      "exact_match_rate": 1.0,
+      "mean_acceptance_rate": 0.097325,
+      "mean_accept_run": 1.7325,
+      "baseline_ms_total": 295.1,
+      "dart_ms_total": 866.2,
+      "baseline_tok_per_s": 1301.12,
+      "dart_tok_per_s": 443.31,
+      "speedup_wall": 0.341,
+      "mismatch_count": 0,
+      "rejections": 282,
+      "rejection_position_hist": {
+        "0": 246,
+        "1": 32,
+        "2": 1,
+        "3": 2,
+        "4": 1
+      },
+      "mean_rejection_position": 0.156,
+      "bench_wall_s": 1.16,
+      "drafter_stats": {
+        "diffusion_forwards": 569,
+        "rounds": 290,
+        "warm_rounds": 277,
+        "warm_rounds_recovered": 38,
+        "proposed_tokens": 2138
+      },
+      "accepted_tokens_per_diffusion_forward": 0.1564
+    }
+  }
+}

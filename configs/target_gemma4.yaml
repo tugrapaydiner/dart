@@ -1,0 +1,23 @@
+# Gemma-family target slot (docs/design.md §4).
+#
+# The doc's reference pairing is a Gemma-4-class AR target verifying
+# DiffusionGemma drafts.  Model availability changes fast (docs/design.md §4
+# caution) - pin whatever Gemma-family AR checkpoint you can actually
+# pull, keep tokenizer family matched to your remote diffusion server,
+# and run `python -m dart.verification.tests --config <this>` after.
+mode: exact
+verifier: block
+
+target:
+  model: "hf:google/gemma-2-2b"   # placeholder: swap for your Gemma-4-class checkpoint
+  device: cuda
+  precision: bf16
+
+lanes:
+  ngram: {}
+  # Remote block-diffusion drafter (DiffusionGemma-style) via vLLM:
+  # wire RemoteDiffusionDrafter in code or add a `diffusion_remote` lane;
+  # see dart/drafters/diffusiongemma.py and docs/design.md §16.
+
+scheduler:
+  draft_len: 5
