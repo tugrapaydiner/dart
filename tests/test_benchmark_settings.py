@@ -27,7 +27,7 @@ def test_tiny_benchmark_uses_requested_device_and_dtype(monkeypatch, tmp_path, d
 
     monkeypatch.setattr(run_bench, "build_tiny_target", build)
     monkeypatch.setattr(sys, "argv", [
-        "run_bench", "--device", device, "--dtype", dtype,
+        "run_bench", "--warmup", "1", "--repeats", "2", "--device", device, "--dtype", dtype,
         "--lanes", "target_only", "--prompts", "1", "--max-new", "3",
         "--out", str(tmp_path), "--tag", "settings",
     ])
@@ -54,7 +54,7 @@ def test_benchmark_attention_setting_reaches_the_model(monkeypatch, tmp_path):
 
     monkeypatch.setattr(run_bench, "build_tiny_target", build)
     monkeypatch.setattr(sys, "argv", [
-        "run_bench", "--attention", "sdpa", "--lanes", "target_only",
+        "run_bench", "--warmup", "1", "--repeats", "2", "--attention", "sdpa", "--lanes", "target_only",
         "--prompts", "1", "--max-new", "3", "--out", str(tmp_path),
     ])
     run_bench.main()
@@ -71,7 +71,7 @@ def test_hf_benchmark_records_hidden_states_only_for_mtp(monkeypatch, tmp_path, 
 
     monkeypatch.setattr(TargetModel, "from_pretrained", load)
     monkeypatch.setattr(sys, "argv", [
-        "run_bench", "--target", "hf:local-test", "--lanes", lane,
+        "run_bench", "--warmup", "1", "--repeats", "2", "--target", "hf:local-test", "--lanes", lane,
         "--prompts", "1", "--max-new", "3", "--out", str(tmp_path),
     ])
     run_bench.main()

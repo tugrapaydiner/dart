@@ -24,7 +24,7 @@ def test_baseline_benchmark_does_not_construct_learned_drafters(monkeypatch, tmp
     monkeypatch.setattr(run_bench, "build_tiny_target", lambda **kwargs: target)
     monkeypatch.setattr(run_bench, "DiffusionDrafterModel", unused_model)
     monkeypatch.setattr(run_bench, "MTPHeads", unused_model)
-    args = ["run_bench", "--prompts", "1", "--max-new", "3", "--out", str(tmp_path), "--tag", "check"]
+    args = ["run_bench", "--warmup", "1", "--repeats", "2", "--prompts", "1", "--max-new", "3", "--out", str(tmp_path), "--tag", "check"]
     if lanes is not None:
         args += ["--lanes", lanes]
     monkeypatch.setattr(sys, "argv", args)
@@ -36,7 +36,7 @@ def test_baseline_benchmark_does_not_construct_learned_drafters(monkeypatch, tmp
 
 def test_unknown_lane_is_rejected_before_drafter_construction(monkeypatch, tmp_path):
     monkeypatch.setattr(run_bench, "DiffusionDrafterModel", unused_model)
-    monkeypatch.setattr(sys, "argv", ["run_bench", "--lanes", "unknown", "--out", str(tmp_path)])
+    monkeypatch.setattr(sys, "argv", ["run_bench", "--warmup", "1", "--repeats", "2", "--lanes", "unknown", "--out", str(tmp_path)])
     with pytest.raises(SystemExit, match="unknown lanes"):
         run_bench.main()
 
