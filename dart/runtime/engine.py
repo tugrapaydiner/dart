@@ -229,6 +229,8 @@ class DartEngine:
 
         prompt = list(prompt_ids)
         state, logits = self.target.prefill(prompt)
+        if self.scheduler is not None and hasattr(self.scheduler, "reset"):
+            self.scheduler.reset()
         for d in self._all_drafters():
             if hasattr(d, "after_prefill"):
                 d.after_prefill()

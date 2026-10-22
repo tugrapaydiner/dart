@@ -58,6 +58,9 @@ class HeuristicScheduler:
         self.config = config
         self.acceptance_ewma: dict[str, float] = {}
 
+    def reset(self) -> None:
+        self.acceptance_ewma.clear()
+
     # -------------------------------------------------------------- #
     def observe(self, lane: str, result: VerifyResult, **_timing) -> None:
         if result.n_draft_proposed == 0:
@@ -72,10 +75,7 @@ class HeuristicScheduler:
             return False
         if allowed is not None and lane not in allowed:
             return False  # caller restricted lanes (DecodeConfig.allowed_lanes)
-        # Fallback rule: lanes that keep getting rejected are benched until
-        # something changes (EWMA decays only on use, so benching is sticky
-        # for the rest of the generation - cheap and safe).
-        ewma = self.acceptance_ewma.get(lane)
+        ewma = self.acceptance_ewma.get(lane)  # Benched until the next request.
         return ewma is None or ewma >= self.config.min_lane_acceptance
 
     # -------------------------------------------------------------- #
@@ -161,6 +161,13 @@ class BanditScheduler:
         self.acceptance_ewma: dict[str, float] = {}  # engine/DecodeState compat
         self.kv_gb: dict[str, float] = {}  # last observed KV footprint per lane
         self._last_lane: str | None = None
+
+    def reset(self) -> None:
+        self.counts.clear()
+        self.reward_sums.clear()
+        self.acceptance_ewma.clear()
+        self.kv_gb.clear()
+        self._last_lane = None
 
     # -------------------------------------------------------------- #
     def observe(self, lane: str, result: VerifyResult,
