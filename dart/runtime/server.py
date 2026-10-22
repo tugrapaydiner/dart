@@ -6,7 +6,7 @@ serving belongs in vLLM/SGLang integrations (docs/design.md §16); this server i
 deliberately tiny and single-threaded - one request at a time, batch 1.
 
 Endpoints:
-  POST /v1/completions - OpenAI-style completion (exact greedy), with
+  POST /v1/completions - OpenAI-style completion using configured defaults, with
                          DART acceptance telemetry in the "dart" field.
   POST /v1/dart_demo   - run baseline target-only AND the DART engine on
                          the same prompt; return both outputs, timings,
@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import json
 import time
+from dataclasses import replace
 from http.server import BaseHTTPRequestHandler, HTTPServer
 
 from dart.runtime.engine import DartEngine
@@ -112,13 +113,13 @@ def make_handler(engine: DartEngine, default_max_tokens: int = 256):
                 if "prompt_ids" in req
                 else encode(req.get("prompt", ""))
             )
-            out = engine.generate(
-                prompt_ids,
-                DecodeConfig(
-                    mode="exact",
-                    max_new_tokens=int(req.get("max_tokens", default_max_tokens)),
-                ),
+            defaults = engine.default_decode_config or DecodeConfig(
+                max_new_tokens=default_max_tokens,
             )
+            config = replace(
+                defaults, max_new_tokens=int(req.get("max_tokens", defaults.max_new_tokens)),
+            )
+            out = engine.generate(prompt_ids, config)
             self._send(
                 200,
                 {
@@ -143,12 +144,14 @@ def make_handler(engine: DartEngine, default_max_tokens: int = 256):
                 if "prompt_ids" in req
                 else encode(req.get("prompt", ""))
             )
-            n = int(req.get("max_tokens", 64))
+            defaults = engine.default_decode_config or DecodeConfig(max_new_tokens=64)
+            n = int(req.get("max_tokens", defaults.max_new_tokens))
+            config = replace(defaults, mode="exact", max_new_tokens=n)
 
             t0 = time.perf_counter()
             base_ids = engine.target.greedy_generate(prompt_ids, max_new_tokens=n)
             t1 = time.perf_counter()
-            out = engine.generate(prompt_ids, DecodeConfig(max_new_tokens=n))
+            out = engine.generate(prompt_ids, config)
             t2 = time.perf_counter()
 
             base_text = (
