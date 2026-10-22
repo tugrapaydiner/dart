@@ -11,8 +11,9 @@ import pytest
 
 from dart.drafters.base import NullDrafter
 from dart.drafters.ngram import NGramDrafter
+from dart.models.target import TargetModel
 from dart.runtime.engine import DartEngine
-from dart.runtime.factory import build_engine
+from dart.runtime.factory import build_engine, build_target
 from dart.runtime.scheduler import HeuristicScheduler, SchedulerConfig
 from dart.runtime.types import DecodeConfig
 from tests.conftest import build_tiny_target, random_prompt
@@ -133,3 +134,53 @@ def test_target_model_defaults_to_autodetected_name():
     )
     assert out.metadata["target_model"]  # non-empty autodetected name
     assert out.metadata["target_model"] != "gemma-4-26b-it"
+
+
+@pytest.fixture
+def local_hf_loaders(monkeypatch):
+    monkeypatch.setattr(
+        "dart.models.target.AutoModelForCausalLM.from_pretrained",
+        lambda *args, **kwargs: build_tiny_target().model,
+    )
+    monkeypatch.setattr(
+        "dart.models.target.AutoTokenizer.from_pretrained", lambda *args, **kwargs: None,
+    )
+
+
+@pytest.mark.parametrize("model", ["tiny:1234", "hf:local-test", "local-test"])
+@pytest.mark.parametrize("record_hidden", [None, False, True])
+def test_target_config_controls_hidden_states(local_hf_loaders, model, record_hidden):
+    spec = {"model": model, "device": "cpu"}
+    if record_hidden is not None:
+        spec["record_hidden"] = record_hidden
+    target = build_target(spec)
+    assert target.record_hidden is bool(record_hidden)
+    state, _ = target.prefill([5, 6, 7])
+    if record_hidden:
+        assert target.last_hidden_block.shape == (3, target.model.config.hidden_size)
+    else:
+        assert target.last_hidden_block is None
+    target.forward_block(state, [8])
+    if record_hidden:
+        assert target.last_hidden_block.shape == (1, target.model.config.hidden_size)
+    else:
+        assert target.last_hidden_block is None
+
+
+@pytest.mark.parametrize("record_hidden", [False, True])
+def test_pretrained_target_accepts_hidden_recording(local_hf_loaders, record_hidden):
+    target = TargetModel.from_pretrained("local-test", record_hidden=record_hidden)
+    target.prefill([5, 6, 7])
+    assert (target.last_hidden_block is not None) is record_hidden
+
+
+def test_hf_config_with_mtp_generates_exact_tokens(local_hf_loaders):
+    with build_engine({
+        "target": {"model": "hf:local-test", "record_hidden": True},
+        "lanes": {"mtp": {"num_offsets": 2}},
+    }) as engine:
+        prompt = random_prompt(305, 8)
+        expected = engine.target.greedy_generate(prompt, max_new_tokens=12)
+        result = engine.generate(prompt, DecodeConfig(max_new_tokens=12, draft_len=2))
+    assert result.token_ids == expected
+    assert result.metadata["draft_tokens_proposed"] > 0

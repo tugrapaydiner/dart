@@ -53,6 +53,7 @@ def build_target(spec: dict) -> TargetModel:
         device=device,
         dtype=dtype,
         trust_remote_code=bool(spec.get("trust_remote_code", False)),
+        record_hidden=bool(spec.get("record_hidden", False)),
     )
 
 

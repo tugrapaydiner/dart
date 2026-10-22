@@ -84,6 +84,7 @@ class TargetModel:
         dtype: Optional[torch.dtype] = None,
         attn_implementation: str = "eager",
         trust_remote_code: bool = False,
+        record_hidden: bool = False,
     ) -> "TargetModel":
         if dtype is None:
             dtype = torch.float32 if device == "cpu" else torch.bfloat16
@@ -96,7 +97,7 @@ class TargetModel:
         tokenizer = AutoTokenizer.from_pretrained(
             name_or_path, trust_remote_code=trust_remote_code
         )
-        return cls(model, tokenizer, device=device, dtype=dtype)
+        return cls(model, tokenizer, device=device, dtype=dtype, record_hidden=record_hidden)
 
     def _collect_eos_ids(self) -> frozenset[int]:
         ids: set[int] = set()
