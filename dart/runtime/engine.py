@@ -227,6 +227,7 @@ class DartEngine:
         t_start = time.perf_counter()
 
         prompt = list(prompt_ids)
+        self.target.validate_generation(len(prompt), config.max_new_tokens)
         state, logits = self.target.prefill(prompt)
         if self.scheduler is not None and hasattr(self.scheduler, "reset"):
             self.scheduler.reset()

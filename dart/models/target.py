@@ -116,6 +116,18 @@ class TargetModel:
     # ------------------------------------------------------------------ #
     # Core forward primitives
     # ------------------------------------------------------------------ #
+    def _check_context_length(self, length: int) -> None:
+        limit = getattr(self.model.config, "max_position_embeddings", None)
+        if limit is not None and length > limit:
+            raise ValueError(f"sequence length {length} exceeds context limit {limit}")
+
+    def validate_generation(self, prompt_len: int, max_new_tokens: int) -> None:
+        if prompt_len < 1:
+            raise ValueError("prompt must contain at least one token")
+        if isinstance(max_new_tokens, bool) or not isinstance(max_new_tokens, int) or max_new_tokens < 0:
+            raise ValueError("max_new_tokens must be an integer >= 0")
+        self._check_context_length(prompt_len + max_new_tokens)
+
     def _ids(self, tokens: list[int] | Tensor) -> Tensor:
         if isinstance(tokens, Tensor):
             t = tokens.to(device=self.device, dtype=torch.long)
@@ -155,6 +167,7 @@ class TargetModel:
     def _forward(self, state: TargetState, input_ids: Tensor) -> Tensor:
         past_len = state.seq_len
         total_len = past_len + input_ids.size(1)
+        self._check_context_length(total_len)
         attention_mask = torch.ones(
             (1, total_len), device=self.device, dtype=torch.long
         )
@@ -201,19 +214,22 @@ class TargetModel:
         base_len = state.seq_len
         q_len = p_len + n
         kv_len = base_len + q_len
+        depths: list[int] = []
+        for i, p in enumerate(parent):
+            if p < -1 or p >= i:
+                raise ValueError("tree parents must be -1 or a preceding index")
+            depths.append(0 if p < 0 else depths[p] + 1)
+        self._check_context_length(base_len + p_len + max(depths, default=-1) + 1)
 
         allow = torch.zeros(q_len, kv_len, dtype=torch.bool, device=self.device)
         allow[:, :base_len] = True  # everything sees the committed cache
         for i in range(p_len):      # pending block: ordinary causal
             allow[i, base_len : base_len + i + 1] = True
-        depths = [0] * n
         for i in range(n):
             row = p_len + i
             allow[row, base_len : base_len + p_len] = True  # full pending
             allow[row, base_len + row] = True               # itself
             j = parent[i]
-            if j >= 0:
-                depths[i] = depths[j] + 1
             while j >= 0:
                 allow[row, base_len + p_len + j] = True     # ancestors
                 j = parent[j]
@@ -299,7 +315,9 @@ class TargetModel:
         This is the K=0 decode loop: one forward per token, argmax commit,
         stop at EOS or the token budget.
         """
-        state, logits = self.prefill(prompt_ids)
+        input_ids = self._ids(prompt_ids)
+        self.validate_generation(input_ids.size(1), max_new_tokens)
+        state, logits = self.prefill(input_ids)
         generated: list[int] = []
         next_token = int(torch.argmax(logits).item())
         for _ in range(max_new_tokens):
