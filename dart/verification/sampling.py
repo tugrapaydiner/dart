@@ -59,7 +59,7 @@ def speculative_accept_step(
         accept_prob = 1.0 if p_d > 0.0 else 0.0
     else:
         accept_prob = min(1.0, p_d / q_d)
-    u = float(torch.rand((), generator=generator))
+    u = float(torch.rand((), device=p.device, generator=generator))
     if u < accept_prob:
         return draft_token, True
 
@@ -67,7 +67,7 @@ def speculative_accept_step(
         residual = p.clone()
         residual[draft_token] = 0.0
     else:
-        residual = (p - q_row).clamp_min(0.0)
+        residual = (p - q_row.to(device=p.device)).clamp_min(0.0)
     z = float(residual.sum())
     if z <= 0.0:  # p == q (or numerically so): any p-sample is exact
         residual = p

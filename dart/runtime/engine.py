@@ -207,7 +207,7 @@ class DartEngine:
         sampling = config.mode == "exact_sampling"
         generator = None
         if sampling:
-            generator = torch.Generator()
+            generator = torch.Generator(device=self.target.device)
             generator.manual_seed(config.seed if config.seed is not None else 0)
             verify_fn: VerifyFn = partial(
                 verify_block_sampling,
