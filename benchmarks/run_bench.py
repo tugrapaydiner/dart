@@ -7,10 +7,12 @@ Each measured run must match the complete HF token sequence.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
+import re
 import sys
 import time
-from contextlib import ExitStack
+from contextlib import ExitStack, contextmanager
 from pathlib import Path
 
 import torch
@@ -22,10 +24,12 @@ from benchmarks.exact_match import run_exact_match
 from benchmarks.headroom import BASELINES, measure_headroom
 from benchmarks.profiling import profile_methods
 from benchmarks.timing import measure_methods, summarize_samples
+from dart.diffusion.compact_training import load_compact_checkpoint
 from dart.diffusion.reconciliation import ReconcilePolicy
 from dart.drafters.ar_draft import ARDrafter
 from dart.drafters.base import NullDrafter
 from dart.drafters.block_sparse_kv import BlockSparseKVDrafter
+from dart.drafters.compact_diffusion import CompactDiffusionDrafter
 from dart.drafters.compressed_kv import CompressedKVDrafter
 from dart.drafters.diffusion_small import (
     DiffusionDrafter,
@@ -59,6 +63,7 @@ def synthetic_prompts(n: int, vocab: int, seed: int = 17) -> list[list[int]]:
 def build_rows(
     target, drafter_seed: int = 5, tiny_drafters: bool = True,
     selected: set[str] | None = None,
+    compact_checkpoints: dict[str, str] | None = None, compact_canvas_len: int = 4,
 ):
     vocab = target.model.config.vocab_size
     hidden = target.model.config.hidden_size
@@ -96,6 +101,20 @@ def build_rows(
             heads.load_state_dict(state)
         return MTPDrafter(target, heads)
 
+    def compact(path):
+        model, checkpoint = load_compact_checkpoint(path, target)
+        drafter = CompactDiffusionDrafter(model, canvas_len=compact_canvas_len)
+        drafter.checkpoint_info = {
+            "sha256": hashlib.sha256(Path(path).read_bytes()).hexdigest(),
+            "training_step": checkpoint["step"], "model_config": checkpoint["model_config"],
+            "training_config": checkpoint["training_config"],
+            "training_corpus_hash": checkpoint["metadata"]["corpus_hash"],
+            "learned_parameters": sum(p.numel() for p in model.parameters()),
+            "canvas_len": compact_canvas_len, "denoise_steps": drafter.denoise_steps,
+            "reconcile": drafter.policy.mode,
+        }
+        return drafter
+
     factories = {
         "target_only": NullDrafter,
         "ngram": lambda: NGramDrafter(max_ngram=4),
@@ -128,6 +147,10 @@ def build_rows(
     if target.record_hidden:
         factories["mtp_untrained"] = mtp
         factories["mtp_trained"] = lambda: mtp(trained=True)
+    for name, path in (compact_checkpoints or {}).items():
+        if name in factories or name in BASELINES or name in ("mtp_untrained", "mtp_trained", "ar_draft"):
+            raise ValueError(f"checkpoint name {name!r} is reserved")
+        factories[name] = lambda path=path: compact(path)
     requested = set(factories) if selected is None else set(selected) | {"target_only"}
     unknown = requested - factories.keys()
     if unknown:
@@ -152,7 +175,7 @@ def _state_dict_fits(module: torch.nn.Module, state: dict) -> bool:
     )
 
 
-def build_hf_method(target, max_new_tokens: int):
+def build_hf_method(target, max_new_tokens: int, record_hidden: bool | None = None):
     eos = sorted(target.eos_token_ids)
     pad = getattr(target.model.config, "pad_token_id", None)
     settings = GenerationConfig().to_dict()
@@ -162,7 +185,7 @@ def build_hf_method(target, max_new_tokens: int):
     settings.update(
         max_new_tokens=max_new_tokens, do_sample=False, num_beams=1, use_cache=True,
         eos_token_id=eos or None, pad_token_id=pad if pad is not None else (eos[0] if eos else 0),
-        output_hidden_states=target.record_hidden,
+        output_hidden_states=target.record_hidden if record_hidden is None else record_hidden,
     )
 
     @torch.inference_mode()
@@ -183,6 +206,23 @@ def build_target_method(target, max_new_tokens: int):
         text = target.tokenizer.decode(token_ids, skip_special_tokens=False) if target.tokenizer else None
         return GenerationOutput(token_ids, text, {})
 
+    return generate
+
+
+@contextmanager
+def hidden_recording(target, enabled: bool):
+    previous = target.record_hidden
+    target.record_hidden = enabled
+    try:
+        yield
+    finally:
+        target.record_hidden = previous
+
+
+def with_hidden_recording(target, enabled: bool, method):
+    def generate(prompt):
+        with hidden_recording(target, enabled):
+            return method(prompt)
     return generate
 
 
@@ -209,6 +249,8 @@ def main() -> None:
                     help="artifact basename (default: bench_<timestamp>)")
     ap.add_argument("--lanes", default="target_only,ngram",
                     help="comma-separated subset of lanes to run")
+    ap.add_argument("--compact-checkpoint", action="append", default=[], metavar="NAME=PATH",
+                    help="add a named compact checkpoint; repeat to compare checkpoints")
     args = ap.parse_args()
     if args.threads < 1:
         ap.error("--threads must be at least 1")
@@ -218,9 +260,17 @@ def main() -> None:
         ap.error("use --prompts >= 1, --max-new >= 1, and --draft-len >= 0")
     if args.headroom and args.draft_len < 1:
         ap.error("--headroom requires --draft-len >= 1")
+    compact_checkpoints = {}
+    for item in args.compact_checkpoint:
+        name, separator, path = item.partition("=")
+        if not separator or not path or not re.fullmatch(r"[a-z][a-z0-9_]*", name) or name in compact_checkpoints:
+            ap.error("compact checkpoints need unique NAME=PATH pairs with lowercase names")
+        compact_checkpoints[name] = path
+    if compact_checkpoints and args.draft_len < 1:
+        ap.error("compact drafting requires --draft-len >= 1")
     torch.set_num_threads(args.threads)
-    selected = {name.strip() for name in args.lanes.split(",") if name.strip()}
-    record_hidden = bool(selected & {"mtp_untrained", "mtp_trained"})
+    selected = {name.strip() for name in args.lanes.split(",") if name.strip()} | compact_checkpoints.keys()
+    record_hidden = bool(compact_checkpoints or selected & {"mtp_untrained", "mtp_trained"})
 
     if args.target == "tiny":
         target = build_tiny_target(seed=args.seed, spec={
@@ -262,25 +312,32 @@ def main() -> None:
           f"dtype={target.dtype}  prompts={len(prompts)}  max_new={args.max_new}\n")
 
     try:
-        rows = build_rows(target, tiny_drafters=(args.target == "tiny"), selected=selected)
+        rows = build_rows(
+            target, tiny_drafters=(args.target == "tiny"), selected=selected,
+            compact_checkpoints=compact_checkpoints, compact_canvas_len=args.draft_len,
+        )
     except ValueError as error:
         raise SystemExit(str(error)) from error
 
     results = {}
     cfg = DecodeConfig(max_new_tokens=args.max_new, draft_len=args.draft_len)
+    feature_methods = {name: isinstance(drafter, (MTPDrafter, CompactDiffusionDrafter)) for name, drafter in rows.items()}
     with ExitStack() as stack:
         engines = {
             name: stack.enter_context(DartEngine(target, drafter=drafter))
             for name, drafter in rows.items()
         }
         for name, engine in engines.items():
-            report = run_exact_match(target, engine, prompts, args.max_new, cfg)
+            with hidden_recording(target, feature_methods[name]):
+                report = run_exact_match(target, engine, prompts, args.max_new, cfg)
             if report.exact_rate != 1.0:
                 raise ValueError(f"{name}: greedy exactness failed")
             row = report.summary()
             for key in ("baseline_ms_total", "dart_ms_total", "baseline_tok_per_s", "dart_tok_per_s", "speedup_wall"):
                 row.pop(key, None)
             drafter = rows[name]
+            if hasattr(drafter, "checkpoint_info"):
+                row["checkpoint"] = drafter.checkpoint_info
             if hasattr(drafter, "stats"):
                 row["drafter_stats"] = dict(drafter.stats)
                 forwards = row["drafter_stats"].get("diffusion_forwards", 0)
@@ -289,14 +346,18 @@ def main() -> None:
             if hasattr(drafter, "kv_stats"):
                 row["kv_stats"] = drafter.kv_stats()
             results[name] = row
-        methods = {"hf_greedy": build_hf_method(target, args.max_new), "target_greedy": build_target_method(target, args.max_new)}
+        methods = {"hf_greedy": build_hf_method(target, args.max_new, record_hidden=False), "target_greedy": build_target_method(target, args.max_new)}
         methods.update({name: (lambda prompt, e=engine: e.generate(prompt, cfg)) for name, engine in engines.items()})
+        methods = {name: with_hidden_recording(target, feature_methods.get(name, False), method) for name, method in methods.items()}
         timings = measure_methods(methods, prompts, target.device, warmup=args.warmup, repeats=args.repeats, seed=args.seed)
         profile = profile_methods(methods, prompts, target, engines) if args.profile else None
-        headroom = measure_headroom(
-            {name: methods[name] for name in BASELINES}, prompts, target, cfg,
-            warmup=args.warmup, repeats=args.repeats, seed=args.seed,
-        ) if args.headroom else None
+        headroom = None
+        if args.headroom:
+            with hidden_recording(target, False):
+                headroom = measure_headroom(
+                    {name: methods[name] for name in BASELINES}, prompts, target, cfg,
+                    warmup=args.warmup, repeats=args.repeats, seed=args.seed,
+                )
 
     hf = timings["summary"]["hf_greedy"]
     fastest = min(BASELINES, key=lambda name: timings["summary"][name]["mean_ms"])
@@ -328,6 +389,7 @@ def main() -> None:
         "dtype": str(target.dtype),
         "attention": target.model.config._attn_implementation,
         "record_hidden": target.record_hidden,
+        "record_hidden_by_method": {name: feature_methods.get(name, False) for name in methods},
         "threads": torch.get_num_threads(),
         "prompts": len(prompts),
         "prompts_file": args.prompts_file,
@@ -339,6 +401,7 @@ def main() -> None:
         "warmup": args.warmup, "repeats": args.repeats,
         "timing_scope": "token ids to token ids and decoded text; loading, tokenization, correctness, and warm-up excluded",
         "acceptance_scope": "untimed correctness pass",
+        "memory_scope": "allocator peak with all selected lanes resident",
     }
     out_dir = Path(args.out)
     out_dir.mkdir(parents=True, exist_ok=True)
