@@ -122,15 +122,16 @@ def main() -> None:
         base = target.greedy_generate(ids, max_new_tokens=args.max_new)
         ref_hash = output_hash(base)
         # DART baseline must already equal HF greedy.
-        hf_ok = hf[: len(base)] == base[: len(hf)]
+        hf_ok = hf == base
+        all_exact &= hf_ok
         print(f"[prompt {pi}] {text!r}")
-        print(f"   HF==DART-baseline: {hf_ok}   hash={ref_hash[:12]}")
+        print(f"   HF==DART-baseline: {hf_ok}   tokens={len(hf)}/{len(base)}   hash={ref_hash[:12]}")
         for name, drafter in build_lanes(target).items():
             out = DartEngine(target, drafter=drafter, verifier="block").generate(
                 ids, DecodeConfig(max_new_tokens=args.max_new, draft_len=args.draft_len)
             )
             ok = out.token_ids == base
-            all_exact &= ok and hf_ok
+            all_exact &= ok
             tag = "OK " if ok else "MISMATCH"
             print(f"   {tag} {name:20s} accept={out.metadata['acceptance_rate']:.3f} "
                   f"hash={out.metadata['output_hash'][:12]}")
