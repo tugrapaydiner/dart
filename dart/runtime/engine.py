@@ -178,6 +178,8 @@ class DartEngine:
         sampling mode; greedy modes always use the drafter's argmax
         proposals so exact greedy acceptance is not diluted.
         """
+        if budget <= 0:
+            return [], None
         if sampling and hasattr(drafter, "propose_with_probs"):
             drafts, probs = drafter.propose_with_probs(committed, budget)
             return list(drafts), probs
@@ -275,16 +277,21 @@ class DartEngine:
 
             t0 = time.perf_counter()
             budget = config.max_new_tokens - len(generated)
-            per_round = min(draft_len, budget)
+            per_round = min(draft_len, budget - 1)  # Leave room for the verifier's token.
             if self.verifier_name == "tree":
                 # Tree-capable drafters propose several candidate branches;
                 # plain drafters degrade to a chain, for which tree and
                 # block verification coincide decision-for-decision.
-                if hasattr(drafter, "propose_tree") and per_round > 0:
+                if per_round <= 0:
+                    drafts = DraftTree.chain([])
+                elif hasattr(drafter, "propose_tree"):
                     drafts = drafter.propose_tree(committed_seq, per_round)
                 else:
                     linear = list(drafter.propose(committed_seq, per_round))
                     drafts = DraftTree.chain(linear[:per_round])
+                if not isinstance(drafts, DraftTree):
+                    drafts = DraftTree.chain(list(drafts))
+                drafts = drafts.truncate(per_round)
                 draft_probs = None
             else:
                 drafts, draft_probs = self._propose(
@@ -383,8 +390,6 @@ class DartEngine:
             res_stats.moved_bytes += parked.moved_bytes
         prefetcher.close()
 
-        # The last round may overshoot the budget; greedy streams are
-        # prefix-stable, so truncation preserves exactness.
         generated = generated[: config.max_new_tokens]
 
         trailing_unverified = max(0, len(pending_block) - 1)
