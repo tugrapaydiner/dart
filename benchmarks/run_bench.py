@@ -5,7 +5,7 @@ comparable; every row also reruns the exact-match check, because a
 benchmark row with broken exactness is worthless (docs/design.md §13.4:
 "100% exact greedy match" is the minimum bar, not a stretch goal).
 
-Works out of the box on the tiny seeded target (no downloads, CPU-only);
+Works out of the box on the tiny seeded target (no downloads);
 point --target at "hf:<name>" on a real box for meaningful wall-clock.
 Wall-clock claims are only meaningful from GPU runs with hardware stated
 (docs/benchmark_methodology.md); the markdown artifact records both.
@@ -126,7 +126,11 @@ def build_rows(
         ),
     }
     if tiny_drafters:
-        factories["ar_draft"] = lambda: ARDrafter(build_tiny_target(seed=4321))
+        factories["ar_draft"] = lambda: ARDrafter(build_tiny_target(seed=4321, spec={
+            "device": target.device,
+            "precision": {torch.float32: "fp32", torch.bfloat16: "bf16", torch.float16: "fp16"}[target.dtype],
+            "attn_implementation": target.model.config._attn_implementation,
+        }))
     if target.record_hidden:
         factories["mtp_untrained"] = mtp
         factories["mtp_trained"] = lambda: mtp(trained=True)
@@ -159,8 +163,9 @@ def main() -> None:
     ap.add_argument("--target", default="tiny",
                     help='"tiny" (seeded, no downloads) or "hf:<name>", e.g. hf:gpt2')
     ap.add_argument("--device", default="cpu", choices=["cpu", "cuda"])
-    ap.add_argument("--dtype", default=None,
-                    choices=[None, "float32", "bfloat16", "float16"])
+    ap.add_argument("--dtype", default="float32", choices=["float32", "bfloat16", "float16"])
+    ap.add_argument("--attention", default="eager", choices=["eager", "sdpa"])
+    ap.add_argument("--threads", type=int, default=1)
     ap.add_argument("--prompts", type=int, default=8)
     ap.add_argument("--prompts-file",
                     help="JSONL of {'prompt': ...} text prompts (hf targets only)")
@@ -173,17 +178,26 @@ def main() -> None:
     ap.add_argument("--lanes", default="target_only,ngram",
                     help="comma-separated subset of lanes to run")
     args = ap.parse_args()
+    if args.threads < 1:
+        ap.error("--threads must be at least 1")
+    torch.set_num_threads(args.threads)
+    selected = {name.strip() for name in args.lanes.split(",") if name.strip()}
+    record_hidden = bool(selected & {"mtp_untrained", "mtp_trained"})
 
     if args.target == "tiny":
-        target = build_tiny_target(seed=args.seed, spec={"record_hidden": True})
+        target = build_tiny_target(seed=args.seed, spec={
+            "device": args.device, "record_hidden": record_hidden,
+            "precision": {"float32": "fp32", "bfloat16": "bf16", "float16": "fp16"}[args.dtype],
+            "attn_implementation": args.attention,
+        })
         target_name = "tiny-seeded"
     elif args.target.startswith("hf:"):
         from dart.models.target import TargetModel
 
         target_name = args.target[3:]
-        dtype = getattr(torch, args.dtype) if args.dtype else None
         target = TargetModel.from_pretrained(
-            target_name, device=args.device, dtype=dtype
+            target_name, device=args.device, dtype=getattr(torch, args.dtype),
+            attn_implementation=args.attention, record_hidden=record_hidden,
         )
     else:
         raise SystemExit(f"unknown --target {args.target!r}; use tiny or hf:<name>")
@@ -209,7 +223,6 @@ def main() -> None:
     print(f"target={target_name}  device={args.device} ({hardware})  "
           f"dtype={target.dtype}  prompts={len(prompts)}  max_new={args.max_new}\n")
 
-    selected = {name.strip() for name in args.lanes.split(",") if name.strip()}
     try:
         rows = build_rows(target, tiny_drafters=(args.target == "tiny"), selected=selected)
     except ValueError as error:
@@ -249,6 +262,9 @@ def main() -> None:
         "device": args.device,
         "hardware": hardware,
         "dtype": str(target.dtype),
+        "attention": target.model.config._attn_implementation,
+        "record_hidden": target.record_hidden,
+        "threads": torch.get_num_threads(),
         "prompts": len(prompts),
         "prompts_file": args.prompts_file,
         "max_new": args.max_new,

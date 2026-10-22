@@ -54,6 +54,7 @@ def build_target(spec: dict) -> TargetModel:
         dtype=dtype,
         trust_remote_code=bool(spec.get("trust_remote_code", False)),
         record_hidden=bool(spec.get("record_hidden", False)),
+        attn_implementation=spec.get("attn_implementation", "eager"),
     )
 
 
@@ -73,14 +74,16 @@ def build_tiny_target(seed: int, spec: Optional[dict] = None) -> TargetModel:
         bos_token_id=1,
         eos_token_id=2,
         pad_token_id=0,
-        attn_implementation="eager",
+        attn_implementation=spec.get("attn_implementation", "eager"),
     )
     model = LlamaForCausalLM(cfg)
     return TargetModel(
         model,
         tokenizer=None,
         device=spec.get("device", "cpu"),
-        dtype=torch.float32,
+        dtype={"fp32": torch.float32, "bf16": torch.bfloat16, "fp16": torch.float16}.get(
+            spec.get("precision", "fp32"), torch.float32
+        ),
         record_hidden=bool(spec.get("record_hidden", False)),
     )
 
