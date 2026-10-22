@@ -4,6 +4,7 @@ import argparse
 import json
 import sys
 import time
+from dataclasses import asdict
 from pathlib import Path
 
 import torch
@@ -27,6 +28,8 @@ def main() -> None:
     parser.add_argument("--batch-size", type=int, default=16)
     parser.add_argument("--canvas-len", type=int, default=4)
     parser.add_argument("--learning-rate", type=float, default=0.001)
+    parser.add_argument("--distill-weight", type=float, default=0.0, help="fraction of loss from teacher distributions (0 to 1)")
+    parser.add_argument("--distill-temperature", type=float, default=1.0)
     parser.add_argument("--device", choices=("cpu", "cuda"), default="cpu")
     parser.add_argument("--dtype", choices=("float32", "bfloat16", "float16"), default="float32")
     parser.add_argument("--drafter-dtype", choices=("float32", "bfloat16"), default="float32")
@@ -43,6 +46,7 @@ def main() -> None:
     trainer = CompactTrainer(target, TraceDataset(args.traces), config=CompactTrainingConfig(
         seed=args.seed, batch_size=args.batch_size, canvas_len=args.canvas_len,
         learning_rate=args.learning_rate, dtype=args.drafter_dtype,
+        distill_weight=args.distill_weight, distill_temperature=args.distill_temperature,
     ))
     if args.resume:
         trainer.resume(args.resume)
@@ -69,6 +73,7 @@ def main() -> None:
         "learned_parameters": sum(p.numel() for p in trainer.model.parameters()),
         "peak_gpu_bytes": torch.cuda.max_memory_allocated() if args.device == "cuda" else None,
         "metadata": trainer.metadata,
+        "model_config": asdict(trainer.model.cfg), "training_config": asdict(trainer.config),
     }
     (output / "report.json").write_text(json.dumps(report, indent=2), encoding="utf-8")
     print(json.dumps(report))

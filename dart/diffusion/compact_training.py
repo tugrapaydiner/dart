@@ -30,6 +30,8 @@ class CompactTrainingConfig:
     weight_decay: float = 0.01
     grad_clip: float = 1.0
     full_mask_fraction: float = 0.5
+    distill_weight: float = 0.0
+    distill_temperature: float = 1.0
     cache_shards: int = 8
     dtype: str = "float32"
 
@@ -39,12 +41,14 @@ class CompactTrainingConfig:
         for name in ("batch_size", "canvas_len", "cache_shards"):
             if type(getattr(self, name)) is not int or getattr(self, name) < 1:
                 raise ValueError(f"{name} must be a positive integer")
-        for name in ("learning_rate", "weight_decay", "grad_clip", "full_mask_fraction"):
+        for name in ("learning_rate", "weight_decay", "grad_clip", "full_mask_fraction", "distill_weight", "distill_temperature"):
             value = getattr(self, name)
             if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value):
                 raise ValueError(f"{name} must be finite")
         if self.learning_rate <= 0 or self.grad_clip <= 0 or self.weight_decay < 0 or not 0 <= self.full_mask_fraction <= 1:
             raise ValueError("invalid optimizer or masking settings")
+        if not 0 <= self.distill_weight <= 1 or self.distill_temperature <= 0:
+            raise ValueError("invalid distillation weight or temperature")
         if self.dtype not in ("float32", "bfloat16"):
             raise ValueError("training dtype must be float32 or bfloat16")
 
@@ -137,6 +141,8 @@ class CompactTrainer:
         g, cfg = self.generator, self.config
         b = int(torch.randint(1, cfg.canvas_len + 1, (), generator=g))
         rows = {key: [] for key in ("context_ids", "context_pad_mask", "canvas_tokens", "canvas_masked", "target_hidden", "valid")}
+        if cfg.distill_weight:
+            rows["teacher_hidden"] = []
         for _ in range(cfg.batch_size):
             index = self.eligible[int(torch.randint(len(self.eligible), (), generator=g))]
             trace = self._trace(index)
@@ -159,16 +165,31 @@ class CompactTrainer:
             rows["canvas_masked"].append(masked)
             rows["target_hidden"].append(trace["hidden"][offset])
             rows["valid"].append(valid)
+            if cfg.distill_weight:
+                future = trace["hidden"][offset + 1:offset + 1 + b]  # Each row predicts its label.
+                rows["teacher_hidden"].append(F.pad(future, (0, 0, 0, b - len(labels))))
         return {key: torch.stack(values).to(self.target.device) for key, values in rows.items()}
 
     def train_step(self) -> float:
         self.model.train()
         batch = self.sample_batch()
         valid = batch.pop("valid")
+        teacher_hidden = batch.pop("teacher_hidden", None)
         supervised = valid & batch["canvas_masked"]
         self.optimizer.zero_grad(set_to_none=True)
         logits = self.model(**batch)
         loss = F.cross_entropy(logits[supervised], batch["canvas_tokens"][supervised])
+        if self.config.distill_weight:
+            temperature = self.config.distill_temperature
+            head = self.target.model.get_output_embeddings()
+            with torch.no_grad():
+                teacher_logits = F.linear(teacher_hidden[supervised].to(dtype=head.weight.dtype), head.weight, getattr(head, "bias", None)).float()
+                teacher_log_probs = F.log_softmax(teacher_logits / temperature, dim=-1)
+            distill = F.kl_div(
+                F.log_softmax(logits[supervised] / temperature, dim=-1),
+                teacher_log_probs, reduction="batchmean", log_target=True,
+            ) * temperature ** 2
+            loss = (1 - self.config.distill_weight) * loss + self.config.distill_weight * distill
         if not torch.isfinite(loss):
             raise ValueError("training loss is not finite")
         loss.backward()
@@ -206,7 +227,8 @@ class CompactTrainer:
 
     def resume(self, path: str | Path) -> None:
         data = read_checkpoint(path)
-        if data["metadata"] != self.metadata or data["model_config"] != asdict(self.model.cfg) or data["training_config"] != asdict(self.config):
+        saved_config = CompactTrainingConfig(**data["training_config"])
+        if data["metadata"] != self.metadata or data["model_config"] != asdict(self.model.cfg) or saved_config != self.config:
             raise ValueError("checkpoint data, model, training options, or environment do not match")
         if type(data["step"]) is not int or data["step"] < 0:
             raise ValueError("invalid checkpoint step")
