@@ -19,6 +19,7 @@ from transformers import GenerationConfig
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from benchmarks.exact_match import run_exact_match
+from benchmarks.headroom import BASELINES, measure_headroom
 from benchmarks.profiling import profile_methods
 from benchmarks.timing import measure_methods, summarize_samples
 from dart.diffusion.reconciliation import ReconcilePolicy
@@ -176,6 +177,15 @@ def build_hf_method(target, max_new_tokens: int):
     return generate
 
 
+def build_target_method(target, max_new_tokens: int):
+    def generate(prompt):
+        token_ids = target.greedy_generate(prompt, max_new_tokens)
+        text = target.tokenizer.decode(token_ids, skip_special_tokens=False) if target.tokenizer else None
+        return GenerationOutput(token_ids, text, {})
+
+    return generate
+
+
 def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--target", default="tiny",
@@ -187,6 +197,7 @@ def main() -> None:
     ap.add_argument("--warmup", type=int, default=2)
     ap.add_argument("--repeats", type=int, default=10)
     ap.add_argument("--profile", action="store_true", help="run separate synchronized phase diagnostics")
+    ap.add_argument("--headroom", action="store_true", help="run an offline perfect-draft diagnostic")
     ap.add_argument("--prompts", type=int, default=8)
     ap.add_argument("--prompts-file",
                     help="JSONL of {'prompt': ...} text prompts (hf targets only)")
@@ -205,6 +216,8 @@ def main() -> None:
         ap.error("use --warmup >= 1 and --repeats >= 2")
     if args.prompts < 1 or args.max_new < 1 or args.draft_len < 0:
         ap.error("use --prompts >= 1, --max-new >= 1, and --draft-len >= 0")
+    if args.headroom and args.draft_len < 1:
+        ap.error("--headroom requires --draft-len >= 1")
     torch.set_num_threads(args.threads)
     selected = {name.strip() for name in args.lanes.split(",") if name.strip()}
     record_hidden = bool(selected & {"mtp_untrained", "mtp_trained"})
@@ -276,12 +289,18 @@ def main() -> None:
             if hasattr(drafter, "kv_stats"):
                 row["kv_stats"] = drafter.kv_stats()
             results[name] = row
-        methods = {"hf_greedy": build_hf_method(target, args.max_new)}
+        methods = {"hf_greedy": build_hf_method(target, args.max_new), "target_greedy": build_target_method(target, args.max_new)}
         methods.update({name: (lambda prompt, e=engine: e.generate(prompt, cfg)) for name, engine in engines.items()})
         timings = measure_methods(methods, prompts, target.device, warmup=args.warmup, repeats=args.repeats, seed=args.seed)
         profile = profile_methods(methods, prompts, target, engines) if args.profile else None
+        headroom = measure_headroom(
+            {name: methods[name] for name in BASELINES}, prompts, target, cfg,
+            warmup=args.warmup, repeats=args.repeats, seed=args.seed,
+        ) if args.headroom else None
 
     hf = timings["summary"]["hf_greedy"]
+    fastest = min(BASELINES, key=lambda name: timings["summary"][name]["mean_ms"])
+    vs_fastest = summarize_samples(timings["samples"], fastest, args.seed)
     vs_target = summarize_samples(timings["samples"], "target_only", args.seed)
     hf_total = sum(sample["latency_ms"] for sample in timings["samples"] if sample["method"] == "hf_greedy")
     for name, row in results.items():
@@ -294,6 +313,8 @@ def main() -> None:
             "speedup_wall": measured["speedup"], "bench_wall_s": total / 1_000,
             "speedup_vs_target_only": vs_target[name]["speedup"],
             "ci95_speedup_vs_target_only": vs_target[name]["ci95_speedup"],
+            "speedup_vs_fastest_baseline": vs_fastest[name]["speedup"],
+            "ci95_speedup_vs_fastest_baseline": vs_fastest[name]["ci95_speedup"],
         })
     for name, measured in timings["summary"].items():
         low, high = measured["ci95_ms"]
@@ -314,6 +335,7 @@ def main() -> None:
         "draft_len": args.draft_len,
         "torch": torch.__version__,
         "reference": "hf_greedy", "seed": args.seed,
+        "fastest_baseline": fastest,
         "warmup": args.warmup, "repeats": args.repeats,
         "timing_scope": "token ids to token ids and decoded text; loading, tokenization, correctness, and warm-up excluded",
         "acceptance_scope": "untimed correctness pass",
@@ -323,7 +345,7 @@ def main() -> None:
     base = args.tag or f"bench_{time.strftime('%Y%m%d_%H%M%S')}"
     out_json = out_dir / f"{base}.json"
     out_json.write_text(
-        json.dumps({"run": run_info, "lanes": results, "timing": timings, "profile": profile}, indent=2, default=str),
+        json.dumps({"run": run_info, "lanes": results, "timing": timings, "profile": profile, "headroom": headroom}, indent=2, default=str),
         encoding="utf-8",
     )
 
@@ -344,6 +366,10 @@ def main() -> None:
             f"| {measured['tokens_per_second']:.1f} | {measured['speedup']:.3f}x |"
         )
     (out_dir / f"{base}.md").write_text("\n".join(lines) + "\n", encoding="utf-8")
+    if headroom is not None:
+        budget = headroom["budget"]
+        print(f"Offline perfect draft: {budget['perfect_speedup']:.3f}x vs {budget['fastest_baseline']}; "
+              f"additional draft budget={budget['extra_draft_ms_per_request']:.2f} ms/request")
     print(f"\nwrote {out_json}")
     print("all measured outputs match HF greedy")
 

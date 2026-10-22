@@ -95,6 +95,6 @@ def profile_methods(
         "scope": "separate diagnostic requests with synchronized phase barriers; excluded from headline latency",
         "prefill_scope": "first target model forward, including cache construction inside the model",
         "decode_scope": "everything after that forward, including first-token selection and output decoding",
-        "draft_verify_scope": "engine proposal and verification calls; subsets of decode time, null for HF",
+        "draft_verify_scope": "engine proposal and verification calls; subsets of decode time, null for baselines without an engine",
         "repeats": repeats, "samples": samples, "summary": summary,
     }

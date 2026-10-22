@@ -102,7 +102,7 @@ def test_command_keeps_phase_diagnostics_out_of_timed_samples(monkeypatch, tmp_p
     ])
     run_bench.main()
     data = json.loads((tmp_path / "phases.json").read_text())
-    assert len(data["timing"]["samples"]) == 6
-    assert len(data["profile"]["samples"]) == 6
+    assert len(data["timing"]["samples"]) == 8
+    assert len(data["profile"]["samples"]) == 8
     assert data["profile"]["summary"]["ngram"]["verify_ms"] > 0
     assert "prefill_ms" not in data["timing"]["samples"][0]
