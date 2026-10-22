@@ -351,6 +351,9 @@ class DartEngine:
                 t2 = time.perf_counter()
 
                 drafter.observe(result)
+                for other in self._all_drafters():
+                    if other is not drafter and hasattr(other, "after_verify"):
+                        other.after_verify(result)
                 if self.scheduler is not None:
                     self.scheduler.observe(
                         drafter.name, result,

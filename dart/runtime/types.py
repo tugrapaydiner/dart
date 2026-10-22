@@ -123,6 +123,7 @@ class VerifyResult:
     # verification contract, so it is excluded from equality (the block and
     # reference verifiers may differ here by fp rounding).
     entropy: float = field(default=0.0, compare=False)
+    hidden_index: int = field(default=-1, compare=False)  # Row that predicted the new pending token.
 
     def __post_init__(self) -> None:
         if not self.committed:

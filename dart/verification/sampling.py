@@ -131,4 +131,5 @@ def verify_block_sampling(
         n_draft_accepted=n_accepted,
         all_accepted=(n_accepted == k),
         finished=finished,
+        hidden_index=len(pending_block) + len(committed) - 2,
     )

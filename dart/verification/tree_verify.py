@@ -203,4 +203,5 @@ def verify_tree_greedy(
         finished=finished,
         pending_divergence=divergence,
         entropy=entropy,
+        hidden_index=cur_row,
     )
