@@ -11,12 +11,8 @@ from dart.verification.sampling import speculative_accept_step
 from tests.conftest import build_tiny_target, random_prompt
 from tests.test_exactness import ConstantDrafter
 
-DEVICES = [
-    "cpu",
-    pytest.param("cuda:0", marks=pytest.mark.skipif(
-        not torch.cuda.is_available(), reason="CUDA is unavailable",
-    )),
-]
+CUDA_REQUIRED = pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is unavailable")
+DEVICES = ["cpu", pytest.param("cuda:0", marks=CUDA_REQUIRED)]
 
 
 @pytest.fixture(params=DEVICES)
@@ -90,3 +86,38 @@ def test_sampling_with_a_separate_draft_device(target_device, draft_device):
     assert len(output.token_ids) == 12
     assert output.rounds
     assert output.metadata["distribution_exact"] is True
+
+
+@pytest.mark.parametrize("target_device,proposal_device", [
+    ("cpu", None),
+    ("cpu", "cpu"),
+    pytest.param("cuda:0", None, marks=CUDA_REQUIRED),
+    pytest.param("cuda:0", "cuda:0", marks=CUDA_REQUIRED),
+    pytest.param("cuda:0", "cpu", marks=CUDA_REQUIRED),
+])
+def test_sampled_distribution_matches_target_on_each_device(target_device, proposal_device):
+    expected = torch.tensor([0.0, 0.15, 0.35, 0.5])
+    p = expected.to(target_device)
+    q = None
+    n = 12_000
+    if proposal_device is None:
+        drafts = [2] * n
+        expected_acceptance = float(expected[2])
+    else:
+        q = torch.tensor([0.45, 0.4, 0.1, 0.05], device=proposal_device)
+        drafts = torch.multinomial(
+            q.cpu(), n, replacement=True, generator=torch.Generator().manual_seed(11),
+        ).tolist()
+        expected_acceptance = float(torch.minimum(expected, q.cpu()).sum())
+    generator = torch.Generator(device=target_device).manual_seed(29)
+    counts = [0] * len(expected)
+    accepted = 0
+    for draft in drafts:
+        token, keep = speculative_accept_step(p, q, draft, generator)
+        counts[token] += 1
+        accepted += keep
+    empirical = torch.tensor(counts) / n
+    assert counts[0] == 0
+    assert float((empirical - expected).abs().max()) < 0.025
+    assert abs(accepted / n - expected_acceptance) < 0.025
+    print(f"{target_device}, q={proposal_device}: p={empirical.tolist()}, acceptance={accepted / n:.4f}")
