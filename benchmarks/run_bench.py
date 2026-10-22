@@ -62,82 +62,88 @@ def synthetic_prompts(n: int, vocab: int, seed: int = 17) -> list[list[int]]:
     return out
 
 
-def build_rows(target, drafter_seed: int = 5, tiny_drafters: bool = True):
+def build_rows(
+    target, drafter_seed: int = 5, tiny_drafters: bool = True,
+    selected: set[str] | None = None,
+):
     vocab = target.model.config.vocab_size
     hidden = target.model.config.hidden_size
+    checkpoints = Path(__file__).resolve().parents[1] / "checkpoints"
 
-    torch.manual_seed(drafter_seed)
-    diff_cfg = DiffusionDrafterConfig(
-        vocab_size=vocab, hidden_size=128, num_layers=2, num_heads=4,
-        ctx_window=32, max_canvas=32,
-    )
-    diff_model_a = DiffusionDrafterModel(diff_cfg)
-    diff_model_b = DiffusionDrafterModel(diff_cfg)
-    diff_model_b.load_state_dict(diff_model_a.state_dict())  # identical weights
+    def diffusion(mode, trained=False):
+        checkpoint = checkpoints / "diffusion_drafter_tiny.pt"
+        if trained and not checkpoint.exists():
+            return None
+        torch.manual_seed(drafter_seed)  # Match weights across selected policies.
+        model = DiffusionDrafterModel(DiffusionDrafterConfig(
+            vocab_size=vocab, hidden_size=128, num_layers=2, num_heads=4,
+            ctx_window=32, max_canvas=16 if trained else 32,
+        ))
+        if trained:
+            state = torch.load(checkpoint, map_location="cpu", weights_only=True)
+            if not _state_dict_fits(model, state):
+                return None
+            model.load_state_dict(state)
+        return DiffusionDrafter(
+            model, canvas_len=8, denoise_steps=4,
+            reconcile=ReconcilePolicy(mode=mode, repair_steps=2), device=target.device,
+        )
 
-    rows = {
-        "target_only": NullDrafter(),
-        "ngram": NGramDrafter(max_ngram=4),
-    }
-    if tiny_drafters:
-        # A different-weight tiny model as a cheap AR drafter only makes
-        # sense when the target *is* the tiny model family.
-        draft_model = build_tiny_target(seed=4321)
-        rows["ar_draft"] = ARDrafter(draft_model)
-    rows.update({
-        "compressed_kv_int8": CompressedKVDrafter(
+    def mtp(trained=False):
+        checkpoint = checkpoints / "mtp_heads_tiny.pt"
+        if trained and not checkpoint.exists():
+            return None
+        torch.manual_seed(drafter_seed)
+        heads = MTPHeads(hidden, vocab, num_offsets=3)
+        if trained:
+            state = torch.load(checkpoint, map_location="cpu", weights_only=True)
+            if not _state_dict_fits(heads, state):
+                return None
+            heads.load_state_dict(state)
+        return MTPDrafter(target, heads)
+
+    factories = {
+        "target_only": NullDrafter,
+        "ngram": lambda: NGramDrafter(max_ngram=4),
+        "compressed_kv_int8": lambda: CompressedKVDrafter(
             target, QuantSpec(bits=8, sink_len=8, window_len=16)
         ),
-        "compressed_kv_int4": CompressedKVDrafter(
+        "compressed_kv_int4": lambda: CompressedKVDrafter(
             target, QuantSpec(bits=4, sink_len=8, window_len=16)
         ),
-        "sparse_kv": SparseAttentionDrafter(
+        "sparse_kv": lambda: SparseAttentionDrafter(
             target, TokenDropSpec(sink_len=8, window_len=48)
         ),
-        "block_sparse_kv": BlockSparseKVDrafter(
+        "block_sparse_kv": lambda: BlockSparseKVDrafter(
             target, block_size=8, top_k=2, sink_blocks=1, recent_blocks=2
         ),
-        "diffusion_discard": DiffusionDrafter(
-            diff_model_a, canvas_len=8, denoise_steps=4,
-            reconcile=ReconcilePolicy(mode="discard"),
+        "diffusion_discard": lambda: diffusion("discard"),
+        "diffusion_reconcile": lambda: diffusion("reconcile"),
+        "diffusion_trained_discard": lambda: diffusion("discard", trained=True),
+        "diffusion_trained_reconcile": lambda: diffusion("reconcile", trained=True),
+        "compressed_kv_vq1bit": lambda: CompressedKVDrafter(
+            target, polar_vq_spec(sink_len=8, window_len=16), store_factory=PolarVQStore,
         ),
-        "diffusion_reconcile": DiffusionDrafter(
-            diff_model_b, canvas_len=8, denoise_steps=4,
-            reconcile=ReconcilePolicy(mode="reconcile", repair_steps=2),
-        ),
-        "compressed_kv_vq1bit": CompressedKVDrafter(
-            target,
-            polar_vq_spec(sink_len=8, window_len=16),
-            store_factory=PolarVQStore,
-        ),
-    })
+    }
+    if tiny_drafters:
+        factories["ar_draft"] = lambda: ARDrafter(build_tiny_target(seed=4321))
     if target.record_hidden:
-        rows["mtp_untrained"] = MTPDrafter(
-            target, MTPHeads(hidden, vocab, num_offsets=3)
-        )
-        mtp_ckpt = Path("checkpoints/mtp_heads_tiny.pt")
-        if mtp_ckpt.exists():
-            heads = MTPHeads(hidden, vocab, num_offsets=3)
-            state = torch.load(mtp_ckpt, map_location="cpu", weights_only=True)
-            if _state_dict_fits(heads, state):  # tiny-shaped ckpt, tiny target only
-                heads.load_state_dict(state)
-                rows["mtp_trained"] = MTPDrafter(target, heads)
-    diff_ckpt = Path("checkpoints/diffusion_drafter_tiny.pt")
-    if diff_ckpt.exists():
-        tcfg = DiffusionDrafterConfig(
-            vocab_size=vocab, hidden_size=128, num_layers=2, num_heads=4,
-            ctx_window=32, max_canvas=16,
-        )
-        for mode, steps in (("discard", 4), ("reconcile", 2)):
-            m = DiffusionDrafterModel(tcfg)
-            state = torch.load(diff_ckpt, map_location="cpu", weights_only=True)
-            if not _state_dict_fits(m, state):
-                break
-            m.load_state_dict(state)
-            rows[f"diffusion_trained_{mode}"] = DiffusionDrafter(
-                m, canvas_len=8, denoise_steps=4,
-                reconcile=ReconcilePolicy(mode=mode, repair_steps=steps),
-            )
+        factories["mtp_untrained"] = mtp
+        factories["mtp_trained"] = lambda: mtp(trained=True)
+    requested = set(factories) if selected is None else set(selected) | {"target_only"}
+    unknown = requested - factories.keys()
+    if unknown:
+        raise ValueError(f"unknown lanes {sorted(unknown)}; have {list(factories)}")
+    rows = {}
+    for name, build in factories.items():
+        if name not in requested:
+            continue
+        drafter = build()
+        if drafter is None:
+            if selected is not None:
+                raise ValueError(f"{name}: checkpoint is missing or incompatible")
+            continue
+        rows[name] = drafter
     return rows
 
 
@@ -164,7 +170,7 @@ def main() -> None:
     ap.add_argument("--out", type=str, default="benchmarks/results")
     ap.add_argument("--tag", default=None,
                     help="artifact basename (default: bench_<timestamp>)")
-    ap.add_argument("--lanes", default=None,
+    ap.add_argument("--lanes", default="target_only,ngram",
                     help="comma-separated subset of lanes to run")
     args = ap.parse_args()
 
@@ -203,13 +209,11 @@ def main() -> None:
     print(f"target={target_name}  device={args.device} ({hardware})  "
           f"dtype={target.dtype}  prompts={len(prompts)}  max_new={args.max_new}\n")
 
-    rows = build_rows(target, tiny_drafters=(args.target == "tiny"))
-    if args.lanes:
-        keep = {s.strip() for s in args.lanes.split(",")}
-        unknown = keep - set(rows)
-        if unknown:
-            raise SystemExit(f"unknown lanes {sorted(unknown)}; have {list(rows)}")
-        rows = {n: r for n, r in rows.items() if n in keep or n == "target_only"}
+    selected = {name.strip() for name in args.lanes.split(",") if name.strip()}
+    try:
+        rows = build_rows(target, tiny_drafters=(args.target == "tiny"), selected=selected)
+    except ValueError as error:
+        raise SystemExit(str(error)) from error
 
     results = {}
     for name, drafter in rows.items():
