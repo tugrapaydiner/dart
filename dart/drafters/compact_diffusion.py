@@ -8,7 +8,11 @@ import torch
 import torch.nn.functional as F
 from torch import Tensor, nn
 
+from dart.diffusion.canvas import Canvas
+from dart.diffusion.reconciliation import ReconcilePolicy
+from dart.drafters.diffusion_small import DiffusionDrafter
 from dart.models.target import TargetModel
+from dart.runtime.types import VerifyResult
 
 MAX_LEARNED_PARAMETERS = 5_000_000
 
@@ -120,3 +124,59 @@ class CompactDiffusionModel(nn.Module):
         future = features.unsqueeze(1) + self.output_proj(self.norm(x[:, 1 + c:]))
         bias = getattr(outputs, "bias", None)
         return F.linear(future.to(dtype=outputs.weight.dtype), outputs.weight.detach(), bias.detach() if bias is not None else None).float()
+
+
+class CompactDiffusionDrafter(DiffusionDrafter):
+    """Inference lane using target features from prefill and verification."""
+
+    def __init__(
+        self, model: CompactDiffusionModel, *, canvas_len: int = 4,
+        denoise_steps: int = 1, min_confidence: float = 0.65,
+        adaptive_stop: bool = True, reconcile: ReconcilePolicy | None = None,
+        seed: int = 0,
+    ):
+        target = model._target()
+        if target is None or not target.record_hidden:
+            raise ValueError("compact drafting requires a live TargetModel(record_hidden=True)")
+        for name, value in (("canvas_len", canvas_len), ("denoise_steps", denoise_steps)):
+            if type(value) is not int or value < 1:
+                raise ValueError(f"{name} must be a positive integer")
+        super().__init__(
+            model, canvas_len=canvas_len, denoise_steps=denoise_steps,
+            min_confidence=min_confidence, adaptive_stop=adaptive_stop,
+            reconcile=reconcile, device=target.device, seed=seed,
+        )
+        self.target = target
+        self._hidden: Tensor | None = None
+
+    def _model_fn(self, context_ids: Tensor, canvas: Canvas) -> Tensor:
+        if self._hidden is None:
+            raise RuntimeError("call after_prefill before compact drafting")
+        context = context_ids[-self.model.cfg.ctx_window:].unsqueeze(0)
+        return self.model(
+            context, torch.zeros_like(context, dtype=torch.bool),
+            canvas.tokens.unsqueeze(0), canvas.masked.unsqueeze(0),
+            self._hidden.unsqueeze(0),
+        )[0]
+
+    def _read_hidden(self, index: int) -> None:
+        block = self.target.last_hidden_block
+        if block is None:
+            raise RuntimeError("target hidden states are unavailable")
+        self._hidden = block[index].detach()
+
+    def after_prefill(self) -> None:
+        self.reset()
+        self._read_hidden(-1)
+
+    def observe(self, result: VerifyResult) -> None:
+        super().observe(result)
+        self._read_hidden(result.hidden_index)
+
+    def after_verify(self, result: VerifyResult) -> None:
+        self.reset()  # Another lane consumed the old repair context.
+        self._read_hidden(result.hidden_index)
+
+    def reset(self) -> None:
+        super().reset()
+        self._hidden = None
