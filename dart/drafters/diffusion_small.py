@@ -139,6 +139,7 @@ class DiffusionDrafter:
         self._last_canvas: Optional[Canvas] = None
         self._warm: Optional[Canvas] = None
         self._used_warm = False
+        self._context: list[int] = []
         self.stats = {
             "diffusion_forwards": 0,
             "rounds": 0,
@@ -183,8 +184,9 @@ class DiffusionDrafter:
         if b <= 0:
             return []
 
-        warm = self._warm
+        warm = self._warm if committed == self._context else None
         self._warm = None
+        self._context = list(committed)
         self._used_warm = warm is not None
         if warm is not None:
             canvas = warm.sliced(0, b) if warm.length > b else warm.padded_to(b)
@@ -211,6 +213,7 @@ class DiffusionDrafter:
         return canvas.as_draft()
 
     def observe(self, result: VerifyResult) -> None:
+        self._context.extend(result.committed)
         # Credit a reconciled round when its repaired canvas yielded >=1 accept.
         if self._used_warm and result.n_draft_accepted > 0:
             self.stats["warm_rounds_recovered"] += 1
@@ -222,3 +225,4 @@ class DiffusionDrafter:
         self._last_canvas = None
         self._warm = None
         self._used_warm = False
+        self._context = []
