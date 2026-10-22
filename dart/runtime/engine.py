@@ -195,10 +195,7 @@ class DartEngine:
                 raise ValueError("text prompt requires a tokenizer; pass token ids")
             prompt_ids = self.target.tokenizer.encode(prompt_ids)
         config = config or self.default_decode_config or DecodeConfig()
-        if config.mode not in ("exact", "exact_sampling", "approx"):
-            raise ValueError(f"unknown mode {config.mode!r}")
-        if config.mode == "approx" and config.verify_every < 1:
-            raise ValueError("verify_every must be >= 1")
+        config.validate()
         if self.verifier_name == "tree" and config.mode != "exact":
             raise ValueError(
                 "the tree verifier supports exact (greedy) mode only; "

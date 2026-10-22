@@ -21,6 +21,7 @@ exactly the K=0 case of the same code path.
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass, field
 from typing import Literal, Optional
 
@@ -66,6 +67,37 @@ class DecodeConfig:
     seed: Optional[int] = None
     # Where the full-precision verifier KV lives (reported in metadata, docs/design.md §2.4).
     full_kv_residency: Literal["gpu", "cpu_pinned"] = "gpu"
+
+    def __post_init__(self) -> None:
+        self.validate()
+
+    def validate(self) -> None:
+        if self.mode not in ("exact", "exact_sampling", "approx"):
+            raise ValueError(f"unknown mode {self.mode!r}")
+        for name, minimum in (
+            ("max_new_tokens", 0), ("draft_len", 0), ("canvas_len", 0), ("verify_every", 1),
+        ):
+            value = getattr(self, name)
+            if isinstance(value, bool) or not isinstance(value, int) or value < minimum:
+                raise ValueError(f"{name} must be an integer >= {minimum}")
+        if (
+            isinstance(self.temperature, bool)
+            or not isinstance(self.temperature, (int, float))
+            or not math.isfinite(self.temperature)
+            or self.temperature < 0
+        ):
+            raise ValueError("temperature must be finite and >= 0")
+        if self.seed is not None and (
+            isinstance(self.seed, bool) or not isinstance(self.seed, int)
+        ):
+            raise ValueError("seed must be an integer or None")
+        if self.full_kv_residency not in ("gpu", "cpu_pinned"):
+            raise ValueError("full_kv_residency must be 'gpu' or 'cpu_pinned'")
+        if self.allowed_lanes is not None and (
+            not isinstance(self.allowed_lanes, list)
+            or any(not isinstance(lane, str) for lane in self.allowed_lanes)
+        ):
+            raise ValueError("allowed_lanes must be a list of names or None")
 
 
 @dataclass
