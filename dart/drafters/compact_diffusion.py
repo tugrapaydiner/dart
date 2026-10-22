@@ -26,6 +26,7 @@ class CompactDrafterConfig:
     ctx_window: int = 32
     max_canvas: int = 8
     dropout: float = 0.0
+    embedding_init_std: float = 1.0
 
     def __post_init__(self):
         for name in ("hidden_size", "num_layers", "num_heads", "ffn_mult", "ctx_window", "max_canvas"):
@@ -35,6 +36,9 @@ class CompactDrafterConfig:
             raise ValueError("hidden_size must be divisible by num_heads")
         if not math.isfinite(self.dropout) or not 0 <= self.dropout < 1:
             raise ValueError("dropout must be finite and in [0, 1)")
+        std = self.embedding_init_std
+        if isinstance(std, bool) or not isinstance(std, (int, float)) or not math.isfinite(std) or std <= 0:
+            raise ValueError("embedding_init_std must be positive and finite")
 
     def parameter_count(self, target_hidden_size: int) -> int:
         d, m = self.hidden_size, self.ffn_mult
@@ -67,6 +71,10 @@ class CompactDiffusionModel(nn.Module):
         nn.init.normal_(self.mask_emb, std=0.02)
         self.pos_emb = nn.Embedding(1 + self.cfg.ctx_window + self.cfg.max_canvas, d, device=device)
         self.type_emb = nn.Embedding(3, d, device=device)
+        if self.cfg.embedding_init_std != 1.0:
+            with torch.no_grad():
+                self.pos_emb.weight.mul_(self.cfg.embedding_init_std)  # Preserve the other initialization draws.
+                self.type_emb.weight.mul_(self.cfg.embedding_init_std)
         self.layers = nn.ModuleList([
             nn.TransformerEncoderLayer(
                 d_model=d, nhead=self.cfg.num_heads, dim_feedforward=d * self.cfg.ffn_mult,

@@ -228,7 +228,8 @@ class CompactTrainer:
     def resume(self, path: str | Path) -> None:
         data = read_checkpoint(path)
         saved_config = CompactTrainingConfig(**data["training_config"])
-        if data["metadata"] != self.metadata or data["model_config"] != asdict(self.model.cfg) or saved_config != self.config:
+        saved_model_config = CompactDrafterConfig(**data["model_config"])
+        if data["metadata"] != self.metadata or saved_model_config != self.model.cfg or saved_config != self.config:
             raise ValueError("checkpoint data, model, training options, or environment do not match")
         if type(data["step"]) is not int or data["step"] < 0:
             raise ValueError("invalid checkpoint step")

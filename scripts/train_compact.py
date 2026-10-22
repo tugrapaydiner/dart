@@ -13,6 +13,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from dart.data.teacher import TraceDataset
 from dart.diffusion.compact_training import CompactTrainer, CompactTrainingConfig
+from dart.drafters.compact_diffusion import CompactDrafterConfig
 from dart.models.target import TargetModel
 
 
@@ -30,6 +31,7 @@ def main() -> None:
     parser.add_argument("--learning-rate", type=float, default=0.001)
     parser.add_argument("--distill-weight", type=float, default=0.0, help="fraction of loss from teacher distributions (0 to 1)")
     parser.add_argument("--distill-temperature", type=float, default=1.0)
+    parser.add_argument("--embedding-init-std", type=float, default=1.0, help="initial std for position and type embeddings")
     parser.add_argument("--device", choices=("cpu", "cuda"), default="cpu")
     parser.add_argument("--dtype", choices=("float32", "bfloat16", "float16"), default="float32")
     parser.add_argument("--drafter-dtype", choices=("float32", "bfloat16"), default="float32")
@@ -43,11 +45,15 @@ def main() -> None:
         parser.error("output directory must be empty; resume into a new directory")
     torch.set_num_threads(args.threads)
     target = TargetModel.from_pretrained(args.model, device=args.device, dtype=getattr(torch, args.dtype), attn_implementation=args.attention)
-    trainer = CompactTrainer(target, TraceDataset(args.traces), config=CompactTrainingConfig(
-        seed=args.seed, batch_size=args.batch_size, canvas_len=args.canvas_len,
-        learning_rate=args.learning_rate, dtype=args.drafter_dtype,
-        distill_weight=args.distill_weight, distill_temperature=args.distill_temperature,
-    ))
+    trainer = CompactTrainer(
+        target, TraceDataset(args.traces),
+        model_config=CompactDrafterConfig(embedding_init_std=args.embedding_init_std),
+        config=CompactTrainingConfig(
+            seed=args.seed, batch_size=args.batch_size, canvas_len=args.canvas_len,
+            learning_rate=args.learning_rate, dtype=args.drafter_dtype,
+            distill_weight=args.distill_weight, distill_temperature=args.distill_temperature,
+        ),
+    )
     if args.resume:
         trainer.resume(args.resume)
     if trainer.step >= args.steps:
