@@ -19,6 +19,7 @@ from transformers import GenerationConfig
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from benchmarks.exact_match import run_exact_match
+from benchmarks.profiling import profile_methods
 from benchmarks.timing import measure_methods, summarize_samples
 from dart.diffusion.reconciliation import ReconcilePolicy
 from dart.drafters.ar_draft import ARDrafter
@@ -185,6 +186,7 @@ def main() -> None:
     ap.add_argument("--threads", type=int, default=1)
     ap.add_argument("--warmup", type=int, default=2)
     ap.add_argument("--repeats", type=int, default=10)
+    ap.add_argument("--profile", action="store_true", help="run separate synchronized phase diagnostics")
     ap.add_argument("--prompts", type=int, default=8)
     ap.add_argument("--prompts-file",
                     help="JSONL of {'prompt': ...} text prompts (hf targets only)")
@@ -277,6 +279,7 @@ def main() -> None:
         methods = {"hf_greedy": build_hf_method(target, args.max_new)}
         methods.update({name: (lambda prompt, e=engine: e.generate(prompt, cfg)) for name, engine in engines.items()})
         timings = measure_methods(methods, prompts, target.device, warmup=args.warmup, repeats=args.repeats, seed=args.seed)
+        profile = profile_methods(methods, prompts, target, engines) if args.profile else None
 
     hf = timings["summary"]["hf_greedy"]
     vs_target = summarize_samples(timings["samples"], "target_only", args.seed)
@@ -320,7 +323,7 @@ def main() -> None:
     base = args.tag or f"bench_{time.strftime('%Y%m%d_%H%M%S')}"
     out_json = out_dir / f"{base}.json"
     out_json.write_text(
-        json.dumps({"run": run_info, "lanes": results, "timing": timings}, indent=2, default=str),
+        json.dumps({"run": run_info, "lanes": results, "timing": timings, "profile": profile}, indent=2, default=str),
         encoding="utf-8",
     )
 
