@@ -6,7 +6,9 @@ import sys
 import pytest
 
 from benchmarks import run_bench
+from dart.models.target import TargetModel
 from tests.conftest import build_tiny_target, random_prompt
+from tests.test_sampling_devices import DEVICES
 
 
 def test_command_records_references_and_raw_timings(monkeypatch, tmp_path):
@@ -55,3 +57,11 @@ def test_hf_reference_returns_decoded_text():
     target.tokenizer = Tokenizer()
     result = run_bench.build_hf_method(target, 3)([7, 8, 9])
     assert result.text == str(result.token_ids)
+
+
+@pytest.mark.parametrize("device", DEVICES)
+@pytest.mark.parametrize("prompt", [[0, 1, 2], [7, 0, 8], [0, 0, 7]])
+def test_hf_reference_keeps_prompt_tokens_equal_to_the_padding_id(device, prompt):
+    target = TargetModel(build_tiny_target().model, device=device)
+    expected = target.greedy_generate(prompt, max_new_tokens=6)
+    assert run_bench.build_hf_method(target, 6)(prompt).token_ids == expected

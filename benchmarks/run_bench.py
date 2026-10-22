@@ -169,7 +169,7 @@ def build_hf_method(target, max_new_tokens: int):
     def generate(prompt):
         target.validate_generation(len(prompt), max_new_tokens)
         ids = torch.tensor([prompt], device=target.device)
-        output = target.model.generate(ids, **settings)  # Override model-specific generation presets.
+        output = target.model.generate(ids, attention_mask=torch.ones_like(ids), **settings)  # Every prompt token is real input.
         token_ids = output[0, len(prompt):].tolist()
         text = target.tokenizer.decode(token_ids, skip_special_tokens=False) if target.tokenizer else None
         return GenerationOutput(token_ids, text, {})
