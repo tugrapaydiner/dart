@@ -223,6 +223,6 @@ def make_handler(engine: DartEngine, default_max_tokens: int = 256):
 
 
 def serve(engine: DartEngine, host: str = "127.0.0.1", port: int = 8400) -> None:
-    httpd = HTTPServer((host, port), make_handler(engine))
-    print(f"DART serving on http://{host}:{port}  (demo at /demo)")
-    httpd.serve_forever()
+    with HTTPServer((host, port), make_handler(engine)) as httpd:
+        print(f"DART serving on http://{host}:{httpd.server_port}  (demo at /demo)", flush=True)
+        httpd.serve_forever()

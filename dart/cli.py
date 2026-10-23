@@ -18,9 +18,11 @@ def _parser() -> argparse.ArgumentParser:
     commands = parser.add_subparsers(dest="command", required=True)
     check = commands.add_parser("check", help="compare complete outputs with HF greedy")
     bench = commands.add_parser("bench", help="repeat latency comparisons and separate phase profiling")
-    for command in (check, bench):
+    demo = commands.add_parser("demo", help="serve the comparison page on localhost")
+    for command in (check, bench, demo):
         command.add_argument("--model", required=True, help="existing local Supra-50M model directory")
         command.add_argument("--device", choices=("cpu", "cuda"), default="cpu")
+    for command in (check, bench):
         command.add_argument("--corpus", help="versioned corpus directory; otherwise generate the fixed pilot")
         command.add_argument("--split", choices=("train", "validation", "test"), default="validation")
         command.add_argument("--seed", type=int, default=17, help="pilot seed; also controls benchmark ordering")
@@ -28,6 +30,7 @@ def _parser() -> argparse.ArgumentParser:
     bench.add_argument("--per-workload", type=int, default=1, help="first sorted IDs per workload, 1-32 (default: 1)")
     bench.add_argument("--warmup", type=int, default=2, help="warm-up passes, 1-10 (default: 2)")
     bench.add_argument("--repeats", type=int, default=10, help="measured repeats, 2-100 (default: 10)")
+    demo.add_argument("--port", type=int, default=8400, help="localhost port; 0 picks a free port (default: 8400)")
     return parser
 
 
@@ -118,10 +121,27 @@ def _run(args) -> int:
     return 0
 
 
+def _demo(args) -> int:
+    if not 0 <= args.port <= 65535:
+        raise ValueError("port must be from 0 to 65535")
+    from dart.presets import supra_config
+    from dart.runtime.factory import build_engine
+    from dart.runtime.server import serve
+
+    with build_engine(supra_config(args.model, args.device)) as engine:
+        try:
+            serve(engine, port=args.port)
+        except KeyboardInterrupt:
+            return 130
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = _parser()
     args = parser.parse_args(argv)
     try:
+        if args.command == "demo":
+            return _demo(args)
         return _run(args)
     except (ValueError, OSError) as error:
         parser.error(str(error))
