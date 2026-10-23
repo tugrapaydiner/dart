@@ -56,6 +56,7 @@ def build_target(spec: dict) -> TargetModel:
         trust_remote_code=bool(spec.get("trust_remote_code", False)),
         record_hidden=bool(spec.get("record_hidden", False)),
         attn_implementation=spec.get("attn_implementation", "eager"),
+        local_files_only=bool(spec.get("local_files_only", False)),
     )
 
 
@@ -205,6 +206,11 @@ def decode_defaults(cfg: dict):
 def build_engine(cfg: dict):
     from dart.runtime.engine import DartEngine
 
+    threads = cfg.get("threads")
+    if threads is not None:
+        if type(threads) is not int or threads < 1:
+            raise ValueError("threads must be an integer >= 1")
+        torch.set_num_threads(threads)  # Applies to the whole process.
     target = build_target(cfg["target"])
     defaults = decode_defaults(cfg)
     lane_specs: dict = cfg.get("lanes", {})

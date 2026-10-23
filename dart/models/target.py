@@ -94,6 +94,7 @@ class TargetModel:
         attn_implementation: str = "eager",
         trust_remote_code: bool = False,
         record_hidden: bool = False,
+        local_files_only: bool = False,
     ) -> "TargetModel":
         if dtype is None:
             dtype = torch.float32 if device == "cpu" else torch.bfloat16
@@ -102,9 +103,10 @@ class TargetModel:
             torch_dtype=dtype,
             attn_implementation=attn_implementation,
             trust_remote_code=trust_remote_code,
+            local_files_only=local_files_only,
         )
         tokenizer = AutoTokenizer.from_pretrained(
-            name_or_path, trust_remote_code=trust_remote_code
+            name_or_path, trust_remote_code=trust_remote_code, local_files_only=local_files_only
         )
         return cls(model, tokenizer, device=device, dtype=dtype, record_hidden=record_hidden)
 
