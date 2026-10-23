@@ -4,13 +4,18 @@ import re
 from pathlib import Path
 
 
+def local_model_path(model_path: str | Path) -> Path:
+    directory = Path(model_path).expanduser().resolve()
+    if not directory.is_dir() or not (directory / "config.json").is_file():
+        raise ValueError("provide an existing local model directory with config.json")
+    return directory
+
+
 def supra_config(model_path: str | Path, device: str = "cpu") -> dict:
     """Local Supra-50M settings selected by full-output checks and timing pilots."""
     if not isinstance(device, str) or not re.fullmatch(r"cpu|cuda(?::(?:0|[1-9][0-9]*))?", device):
         raise ValueError("Supra presets support cpu or cuda")
-    directory = Path(model_path).expanduser().resolve()
-    if not directory.is_dir() or not (directory / "config.json").is_file():
-        raise ValueError("provide an existing local model directory with config.json")
+    directory = local_model_path(model_path)
     return {
         "threads": 1,
         "mode": "exact",
