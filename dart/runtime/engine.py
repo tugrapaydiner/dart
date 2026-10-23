@@ -2,8 +2,8 @@
 
 Modes (docs/design.md §2):
 
-  * ``exact``          - greedy; output is byte-identical to
-                         ``TargetModel.greedy_generate`` by construction.
+  * ``exact``          - greedy verification. Compare complete outputs with a
+                         matching reference to check numerical equivalence.
   * ``exact_sampling`` - speculative sampling; the emitted distribution is
                          exactly the target's sampling distribution (see
                          verification/sampling.py).  Trace-level identity
@@ -416,11 +416,11 @@ class DartEngine:
 
         trailing_unverified = max(0, len(pending_block) - 1)
         if config.mode == "exact":
-            exact_equiv = True
+            greedy_verified = True
         elif config.mode == "approx":
-            exact_equiv = divergence_total == 0 and trailing_unverified == 0
+            greedy_verified = divergence_total == 0 and trailing_unverified == 0
         else:
-            exact_equiv = False  # sampling: distributional, not trace-level
+            greedy_verified = False
 
         metrics.tokens_generated = len(generated)
         metrics.wall_time_ms = (time.perf_counter() - t_start) * 1000.0
@@ -434,7 +434,8 @@ class DartEngine:
         metadata = metrics.to_metadata(
             run_id=run_id,
             verifier=("sampling" if sampling else self.verifier_name),
-            exact_greedy_equivalent=exact_equiv,
+            exact_greedy_equivalent=None,  # No reference generation was run.
+            greedy_verified=greedy_verified,
             output_hash=output_hash(generated),
             finished_eos=bool(generated and generated[-1] in self.target.eos_token_ids),
             gpu_kv_gb=round(kv_gb, 6),

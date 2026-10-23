@@ -18,9 +18,8 @@ Drafters that only return tokens (n-gram, diffusion, ...) are treated as
 one-hot proposals: q(d) = 1, so acceptance is p(d) and the residual is p
 with d zeroed.  This is still exact; richer q only improves acceptance.
 
-The guarantee is DISTRIBUTIONAL, not trace-level: a sampled DART run will
-not reproduce some other run's token sequence, and metadata reports
-``exact_greedy_equivalent: false`` accordingly.
+The guarantee is DISTRIBUTIONAL, not trace-level. Sampling metadata reports
+``greedy_verified: false``. Reference equality is left unmeasured (None).
 """
 
 from __future__ import annotations

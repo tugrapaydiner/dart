@@ -36,7 +36,7 @@ Lane = Literal[
     "block_sparse_kv",
 ]
 
-# exact          - greedy, byte-identical to the target greedy baseline
+# exact          - greedy verification; numerical equality needs a reference check
 # exact_sampling - speculative sampling; target *distribution* preserved
 # approx         - greedy commits with verification skipped some rounds
 Mode = Literal["exact", "exact_sampling", "approx"]
@@ -147,7 +147,12 @@ class RoundRecord:
 
 @dataclass
 class GenerationOutput:
-    """Result of ``DartEngine.generate``."""
+    """Result of ``DartEngine.generate``.
+
+    Metadata separates ``greedy_verified`` from ``exact_greedy_equivalent``.
+    The latter is None because the engine does not run a reference comparison.
+    Floating-point results can depend on block shape, precision and backend.
+    """
 
     token_ids: list[int]  # generated tokens only (no prompt)
     text: Optional[str]

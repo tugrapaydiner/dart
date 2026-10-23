@@ -45,7 +45,8 @@ def test_sampling_runs_and_repeats_on_each_device(sampling_target, lane):
     assert len(first.token_ids) == config.max_new_tokens
     assert first.rounds
     assert first.metadata["distribution_exact"] is True
-    assert first.metadata["exact_greedy_equivalent"] is False
+    assert first.metadata["exact_greedy_equivalent"] is None
+    assert first.metadata["greedy_verified"] is False
     if lane == "ar":
         assert first.metadata["acceptance_rate"] > 0.9
 

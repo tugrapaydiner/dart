@@ -98,7 +98,8 @@ def test_engine_exact_under_adversarial_drafts(tiny_target, drafter_cls, seed, p
     base = _baseline(tiny_target, prompt, n)
     assert out.token_ids == base
     assert out.metadata["output_hash"] == output_hash(base)
-    assert out.metadata["exact_greedy_equivalent"] is True
+    assert out.metadata["exact_greedy_equivalent"] is None
+    assert out.metadata["greedy_verified"] is True
 
 
 @pytest.mark.parametrize("seed,plen", PROMPTS[:3])
