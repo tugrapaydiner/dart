@@ -145,6 +145,8 @@ class DiffusionDrafter:
             "rounds": 0,
             "warm_rounds": 0,  # rounds that drafted from a reconciled canvas
             "warm_rounds_recovered": 0,  # ...of which >=1 repaired token was accepted
+            "restart_no_anchors": 0,
+            "restart_failed_repair": 0,
             "proposed_tokens": 0,
         }
 
@@ -187,9 +189,14 @@ class DiffusionDrafter:
         warm = self._warm if committed == self._context else None
         self._warm = None
         self._context = list(committed)
+        if warm is not None:
+            warm = warm.sliced(0, b) if warm.length > b else warm.padded_to(b)
+            if self.policy.mode == "adaptive" and warm.num_masked == warm.length:
+                warm = None  # Trimming can remove the last reusable token.
+                self.stats["restart_no_anchors"] += 1
         self._used_warm = warm is not None
         if warm is not None:
-            canvas = warm.sliced(0, b) if warm.length > b else warm.padded_to(b)
+            canvas = warm
             steps = self.policy.repair_steps
             self.stats["warm_rounds"] += 1
         else:
@@ -220,6 +227,9 @@ class DiffusionDrafter:
         self._warm = make_warm_canvas(
             self._last_canvas, result, self.policy, generator=self.gen
         )
+        if self.policy.mode == "adaptive" and self._used_warm and result.n_draft_accepted == 0 and self._warm is not None:
+            self._warm = None  # Retry reuse after a fresh block.
+            self.stats["restart_failed_repair"] += 1
 
     def reset(self) -> None:
         self._last_canvas = None

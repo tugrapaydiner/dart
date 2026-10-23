@@ -29,6 +29,7 @@ def test_arms_share_weights_and_separate_reuse_from_the_pass_budget():
         "fresh_multi_pass": ("discard", 3, 3),
         "reuse_equal_budget": ("reconcile", 3, 3),
         "reuse_reduced_budget": ("reconcile", 3, 1),
+        "adaptive_repair": ("adaptive", 3, 1),
     }
     assert set(arms) == set(expected)
     for name, drafter in arms.items():

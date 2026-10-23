@@ -55,6 +55,7 @@ def build_reconciliation_arms(
         "fresh_multi_pass": ("discard", full_steps, full_steps),
         "reuse_equal_budget": ("reconcile", full_steps, full_steps),
         "reuse_reduced_budget": ("reconcile", full_steps, repair_steps),
+        "adaptive_repair": ("adaptive", full_steps, repair_steps),
     }
     return {
         name: CompactDiffusionDrafter(
@@ -83,7 +84,7 @@ def _summarize_group(samples, acceptance, indices, seed, profile):
     counts = {}
     for name, rows in acceptance.items():
         group = [row for row in rows if row["prompt_index"] in indices]
-        fields = ("draft_tokens_proposed", "draft_tokens_accepted", "rounds", "diffusion_forwards", "warm_rounds", "warm_rounds_recovered")
+        fields = ("draft_tokens_proposed", "draft_tokens_accepted", "rounds", "diffusion_forwards", "warm_rounds", "warm_rounds_recovered", "restart_no_anchors", "restart_failed_repair")
         counts[name] = totals = {key: sum(row[key] for row in group) for key in fields}
         proposed = totals["draft_tokens_proposed"]
         accepted = totals["draft_tokens_accepted"]
@@ -154,7 +155,7 @@ def measure_reconciliation(
                 acceptance[name].append({
                     "prompt_index": index, "output_hash": output_hash(output.token_ids),
                     **{key: output.metadata[key] for key in ("draft_tokens_proposed", "draft_tokens_accepted", "rounds")},
-                    **{key: counters.get(key, 0) - before.get(key, 0) for key in ("diffusion_forwards", "warm_rounds", "warm_rounds_recovered")},
+                    **{key: counters.get(key, 0) - before.get(key, 0) for key in ("diffusion_forwards", "warm_rounds", "warm_rounds_recovered", "restart_no_anchors", "restart_failed_repair")},
                 })
         timing = measure_methods(methods, prompts, target.device, warmup=warmup, repeats=repeats, seed=seed)
         phases = profile_methods(methods, prompts, target, engines) if profile else None

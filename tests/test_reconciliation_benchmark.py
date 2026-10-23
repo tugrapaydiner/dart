@@ -18,7 +18,7 @@ from tests.test_corpus_eval import Tokenizer, records
 from tests.test_reconciliation_arms import compact_model
 from tests.test_sampling_devices import DEVICES
 
-ARMS = {"fresh_one_pass", "fresh_multi_pass", "reuse_equal_budget", "reuse_reduced_budget"}
+ARMS = {"fresh_one_pass", "fresh_multi_pass", "reuse_equal_budget", "reuse_reduced_budget", "adaptive_repair"}
 METHODS = set(BASELINES) | {"ngram"} | ARMS
 
 
@@ -54,7 +54,7 @@ def test_measurement_keeps_each_budget_and_all_cases(device, early_eos, monkeypa
     assert set(report["policies"]) == ARMS
     assert set(report["by_workload"]) == {"instruction", "code"}
     assert [row["id"] for row in report["by_prompt"]] == [row.id for row in rows]
-    assert len(report["timing"]["samples"]) == len(report["profile"]["samples"]) == 32
+    assert len(report["timing"]["samples"]) == len(report["profile"]["samples"]) == 36
     assert report["record_hidden_by_method"] == {name: name in ARMS for name in METHODS}
     for name in METHODS:
         assert hidden_calls[name] and all(value == (name in ARMS) for value in hidden_calls[name])
@@ -79,7 +79,8 @@ def test_measurement_keeps_each_budget_and_all_cases(device, early_eos, monkeypa
         for name, samples in report["acceptance_samples"].items():
             counts = group["acceptance"][name]
             assert counts["draft_tokens_proposed"] == samples[index]["draft_tokens_proposed"]
-            assert counts["diffusion_forwards"] == samples[index]["diffusion_forwards"]
+            for key in ("diffusion_forwards", "restart_no_anchors", "restart_failed_repair"):
+                assert counts[key] == samples[index][key]
     for name, counts in report["summary"]["acceptance"].items():
         assert counts["diffusion_forwards"] == sum(group["acceptance"][name]["diffusion_forwards"] for group in report["by_workload"].values())
         if counts["diffusion_forwards"]:
@@ -145,7 +146,7 @@ def test_command_loads_checkpoint_and_writes_complete_report(tmp_path, monkeypat
     assert report["checkpoint"]["training_step"] == 1
     assert report["checkpoint"]["sha256"] == hashlib.sha256(checkpoint.read_bytes()).hexdigest()
     assert report["checkpoint"]["training_metadata"]["corpus_hash"] == dataset.manifest["corpus_hash"]
-    assert len(report["timing"]["samples"]) == 16 and report["profile"] is None
+    assert len(report["timing"]["samples"]) == 18 and report["profile"] is None
     assert report["prompts"][0]["max_new_tokens"] == report["selection"]["max_new_override"] == 3
     assert (tmp_path / "corpus/manifest.json").read_bytes() == manifest
     original = output.read_bytes()

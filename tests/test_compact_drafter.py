@@ -28,7 +28,7 @@ def build_lane(device="cpu", mode="reconcile"):
 
 
 @pytest.mark.parametrize("device", DEVICES)
-@pytest.mark.parametrize("mode", ["discard", "reconcile"])
+@pytest.mark.parametrize("mode", ["discard", "reconcile", "adaptive"])
 @pytest.mark.parametrize("verifier", ["block", "tree"])
 def test_compact_lane_preserves_complete_outputs_budgets_and_eos(device, mode, verifier):
     target, drafter = build_lane(device, mode)
@@ -52,8 +52,9 @@ def test_compact_lane_preserves_complete_outputs_budgets_and_eos(device, mode, v
 
 
 @pytest.mark.parametrize("device", DEVICES)
-def test_features_refresh_after_lane_switches_and_new_requests(device, monkeypatch):
-    target, drafter = build_lane(device)
+@pytest.mark.parametrize("mode", ["reconcile", "adaptive"])
+def test_features_refresh_after_lane_switches_and_new_requests(device, mode, monkeypatch):
+    target, drafter = build_lane(device, mode)
     seen = []
     original = drafter.propose
 
