@@ -17,6 +17,7 @@ Batch size is fixed at 1: DART v0.1 targets low-batch/interactive serving
 
 from __future__ import annotations
 
+import inspect
 from dataclasses import dataclass
 from typing import Optional
 
@@ -72,6 +73,14 @@ class TargetModel:
         # belong to rejected drafts and are off-trajectory.
         self.record_hidden = record_hidden
         self.last_hidden_block: Optional[Tensor] = None
+        try:
+            parameter = inspect.signature(self.model.forward).parameters.get("logits_to_keep")
+            self._last_prefill_logits = (
+                torch.device(self.device).type == "cpu" and parameter is not None  # Only CPU showed a consistent gain.
+                and parameter.kind in (inspect.Parameter.POSITIONAL_OR_KEYWORD, inspect.Parameter.KEYWORD_ONLY)
+            )
+        except (TypeError, ValueError):
+            self._last_prefill_logits = False
 
     # ------------------------------------------------------------------ #
     # Construction
@@ -152,7 +161,7 @@ class TargetModel:
         if input_ids.size(1) == 0:
             raise ValueError("prompt must contain at least one token")
         state = TargetState(cache=cache if cache is not None else DynamicCache())
-        logits = self._forward(state, input_ids)
+        logits = self._forward(state, input_ids, last_logits_only=True)
         return state, logits[-1]
 
     @torch.inference_mode()
@@ -164,19 +173,21 @@ class TargetModel:
         """
         return self._forward(state, self._ids(tokens))
 
-    def _forward(self, state: TargetState, input_ids: Tensor) -> Tensor:
+    def _forward(self, state: TargetState, input_ids: Tensor, *, last_logits_only: bool = False) -> Tensor:
         past_len = state.seq_len
         total_len = past_len + input_ids.size(1)
         self._check_context_length(total_len)
         attention_mask = torch.ones(
             (1, total_len), device=self.device, dtype=torch.long
         )
+        logits_options = {"logits_to_keep": 1} if last_logits_only and self._last_prefill_logits else {}
         out = self.model(
             input_ids=input_ids,
             attention_mask=attention_mask,
             past_key_values=state.cache,
             use_cache=True,
             output_hidden_states=self.record_hidden,
+            **logits_options,
         )
         # Re-bind: some transformers versions return a new cache object.
         state.cache = out.past_key_values
