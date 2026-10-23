@@ -18,6 +18,7 @@ from dart.diffusion.compact_training import (
     read_checkpoint,
 )
 from dart.drafters.compact_diffusion import CompactDiffusionModel
+from dart.models.target import TargetModel
 from tests.test_compact_training import MODEL, TRAIN, training_inputs
 from tests.test_sampling_devices import DEVICES
 
@@ -168,6 +169,7 @@ def test_failure_options_require_matching_data_and_canvas(tmp_path):
 
 def test_collection_training_and_resume_commands_preserve_failure_provenance(tmp_path, monkeypatch):
     target, traces = training_inputs(tmp_path)
+    (tmp_path / "config.json").write_text("{}", encoding="utf-8")
     target.tokenizer.decode = lambda ids, **kwargs: " ".join(map(str, ids))
     proposer = CompactTrainer(target, traces, MODEL, TRAIN)
     proposer.train_step()
@@ -203,8 +205,10 @@ def test_collection_training_and_resume_commands_preserve_failure_provenance(tmp
     ["--full-mask-fraction", "nan"], ["--full-mask-fraction", "1.1"],
 ])
 def test_invalid_training_options_fail_before_loading(tmp_path, monkeypatch, options):
-    monkeypatch.setattr(train_compact.TargetModel, "from_pretrained", lambda *a, **k: pytest.fail("loaded before validation"))
-    monkeypatch.setattr(sys, "argv", ["train_compact", "--model", str(tmp_path), "--traces", str(tmp_path),
+    _, traces = training_inputs(tmp_path)
+    (tmp_path / "config.json").write_text("{}", encoding="utf-8")
+    monkeypatch.setattr(TargetModel, "from_pretrained", lambda *a, **k: pytest.fail("loaded before validation"))
+    monkeypatch.setattr(sys, "argv", ["train_compact", "--model", str(tmp_path), "--traces", str(traces.directory),
                                    "--out", str(tmp_path / "out"), "--steps", "1"] + options)
     with pytest.raises(SystemExit) as error:
         train_compact.main()

@@ -14,8 +14,9 @@ from dart import __version__
 
 def _parser() -> argparse.ArgumentParser:
     from dart.cli_data import add_commands
+    from dart.cli_train import add_command
 
-    parser = argparse.ArgumentParser(description="Build data, check and benchmark local Supra-50M drafting.")
+    parser = argparse.ArgumentParser(description="Train, check and benchmark local Supra-50M drafting.")
     parser.add_argument("--version", action="version", version=__version__)
     commands = parser.add_subparsers(dest="command", required=True)
     check = commands.add_parser("check", help="compare complete outputs with HF greedy")
@@ -34,6 +35,7 @@ def _parser() -> argparse.ArgumentParser:
     bench.add_argument("--repeats", type=int, default=10, help="measured repeats, 2-100 (default: 10)")
     demo.add_argument("--port", type=int, default=8400, help="localhost port; 0 picks a free port (default: 8400)")
     add_commands(commands)
+    add_command(commands)
     return parser
 
 
@@ -143,6 +145,10 @@ def main(argv: list[str] | None = None) -> int:
     parser = _parser()
     args = parser.parse_args(argv)
     try:
+        if args.command == "train":
+            from dart.cli_train import run
+
+            return run(args)
         if args.command in ("corpus", "collect"):
             from dart.cli_data import run
 
