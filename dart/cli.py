@@ -13,16 +13,21 @@ from dart import __version__
 
 
 def _parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="Evaluate local Supra-50M decoding.")
+    parser = argparse.ArgumentParser(description="Check and benchmark local Supra-50M decoding.")
     parser.add_argument("--version", action="version", version=__version__)
     commands = parser.add_subparsers(dest="command", required=True)
     check = commands.add_parser("check", help="compare complete outputs with HF greedy")
-    check.add_argument("--model", required=True, help="existing local Supra-50M model directory")
-    check.add_argument("--device", choices=("cpu", "cuda"), default="cpu")
-    check.add_argument("--corpus", help="versioned corpus directory; otherwise generate the fixed pilot")
-    check.add_argument("--split", choices=("train", "validation", "test"), default="validation")
-    check.add_argument("--seed", type=int, default=17, help="seed for the built-in pilot")
-    check.add_argument("--out", help="new report path; default: runs/check_<time>_<id>.json")
+    bench = commands.add_parser("bench", help="repeat latency comparisons and separate phase profiling")
+    for command in (check, bench):
+        command.add_argument("--model", required=True, help="existing local Supra-50M model directory")
+        command.add_argument("--device", choices=("cpu", "cuda"), default="cpu")
+        command.add_argument("--corpus", help="versioned corpus directory; otherwise generate the fixed pilot")
+        command.add_argument("--split", choices=("train", "validation", "test"), default="validation")
+        command.add_argument("--seed", type=int, default=17, help="pilot seed; also controls benchmark ordering")
+        command.add_argument("--out", help="new report path; default: runs/<command>_<time>_<id>.json")
+    bench.add_argument("--per-workload", type=int, default=1, help="first sorted IDs per workload, 1-32 (default: 1)")
+    bench.add_argument("--warmup", type=int, default=2, help="warm-up passes, 1-10 (default: 2)")
+    bench.add_argument("--repeats", type=int, default=10, help="measured repeats, 2-100 (default: 10)")
     return parser
 
 
@@ -43,7 +48,7 @@ def _records(args, target):
     return sorted(records, key=lambda record: record.id), manifest
 
 
-def _check(args) -> int:
+def _run(args) -> int:
     import torch
 
     from benchmarks.corpus_eval import evaluate_corpus
@@ -51,8 +56,13 @@ def _check(args) -> int:
     from dart.presets import supra_config
     from dart.runtime.factory import build_engine
 
+    if args.command == "bench":
+        if not 1 <= args.warmup <= 10 or not 2 <= args.repeats <= 100:
+            raise ValueError("use warmup from 1 to 10 and repeats from 2 to 100")
+        if not 1 <= args.per_workload <= 32 or args.seed < 0:
+            raise ValueError("use per-workload from 1 to 32 and a nonnegative seed")
     stamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
-    output = Path(args.out) if args.out else Path("runs") / f"check_{stamp}_{uuid.uuid4().hex[:8]}.json"
+    output = Path(args.out) if args.out else Path("runs") / f"{args.command}_{stamp}_{uuid.uuid4().hex[:8]}.json"
     if output.exists():
         raise FileExistsError(f"output already exists: {output}")
     config = supra_config(args.model, args.device)
@@ -64,11 +74,26 @@ def _check(args) -> int:
     with build_engine(config) as engine:
         records, manifest = _records(args, engine.target)
         fingerprint = target_fingerprint(engine.target)
-        report = evaluate_corpus(engine, records, engine.default_decode_config, progress=progress)
+        if args.command == "check":
+            report = evaluate_corpus(engine, records, engine.default_decode_config, progress=progress)
+        else:
+            from benchmarks.corpus_bench import benchmark_corpus, select_records
+
+            selected = select_records(records, args.per_workload)
+            report = benchmark_corpus(
+                engine, selected, warmup=args.warmup, repeats=args.repeats, seed=args.seed,
+                progress=lambda message: print(message, file=sys.stderr, flush=True),
+            )
+            report["selection"] = {
+                "rule": "first sorted IDs per workload", "per_workload": args.per_workload,
+                "available_prompts": len(records), "selected_prompts": len(selected),
+            }
     report.update({
-        "command": "check", "preset": config, "target": fingerprint, "corpus": manifest,
+        "command": args.command, "preset": config, "target": fingerprint, "corpus": manifest,
         "environment": {
             "dart": __version__, "python": platform.python_version(), "threads": torch.get_num_threads(),
+            "platform": platform.platform(), "processor": platform.processor(), "cuda": torch.version.cuda,
+            "device_name": torch.cuda.get_device_name(engine.target.device) if args.device == "cuda" else platform.processor(),
             **{name: version(name) for name in ("torch", "transformers", "numpy", "PyYAML", "safetensors")},
         },
     })
@@ -76,7 +101,19 @@ def _check(args) -> int:
     with output.open("x", encoding="utf-8") as destination:
         json.dump(report, destination, indent=2)
         destination.write("\n")
-    print(json.dumps(report["summary"], indent=2))
+    if args.command == "check":
+        print(json.dumps(report["summary"], indent=2))
+    else:
+        for name, row in report["summary"]["timing"].items():
+            low, high = row["ci95_ms"]
+            print(f"{name}: {row['mean_ms']:.2f} ms, 95% CI [{low:.2f}, {high:.2f}]")
+        comparison = report["summary"]["vs_fastest"]["dart"]
+        low, high = comparison["ci95_speedup"]
+        print(f"DART vs {report['summary']['fastest_baseline']}: {comparison['speedup']:.3f}x, 95% CI [{low:.3f}, {high:.3f}]")
+        for row in report["correctness"]["outputs"]:
+            print(f"{row['id']}: matching hash {row['output_hash']}, {row['generated_tokens']} tokens, "
+                  f"draft acceptance {row['draft_tokens_accepted']}/{row['draft_tokens_proposed']}")
+        print("All measured outputs matched HF. Intervals describe repeats of these fixed prompts.")
     print(f"Wrote {output}")
     return 0
 
@@ -85,6 +122,6 @@ def main(argv: list[str] | None = None) -> int:
     parser = _parser()
     args = parser.parse_args(argv)
     try:
-        return _check(args)
+        return _run(args)
     except (ValueError, OSError) as error:
         parser.error(str(error))

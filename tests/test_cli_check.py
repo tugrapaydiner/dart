@@ -116,9 +116,10 @@ def test_invalid_paths_fail_before_loading_and_preserve_existing_files(local_mod
         assert output.read_text() == "keep this"
 
 
-def test_module_help_works_without_third_party_packages():
+@pytest.mark.parametrize("command", ["check", "bench"])
+def test_module_help_works_without_third_party_packages(command):
     root = Path(__file__).resolve().parents[1]
-    result = subprocess.run([sys.executable, "-S", "-m", "dart", "check", "--help"],
+    result = subprocess.run([sys.executable, "-S", "-m", "dart", command, "--help"],
                             cwd=root, capture_output=True, text=True, timeout=15)
     assert result.returncode == 0, result.stderr
     assert "--model" in result.stdout and "--split" in result.stdout
