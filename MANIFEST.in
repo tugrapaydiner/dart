@@ -1,0 +1,7 @@
+global-exclude *
+include MANIFEST.in LICENSE pyproject.toml constraints-tested.txt
+recursive-include dart *.py py.typed
+recursive-include benchmarks *.py
+recursive-include scripts *.py
+recursive-include tests *.py
+recursive-include configs *.yaml
