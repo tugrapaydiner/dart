@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import replace
 
 from benchmarks.corpus_eval import evaluate_corpus
@@ -44,6 +45,7 @@ def _summarize(samples: list[dict], seed: int) -> dict:
 def benchmark_corpus(
     engine: DartEngine, records: list[Prompt], config: DecodeConfig | None = None, *,
     warmup: int = 2, repeats: int = 10, seed: int = 17, progress=None,
+    on_timing: Callable[[dict], None] | None = None,
 ) -> dict:
     """Repeated comparisons with separate correctness and phase diagnostics."""
     if type(warmup) is not int or type(repeats) is not int or warmup < 1 or repeats < 2:
@@ -73,6 +75,16 @@ def benchmark_corpus(
         methods = {name: with_hidden_recording(target, target.record_hidden if name == "dart" else False, method)
                    for name, method in methods.items()}
         timing = measure_methods(methods, prompts, target.device, warmup=warmup, repeats=repeats, seed=seed)
+        for sample in timing["samples"]:
+            if sample["output_hash"] != checks["outputs"][sample["prompt_index"]]["output_hash"]:
+                raise ValueError("reference output changed between correctness and timing")
+        if on_timing is not None:
+            on_timing({
+                "schema": "dart-corpus-timing-v1", "status": "timing_complete",
+                "split": checks["split"], "selected_corpus_hash": checks["selected_corpus_hash"],
+                "seed": seed, "correctness": checks, "timing": timing,
+                "record_hidden_by_method": {name: target.record_hidden if name == "dart" else False for name in methods},
+            })
         if progress:
             progress("Repeated timing passed; starting separate phase profiling")
         profile = profile_methods(methods, prompts, target, {"target_only": baseline, "dart": engine})

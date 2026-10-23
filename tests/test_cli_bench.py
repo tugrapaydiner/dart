@@ -28,6 +28,10 @@ def test_benchmark_command_uses_validation_and_records_full_comparisons(local_mo
     assert report["timing"]["warmup"] == 1 and report["timing"]["repeats"] == 2
     assert report["preset"]["target"]["local_files_only"] is True and len(built) == 1
     assert report["environment"]["platform"]
+    saved = json.loads(output.with_suffix(".timing.json").read_text())
+    assert saved["status"] == "timing_complete" and "profile" not in saved
+    for key in ("correctness", "timing", "preset", "target", "corpus", "environment", "selection"):
+        assert saved[key] == report[key]
     console = capsys.readouterr().out
     assert "DART vs " in console and "draft acceptance" in console
     assert report["correctness"]["outputs"][0]["output_hash"] in console
@@ -57,3 +61,36 @@ def test_benchmark_failure_does_not_write_a_success_report(local_model, tmp_path
     with pytest.raises(SystemExit) as error:
         cli.main(["bench", "--model", str(directory), "--out", str(output)])
     assert error.value.code == 2 and not output.exists()
+    assert not output.with_suffix(".timing.json").exists()
+
+
+def test_completed_timings_survive_interrupted_profiling(local_model, tmp_path, monkeypatch):
+    directory, _ = local_model
+    monkeypatch.setattr("dart.data.pilot.build_pilot", lambda seed: records())
+    output = tmp_path / "nested" / "bench.json"
+
+    def interrupt(*args, **kwargs):
+        saved = json.loads(output.with_suffix(".timing.json").read_text())
+        assert saved["status"] == "timing_complete" and "profile" not in saved
+        assert len(saved["timing"]["samples"]) == 16
+        assert saved["correctness"]["summary"]["exact_match_rate"] == 1
+        for sample in saved["timing"]["samples"]:
+            assert sample["output_hash"] == saved["correctness"]["outputs"][sample["prompt_index"]]["output_hash"]
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr("benchmarks.corpus_bench.profile_methods", interrupt)
+    with pytest.raises(KeyboardInterrupt):
+        cli.main(["bench", "--model", str(directory), "--warmup", "1", "--repeats", "2", "--out", str(output)])
+    assert not output.exists()
+    assert output.with_suffix(".timing.json").exists()
+
+
+def test_existing_timing_file_is_preserved_before_loading(local_model, tmp_path):
+    directory, built = local_model
+    output = tmp_path / "bench.json"
+    saved = output.with_suffix(".timing.json")
+    saved.write_text("keep previous timings", encoding="utf-8")
+    with pytest.raises(SystemExit) as error:
+        cli.main(["bench", "--model", str(directory), "--out", str(output)])
+    assert error.value.code == 2 and not built and not output.exists()
+    assert saved.read_text() == "keep previous timings"

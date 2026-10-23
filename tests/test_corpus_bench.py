@@ -104,6 +104,22 @@ def test_changed_reference_between_phases_fails_the_benchmark(monkeypatch, phase
     assert engine.target.record_hidden is True
 
 
+def test_changed_timing_reference_cannot_be_saved(monkeypatch):
+    original = corpus_bench.measure_methods
+
+    def changed(*args, **kwargs):
+        result = original(*args, **kwargs)
+        result["samples"][0]["output_hash"] = "changed"
+        return result
+
+    saved = []
+    monkeypatch.setattr(corpus_bench, "measure_methods", changed)
+    monkeypatch.setattr(corpus_bench, "profile_methods", lambda *a, **k: pytest.fail("profiled invalid timings"))
+    with build_engine() as engine, pytest.raises(ValueError, match="reference output changed"):
+        corpus_bench.benchmark_corpus(engine, records(), warmup=1, repeats=2, on_timing=saved.append)
+    assert not saved
+
+
 @pytest.mark.parametrize("options", [{"warmup": 0}, {"repeats": 1}, {"warmup": True}, {"seed": -1}, {"seed": True}])
 def test_invalid_settings_fail_before_generation(monkeypatch, options):
     monkeypatch.setattr(corpus_bench, "evaluate_corpus", lambda *args: pytest.fail("invalid settings reached generation"))

@@ -73,6 +73,9 @@ def _run(args) -> int:
     output = Path(args.out) if args.out else Path("runs") / f"{args.command}_{stamp}_{uuid.uuid4().hex[:8]}.json"
     if output.exists():
         raise FileExistsError(f"output already exists: {output}")
+    timing_output = output.with_suffix(".timing.json")
+    if args.command == "bench" and timing_output.exists():
+        raise FileExistsError(f"timing output already exists: {timing_output}")
     config = supra_config(args.model, args.device)
 
     def progress(done, total):
@@ -82,29 +85,40 @@ def _run(args) -> int:
     with build_engine(config) as engine:
         records, manifest = _records(args, engine.target)
         fingerprint = target_fingerprint(engine.target)
+        metadata = {
+            "command": args.command, "preset": config, "target": fingerprint, "corpus": manifest,
+            "environment": {
+                "dart": __version__, "python": platform.python_version(), "threads": torch.get_num_threads(),
+                "platform": platform.platform(), "processor": platform.processor(), "cuda": torch.version.cuda,
+                "device_name": torch.cuda.get_device_name(engine.target.device) if args.device == "cuda" else platform.processor(),
+                **{name: version(name) for name in ("torch", "transformers", "numpy", "PyYAML", "safetensors")},
+            },
+        }
         if args.command == "check":
             report = evaluate_corpus(engine, records, engine.default_decode_config, progress=progress)
         else:
             from benchmarks.corpus_bench import benchmark_corpus, select_records
 
             selected = select_records(records, args.per_workload)
-            report = benchmark_corpus(
-                engine, selected, warmup=args.warmup, repeats=args.repeats, seed=args.seed,
-                progress=lambda message: print(message, file=sys.stderr, flush=True),
-            )
-            report["selection"] = {
+            selection = {
                 "rule": "first sorted IDs per workload", "per_workload": args.per_workload,
                 "available_prompts": len(records), "selected_prompts": len(selected),
             }
-    report.update({
-        "command": args.command, "preset": config, "target": fingerprint, "corpus": manifest,
-        "environment": {
-            "dart": __version__, "python": platform.python_version(), "threads": torch.get_num_threads(),
-            "platform": platform.platform(), "processor": platform.processor(), "cuda": torch.version.cuda,
-            "device_name": torch.cuda.get_device_name(engine.target.device) if args.device == "cuda" else platform.processor(),
-            **{name: version(name) for name in ("torch", "transformers", "numpy", "PyYAML", "safetensors")},
-        },
-    })
+
+            def save_timing(partial):
+                timing_output.parent.mkdir(parents=True, exist_ok=True)
+                with timing_output.open("x", encoding="utf-8") as destination:
+                    json.dump({**partial, **metadata, "selection": selection}, destination, indent=2)
+                    destination.write("\n")
+                print(f"Saved timings to {timing_output}; profiling is still pending", file=sys.stderr, flush=True)
+
+            report = benchmark_corpus(
+                engine, selected, warmup=args.warmup, repeats=args.repeats, seed=args.seed,
+                progress=lambda message: print(message, file=sys.stderr, flush=True),
+                on_timing=save_timing,
+            )
+            report["selection"] = selection
+    report.update(metadata)
     output.parent.mkdir(parents=True, exist_ok=True)
     with output.open("x", encoding="utf-8") as destination:
         json.dump(report, destination, indent=2)
