@@ -1,26 +1,10 @@
-"""Real-model exactness validation (docs/design.md §13.4).
+"""Compare complete greedy token sequences on a pretrained target.
 
-The exactness suite proves DART against *random* tiny targets - which is
-the right test for the contract, since exactness is weight-independent.
-This script closes the obvious credibility question that random weights
-leave open: does the whole pipeline - real tokenizer, real vocabulary,
-real attention/RoPE - still produce byte-identical greedy output on an
-actual pretrained model?
+Checks HF generation, target-only decoding and each selected draft lane.
+Numerical agreement must be checked for each model, device, precision and
+attention backend. Timings here are diagnostics, not speedup estimates.
 
-It runs three independent references and asserts they all agree:
-
-  1. HuggingFace ``model.generate`` greedy (the ecosystem ground truth);
-  2. ``TargetModel.greedy_generate`` (DART's trusted K=0 baseline);
-  3. ``DartEngine.generate`` exact mode, per draft lane.
-
-    python scripts/run_real_model.py --model sshleifer/tiny-gpt2
-    python scripts/run_real_model.py --model gpt2 --max-new 64
-    python scripts/run_real_model.py --model Qwen/Qwen2.5-0.5B-Instruct
-
-Default model is tiny so the script is runnable anywhere; point --model at
-a real checkpoint on a capable box.  Wall-clock here is not a claim
-(docs/design.md §5.3 / README): CPU timings only show the contract
-holds, not that DART is faster.
+    python scripts/run_real_model.py --model checkpoints/Supra-50M-Instruct
 """
 
 from __future__ import annotations

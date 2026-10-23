@@ -11,7 +11,7 @@ The wrapper exposes a deliberately small surface:
   * ``crop``           - roll the KV state back after rejected drafts
   * ``greedy_generate``- the trusted full-KV greedy baseline (K=0 decode loop)
 
-Batch size is fixed at 1: DART v0.1 targets low-batch/interactive serving
+Batch size is fixed at 1 for interactive serving
 (docs/design.md §1 and §15).
 """
 

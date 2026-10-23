@@ -6,9 +6,8 @@ the pending token, already known from the target's own argmax).  This
 costs *zero extra target forwards*: the hidden state is a byproduct of the
 verify pass that just ran.
 
-Heads start random (useless drafts, exactness unaffected - the verifier
-guarantees that) and are trained on teacher traces via
-scripts/train_drafter.py / dart.diffusion.training_losses.
+Heads start random and are trained on teacher traces via scripts/train_mtp.py.
+Greedy verification checks their proposals against the target.
 
 Each verifier reports the hidden row that predicted the new pending token.
 Heads +2.. use that row to propose the following tokens, including after
