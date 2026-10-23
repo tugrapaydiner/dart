@@ -119,6 +119,10 @@ class DartEngine:
     def _all_drafters(self) -> list[Drafter]:
         return list(self.lanes.values()) if self.lanes is not None else [self.drafter]
 
+    def _synchronize_round(self) -> None:
+        if torch.device(self.target.device).type == "cuda":
+            torch.cuda.synchronize(self.target.device)
+
     @staticmethod
     def _gpu_free_gb() -> float:
         if torch.cuda.is_available():
@@ -198,6 +202,9 @@ class DartEngine:
             prompt_ids = self.target.tokenizer.encode(prompt_ids)
         config = config or self.default_decode_config or DecodeConfig()
         config.validate()
+        timed_scheduler = getattr(self.scheduler, "requires_round_timing", False)
+        if timed_scheduler and (config.mode != "exact" or config.full_kv_residency != "gpu"):
+            raise ValueError("time scheduling requires exact mode and resident target KV")
         if self.verifier_name == "tree" and config.mode != "exact":
             raise ValueError(
                 "the tree verifier supports exact (greedy) mode only; "
@@ -270,7 +277,10 @@ class DartEngine:
             d0 = torch.softmax(logits.float(), dim=-1)
             ent_ewma = float(-(d0 * d0.clamp_min(1e-12).log()).sum())
 
+        if timed_scheduler:
+            self._synchronize_round()
         while not finished and len(generated) < config.max_new_tokens:
+            round_start = time.perf_counter() if timed_scheduler else 0.0
             committed_seq = prompt + generated
             drafter, draft_len = self._pick_lane(
                 config, len(prompt), len(generated), entropy_ewma=ent_ewma
@@ -354,7 +364,7 @@ class DartEngine:
                 for other in self._all_drafters():
                     if other is not drafter and hasattr(other, "after_verify"):
                         other.after_verify(result)
-                if self.scheduler is not None:
+                if self.scheduler is not None and not timed_scheduler:
                     self.scheduler.observe(
                         drafter.name, result,
                         draft_ms=(t1 - t0) * 1000.0,
@@ -387,6 +397,14 @@ class DartEngine:
             rounds.append(rec)
             metrics.record_round(rec)
             round_idx += 1
+            if timed_scheduler:
+                kv_gb = self._drafter_kv_gb(drafter)
+                self._synchronize_round()
+                self.scheduler.observe(
+                    drafter.name, result,
+                    draft_ms=rec.draft_ms, verify_ms=rec.verify_ms, kv_gb=kv_gb,
+                    round_ms=(time.perf_counter() - round_start) * 1000.0,
+                )  # Includes loop work; the feedback update itself is outside the timer.
 
         if pending_park is not None:  # drain the final in-flight offload
             parked = pending_park.wait()

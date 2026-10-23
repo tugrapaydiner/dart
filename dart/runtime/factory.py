@@ -36,6 +36,7 @@ from dart.runtime.scheduler import (
     HeuristicScheduler,
     SchedulerConfig,
 )
+from dart.runtime.time_scheduler import TimeScheduler
 
 
 def build_target(spec: dict) -> TargetModel:
@@ -233,14 +234,20 @@ def build_engine(cfg: dict):
     sched_type = sched_cfg.get("type", "heuristic")
     sched_cls = (
         BanditScheduler if sched_type in ("contextual_bandit", "bandit")
+        else TimeScheduler if sched_type == "time"
         else HeuristicScheduler
     )
+    timing_options = {
+        key: sched_cfg[key] for key in ("retry_interval", "warmup_rounds", "min_time_saving")
+        if key in sched_cfg
+    } if sched_cls is TimeScheduler else {}
     scheduler = sched_cls(
         SchedulerConfig(
             available_lanes=list(lanes),
             long_context_threshold=sched_cfg.get("long_context_threshold", 128_000),
             min_lane_acceptance=sched_cfg.get("min_lane_acceptance", 0.30),
             mtp_acceptance_gate=sched_cfg.get("mtp_acceptance_gate", 0.65),
+            ewma_alpha=sched_cfg.get("ewma_alpha", 0.2),
             draft_len=sched_cfg.get("draft_len", 4),
             canvas_len=sched_cfg.get("canvas_len", 32),
             denoise_steps=sched_cfg.get("denoise_steps", 8),
@@ -251,7 +258,8 @@ def build_engine(cfg: dict):
                 "entropy_gate_threshold", float("inf")
             ),
             entropy_gate_factor=sched_cfg.get("entropy_gate_factor", 0.5),
-        )
+        ),
+        **timing_options,
     )
     return DartEngine(
         target, lanes=lanes, scheduler=scheduler, verifier=cfg.get("verifier", "block"),
