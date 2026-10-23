@@ -12,6 +12,7 @@ import torch
 import torch.nn.functional as F
 import transformers
 
+from dart.data.failures import FailureDataset
 from dart.data.storage import tokenizer_hash
 from dart.data.teacher import TraceDataset, target_fingerprint
 from dart.drafters.compact_diffusion import CompactDiffusionModel, CompactDrafterConfig
@@ -34,6 +35,7 @@ class CompactTrainingConfig:
     distill_temperature: float = 1.0
     cache_shards: int = 8
     dtype: str = "float32"
+    failure_masking: str = "none"
 
     def __post_init__(self):
         if type(self.seed) is not int:
@@ -51,6 +53,8 @@ class CompactTrainingConfig:
             raise ValueError("invalid distillation weight or temperature")
         if self.dtype not in ("float32", "bfloat16"):
             raise ValueError("training dtype must be float32 or bfloat16")
+        if self.failure_masking not in ("none", "observed", "random_matched"):
+            raise ValueError("unknown failure masking mode")
 
 
 def _cpu_copy(value):
@@ -94,9 +98,15 @@ class CompactTrainer:
         self, target: TargetModel, traces: TraceDataset,
         model_config: CompactDrafterConfig | None = None,
         config: CompactTrainingConfig | None = None,
+        *, failures: FailureDataset | None = None,
     ):
         self.target, self.traces = target, traces
         self.config = config or CompactTrainingConfig()
+        self.failures = failures
+        if (self.config.failure_masking == "none") != (failures is None):
+            raise ValueError("failure masking needs a failure dataset and an explicit mode")
+        if failures is not None and any(len(row["proposal_ids"]) > self.config.canvas_len for row in failures.records):
+            raise ValueError("failure window exceeds the training canvas")
         model_config = model_config or CompactDrafterConfig()
         if self.config.canvas_len > model_config.max_canvas:
             raise ValueError("training canvas exceeds model capacity")
@@ -121,6 +131,10 @@ class CompactTrainer:
                 "matmul_precision": torch.get_float32_matmul_precision(),
             },
         }
+        if failures is not None:
+            if failures.manifest["traces_sha256"] != self.metadata["traces_sha256"]:
+                raise ValueError("failure dataset does not match the training traces")
+            self.metadata["failure_data_sha256"] = failures.sha256
         torch.manual_seed(self.config.seed)
         self.generator = torch.Generator().manual_seed(self.config.seed)
         self.model = CompactDiffusionModel(target, model_config).to(dtype=getattr(torch, self.config.dtype))
@@ -139,20 +153,34 @@ class CompactTrainer:
 
     def sample_batch(self) -> dict[str, torch.Tensor]:
         g, cfg = self.generator, self.config
-        b = int(torch.randint(1, cfg.canvas_len + 1, (), generator=g))
+        b = cfg.canvas_len if self.failures is not None else int(torch.randint(1, cfg.canvas_len + 1, (), generator=g))
         rows = {key: [] for key in ("context_ids", "context_pad_mask", "canvas_tokens", "canvas_masked", "target_hidden", "valid")}
         if cfg.distill_weight:
             rows["teacher_hidden"] = []
         for _ in range(cfg.batch_size):
-            index = self.eligible[int(torch.randint(len(self.eligible), (), generator=g))]
+            window = None
+            width = b
+            if self.failures is None:
+                index = self.eligible[int(torch.randint(len(self.eligible), (), generator=g))]
+            else:
+                window = self.failures[int(torch.randint(len(self.failures), (), generator=g))]
+                index, width = window["trace_index"], len(window["proposal_ids"])
             trace = self._trace(index)
             continuation = trace["continuation_ids"]
-            offset = int(torch.randint(len(continuation) - 1, (), generator=g))
+            offset = int(torch.randint(len(continuation) - 1, (), generator=g)) if window is None else window["offset"] - 1
             context = torch.cat([trace["prompt_ids"], continuation[:offset + 1]])[-self.model.cfg.ctx_window:]
             pad = self.model.cfg.ctx_window - len(context)
-            labels = continuation[offset + 1:offset + 1 + b]
+            labels = continuation[offset + 1:offset + 1 + width]
             valid = torch.arange(b) < len(labels)
-            if float(torch.rand((), generator=g)) < cfg.full_mask_fraction:
+            if window is not None:
+                selected = torch.randperm(len(labels), generator=g)[:len(window["failed_positions"])]  # Both arms consume the same draws.
+                if cfg.failure_masking == "observed":
+                    selected = torch.tensor(window["failed_positions"], dtype=torch.long)
+                masked = ~valid
+                masked[selected] = True
+                if float(torch.rand((), generator=g)) < cfg.full_mask_fraction:
+                    masked.fill_(True)
+            elif float(torch.rand((), generator=g)) < cfg.full_mask_fraction:
                 masked = torch.ones(b, dtype=torch.bool)
             else:
                 level = 0.25 + 0.75 * float(torch.rand((), generator=g))
@@ -166,7 +194,7 @@ class CompactTrainer:
             rows["target_hidden"].append(trace["hidden"][offset])
             rows["valid"].append(valid)
             if cfg.distill_weight:
-                future = trace["hidden"][offset + 1:offset + 1 + b]  # Each row predicts its label.
+                future = trace["hidden"][offset + 1:offset + 1 + width]  # Each row predicts its label.
                 rows["teacher_hidden"].append(F.pad(future, (0, 0, 0, b - len(labels))))
         return {key: torch.stack(values).to(self.target.device) for key, values in rows.items()}
 
