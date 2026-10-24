@@ -11,12 +11,13 @@ The wrapper exposes a deliberately small surface:
   * ``crop``           - roll the KV state back after rejected drafts
   * ``greedy_generate``- the trusted full-KV greedy baseline (K=0 decode loop)
 
-Batch size is fixed at 1: DART v0.1 targets low-batch/interactive serving
+Batch size is fixed at 1 for interactive serving
 (docs/design.md §1 and §15).
 """
 
 from __future__ import annotations
 
+import inspect
 from dataclasses import dataclass
 from typing import Optional
 
@@ -72,6 +73,14 @@ class TargetModel:
         # belong to rejected drafts and are off-trajectory.
         self.record_hidden = record_hidden
         self.last_hidden_block: Optional[Tensor] = None
+        try:
+            parameter = inspect.signature(self.model.forward).parameters.get("logits_to_keep")
+            self._last_prefill_logits = (
+                torch.device(self.device).type == "cpu" and parameter is not None  # Only CPU showed a consistent gain.
+                and parameter.kind in (inspect.Parameter.POSITIONAL_OR_KEYWORD, inspect.Parameter.KEYWORD_ONLY)
+            )
+        except (TypeError, ValueError):
+            self._last_prefill_logits = False
 
     # ------------------------------------------------------------------ #
     # Construction
@@ -84,6 +93,8 @@ class TargetModel:
         dtype: Optional[torch.dtype] = None,
         attn_implementation: str = "eager",
         trust_remote_code: bool = False,
+        record_hidden: bool = False,
+        local_files_only: bool = False,
     ) -> "TargetModel":
         if dtype is None:
             dtype = torch.float32 if device == "cpu" else torch.bfloat16
@@ -92,11 +103,12 @@ class TargetModel:
             torch_dtype=dtype,
             attn_implementation=attn_implementation,
             trust_remote_code=trust_remote_code,
+            local_files_only=local_files_only,
         )
         tokenizer = AutoTokenizer.from_pretrained(
-            name_or_path, trust_remote_code=trust_remote_code
+            name_or_path, trust_remote_code=trust_remote_code, local_files_only=local_files_only
         )
-        return cls(model, tokenizer, device=device, dtype=dtype)
+        return cls(model, tokenizer, device=device, dtype=dtype, record_hidden=record_hidden)
 
     def _collect_eos_ids(self) -> frozenset[int]:
         ids: set[int] = set()
@@ -115,6 +127,18 @@ class TargetModel:
     # ------------------------------------------------------------------ #
     # Core forward primitives
     # ------------------------------------------------------------------ #
+    def _check_context_length(self, length: int) -> None:
+        limit = getattr(self.model.config, "max_position_embeddings", None)
+        if limit is not None and length > limit:
+            raise ValueError(f"sequence length {length} exceeds context limit {limit}")
+
+    def validate_generation(self, prompt_len: int, max_new_tokens: int) -> None:
+        if prompt_len < 1:
+            raise ValueError("prompt must contain at least one token")
+        if isinstance(max_new_tokens, bool) or not isinstance(max_new_tokens, int) or max_new_tokens < 0:
+            raise ValueError("max_new_tokens must be an integer >= 0")
+        self._check_context_length(prompt_len + max_new_tokens)
+
     def _ids(self, tokens: list[int] | Tensor) -> Tensor:
         if isinstance(tokens, Tensor):
             t = tokens.to(device=self.device, dtype=torch.long)
@@ -139,7 +163,7 @@ class TargetModel:
         if input_ids.size(1) == 0:
             raise ValueError("prompt must contain at least one token")
         state = TargetState(cache=cache if cache is not None else DynamicCache())
-        logits = self._forward(state, input_ids)
+        logits = self._forward(state, input_ids, last_logits_only=True)
         return state, logits[-1]
 
     @torch.inference_mode()
@@ -151,18 +175,21 @@ class TargetModel:
         """
         return self._forward(state, self._ids(tokens))
 
-    def _forward(self, state: TargetState, input_ids: Tensor) -> Tensor:
+    def _forward(self, state: TargetState, input_ids: Tensor, *, last_logits_only: bool = False) -> Tensor:
         past_len = state.seq_len
         total_len = past_len + input_ids.size(1)
+        self._check_context_length(total_len)
         attention_mask = torch.ones(
             (1, total_len), device=self.device, dtype=torch.long
         )
+        logits_options = {"logits_to_keep": 1} if last_logits_only and self._last_prefill_logits else {}
         out = self.model(
             input_ids=input_ids,
             attention_mask=attention_mask,
             past_key_values=state.cache,
             use_cache=True,
             output_hidden_states=self.record_hidden,
+            **logits_options,
         )
         # Re-bind: some transformers versions return a new cache object.
         state.cache = out.past_key_values
@@ -200,19 +227,22 @@ class TargetModel:
         base_len = state.seq_len
         q_len = p_len + n
         kv_len = base_len + q_len
+        depths: list[int] = []
+        for i, p in enumerate(parent):
+            if p < -1 or p >= i:
+                raise ValueError("tree parents must be -1 or a preceding index")
+            depths.append(0 if p < 0 else depths[p] + 1)
+        self._check_context_length(base_len + p_len + max(depths, default=-1) + 1)
 
         allow = torch.zeros(q_len, kv_len, dtype=torch.bool, device=self.device)
         allow[:, :base_len] = True  # everything sees the committed cache
         for i in range(p_len):      # pending block: ordinary causal
             allow[i, base_len : base_len + i + 1] = True
-        depths = [0] * n
         for i in range(n):
             row = p_len + i
             allow[row, base_len : base_len + p_len] = True  # full pending
             allow[row, base_len + row] = True               # itself
             j = parent[i]
-            if j >= 0:
-                depths[i] = depths[j] + 1
             while j >= 0:
                 allow[row, base_len + p_len + j] = True     # ancestors
                 j = parent[j]
@@ -280,11 +310,13 @@ class TargetModel:
 
     def crop(self, state: TargetState, length: int) -> None:
         """Roll the KV state back so it covers only the first ``length`` tokens."""
-        if length > state.seq_len:
+        current_length = state.seq_len
+        if length < 0 or length > current_length:
             raise ValueError(
-                f"cannot crop cache of length {state.seq_len} to {length}"
+                f"cannot crop cache of length {current_length} to {length}"
             )
-        state.cache.crop(length)
+        if length < current_length:
+            state.cache.crop(length - current_length)  # HF accepts negative removal counts.
 
     # ------------------------------------------------------------------ #
     # Trusted baseline
@@ -298,7 +330,9 @@ class TargetModel:
         This is the K=0 decode loop: one forward per token, argmax commit,
         stop at EOS or the token budget.
         """
-        state, logits = self.prefill(prompt_ids)
+        input_ids = self._ids(prompt_ids)
+        self.validate_generation(input_ids.size(1), max_new_tokens)
+        state, logits = self.prefill(input_ids)
         generated: list[int] = []
         next_token = int(torch.argmax(logits).item())
         for _ in range(max_new_tokens):

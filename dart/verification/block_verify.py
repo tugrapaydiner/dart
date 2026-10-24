@@ -87,4 +87,5 @@ def verify_block_greedy(
         finished=finished,
         pending_divergence=divergence,
         entropy=entropy,
+        hidden_index=p_len + len(committed) - 2,
     )

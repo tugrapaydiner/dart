@@ -42,7 +42,7 @@ class ARDrafter:
     ) -> None:
         self.dm = draft_model
         self.sample_temperature = sample_temperature
-        self.gen = torch.Generator().manual_seed(seed)
+        self.gen = torch.Generator(device=draft_model.device).manual_seed(seed)
         self._state: Optional[TargetState] = None
         self._processed: list[int] = []
 

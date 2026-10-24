@@ -4,9 +4,9 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "dart-serving"
-version = "0.1.0"
-description = "DART: Diffusion-Augmented Reliable Transformer Serving - exact LLM acceleration via verified draft lanes"
-readme = "README.md"
+version = "0.2.0"
+description = "DART: verified drafting and reproducible local model evaluation"
+readme = {text = "DART provides verified drafting and local model evaluation. The Supra-50M presets use float32 with SDPA on CPU and eager attention on CUDA. Use dart check to compare complete outputs with HF before benchmarking. Supply model files locally.", content-type = "text/plain"}
 requires-python = ">=3.10"
 license = { text = "Apache-2.0" }
 dependencies = [
@@ -14,16 +14,23 @@ dependencies = [
     "transformers>=4.40",
     "numpy>=1.24",
     "pyyaml>=6.0",
+    "safetensors>=0.4",
 ]
 
 [project.urls]
 Repository = "https://github.com/tugrapaydiner/dart"
 
+[project.scripts]
+dart = "dart.cli:main"
+
 [project.optional-dependencies]
 dev = ["pytest>=7.0", "pytest-timeout", "ruff>=0.4"]
 
+[tool.setuptools]
+include-package-data = false
+
 [tool.setuptools.packages.find]
-include = ["dart*"]
+include = ["dart*", "benchmarks*"]
 
 [tool.setuptools.package-data]
 dart = ["py.typed"]

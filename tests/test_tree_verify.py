@@ -166,7 +166,8 @@ def test_engine_tree_verifier_is_byte_exact(tiny_target, plant_oracle, seed, ple
     )
     out = engine.generate(prompt, DecodeConfig(max_new_tokens=n, draft_len=4))
     assert out.token_ids == base
-    assert out.metadata["exact_greedy_equivalent"] is True
+    assert out.metadata["exact_greedy_equivalent"] is None
+    assert out.metadata["greedy_verified"] is True
     assert out.metadata["verifier"] == "tree"
     if plant_oracle:
         # planted truth must actually be exploited

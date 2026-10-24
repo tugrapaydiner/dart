@@ -415,7 +415,8 @@ def test_block_verifier_reports_entropy():
         random_prompt(77, 12), DecodeConfig(max_new_tokens=16, draft_len=4)
     )
     # Random tiny target has high-entropy predictions; the signal is live.
-    assert out.metadata["exact_greedy_equivalent"] is True
+    assert out.metadata["exact_greedy_equivalent"] is None
+    assert out.metadata["greedy_verified"] is True
 
 
 def test_entropy_gate_keeps_engine_exact():

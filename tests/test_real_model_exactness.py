@@ -71,4 +71,5 @@ def test_lanes_byte_exact_on_real_model(real_target, lane_name):
             real_target, drafter=lanes[lane_name](), verifier="block"
         ).generate(ids, DecodeConfig(max_new_tokens=24, draft_len=4))
         assert out.token_ids == base, f"{lane_name} diverged on {text!r}"
-        assert out.metadata["exact_greedy_equivalent"] is True
+        assert out.metadata["exact_greedy_equivalent"] is None
+        assert out.metadata["greedy_verified"] is True

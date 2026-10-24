@@ -72,6 +72,16 @@ class DraftTree:
     def depths(self) -> list[int]:
         return self._depths
 
+    def truncate(self, max_tokens: int) -> "DraftTree":
+        if not self.tokens or max(self._depths) < max_tokens:
+            return self
+        kept = [i for i, depth in enumerate(self._depths) if depth < max_tokens]
+        remap = {old: new for new, old in enumerate(kept)}
+        return DraftTree(
+            [self.tokens[i] for i in kept],
+            [-1 if self.parent[i] < 0 else remap[self.parent[i]] for i in kept],
+        )
+
     @classmethod
     def chain(cls, tokens: list[int]) -> "DraftTree":
         """A linear block as a degenerate tree (parent = previous node)."""
@@ -193,4 +203,5 @@ def verify_tree_greedy(
         finished=finished,
         pending_divergence=divergence,
         entropy=entropy,
+        hidden_index=cur_row,
     )

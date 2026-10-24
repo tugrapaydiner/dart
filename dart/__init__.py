@@ -2,13 +2,13 @@
 
 An inference engine where lossy draft lanes (diffusion canvas, MTP/n-gram,
 compressed KV, sparse attention) propose tokens and a full autoregressive
-target model verifies them, guaranteeing greedy output identical to the
-target model in exact mode.
+target model verifies them. Complete reference comparisons validate numerical
+equivalence for the chosen device, precision and attention backend.
 """
 
 from dart.runtime.types import DecodeConfig, GenerationOutput, VerifyResult
 
-__version__ = "0.1.0"
+__version__ = "0.2.0"
 
 __all__ = [
     "DecodeConfig",

@@ -21,6 +21,7 @@ exactly the K=0 case of the same code path.
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass, field
 from typing import Literal, Optional
 
@@ -35,7 +36,7 @@ Lane = Literal[
     "block_sparse_kv",
 ]
 
-# exact          - greedy, byte-identical to the target greedy baseline
+# exact          - greedy verification; numerical equality needs a reference check
 # exact_sampling - speculative sampling; target *distribution* preserved
 # approx         - greedy commits with verification skipped some rounds
 Mode = Literal["exact", "exact_sampling", "approx"]
@@ -67,6 +68,37 @@ class DecodeConfig:
     # Where the full-precision verifier KV lives (reported in metadata, docs/design.md §2.4).
     full_kv_residency: Literal["gpu", "cpu_pinned"] = "gpu"
 
+    def __post_init__(self) -> None:
+        self.validate()
+
+    def validate(self) -> None:
+        if self.mode not in ("exact", "exact_sampling", "approx"):
+            raise ValueError(f"unknown mode {self.mode!r}")
+        for name, minimum in (
+            ("max_new_tokens", 0), ("draft_len", 0), ("canvas_len", 0), ("verify_every", 1),
+        ):
+            value = getattr(self, name)
+            if isinstance(value, bool) or not isinstance(value, int) or value < minimum:
+                raise ValueError(f"{name} must be an integer >= {minimum}")
+        if (
+            isinstance(self.temperature, bool)
+            or not isinstance(self.temperature, (int, float))
+            or not math.isfinite(self.temperature)
+            or self.temperature < 0
+        ):
+            raise ValueError("temperature must be finite and >= 0")
+        if self.seed is not None and (
+            isinstance(self.seed, bool) or not isinstance(self.seed, int)
+        ):
+            raise ValueError("seed must be an integer or None")
+        if self.full_kv_residency not in ("gpu", "cpu_pinned"):
+            raise ValueError("full_kv_residency must be 'gpu' or 'cpu_pinned'")
+        if self.allowed_lanes is not None and (
+            not isinstance(self.allowed_lanes, list)
+            or any(not isinstance(lane, str) for lane in self.allowed_lanes)
+        ):
+            raise ValueError("allowed_lanes must be a list of names or None")
+
 
 @dataclass
 class VerifyResult:
@@ -91,6 +123,7 @@ class VerifyResult:
     # verification contract, so it is excluded from equality (the block and
     # reference verifiers may differ here by fp rounding).
     entropy: float = field(default=0.0, compare=False)
+    hidden_index: int = field(default=-1, compare=False)  # Row that predicted the new pending token.
 
     def __post_init__(self) -> None:
         if not self.committed:
@@ -114,7 +147,12 @@ class RoundRecord:
 
 @dataclass
 class GenerationOutput:
-    """Result of ``DartEngine.generate``."""
+    """Result of ``DartEngine.generate``.
+
+    Metadata separates ``greedy_verified`` from ``exact_greedy_equivalent``.
+    The latter is None because the engine does not run a reference comparison.
+    Floating-point results can depend on block shape, precision and backend.
+    """
 
     token_ids: list[int]  # generated tokens only (no prompt)
     text: Optional[str]

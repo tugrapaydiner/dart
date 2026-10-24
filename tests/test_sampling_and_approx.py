@@ -100,7 +100,8 @@ def test_sampling_at_near_zero_temperature_equals_greedy(tiny_target, seed, plen
     )
     assert out.token_ids == base  # T->0: sampling degenerates to greedy
     assert out.metadata["distribution_exact"] is True
-    assert out.metadata["exact_greedy_equivalent"] is False  # never claimed
+    assert out.metadata["exact_greedy_equivalent"] is None
+    assert out.metadata["greedy_verified"] is False
 
 
 def test_sampling_is_seed_deterministic(tiny_target):
@@ -153,7 +154,8 @@ def test_approx_with_verify_every_1_is_exact(tiny_target, seed, plen):
         prompt, DecodeConfig(mode="approx", verify_every=1, max_new_tokens=24)
     )
     assert out.token_ids == base
-    assert out.metadata["exact_greedy_equivalent"] is True
+    assert out.metadata["exact_greedy_equivalent"] is None
+    assert out.metadata["greedy_verified"] is True
     assert out.metadata["unverified_tokens"] == 0
     assert out.metadata["quality_risk"] is False
 
@@ -186,7 +188,8 @@ def test_approx_garbage_diverges_and_reports_risk(tiny_target):
     assert out.metadata["unverified_tokens"] > 0
     assert out.token_ids != base  # garbage committed unverified
     assert out.metadata["pending_divergence"] > 0
-    assert out.metadata["exact_greedy_equivalent"] is False
+    assert out.metadata["exact_greedy_equivalent"] is None
+    assert out.metadata["greedy_verified"] is False
     assert out.metadata["quality_risk"] is True
     assert len(out.token_ids) <= 24
 
@@ -201,4 +204,5 @@ def test_approx_unverified_eos_finishes_with_risk_flagged(tiny_target):
         DecodeConfig(mode="approx", verify_every=2, max_new_tokens=24, draft_len=4),
     )
     assert out.metadata["finished_eos"] is True
-    assert out.metadata["exact_greedy_equivalent"] is False
+    assert out.metadata["exact_greedy_equivalent"] is None
+    assert out.metadata["greedy_verified"] is False

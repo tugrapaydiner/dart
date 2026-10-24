@@ -1,23 +1,7 @@
-"""Canvas reconciliation - DART's novel contribution (docs/design.md §7).
+"""Reuse an unverified suffix after confidence filtering.
 
-After the verifier rejects a diffusion block at position j:
-
-  * the accepted prefix and the target's correction token are already
-    committed - they become ordinary context for the next round;
-  * the unverified suffix of the old canvas is NOT discarded: it is
-    partially re-noised (low-confidence slots re-masked) and used to
-    warm-start the next round's canvas, repaired with fewer denoise steps.
-
-Hypothesis: because diffusion refines canvases jointly, the stale suffix
-is often mostly right, so repairing beats re-drafting from scratch in
-accepted-tokens-per-diffusion-forward.  Correctness never depends on this:
-every proposed token still goes through the exact verifier.
-
-Why the ablation has two arms, not three: docs/design.md §7.3 lists
-"discard" and "full re-draft" baselines separately, but in DART's
-round-based engine both manifest identically - a fresh fully-masked canvas
-with the full step budget on the next round.  They are one baseline here
-(``mode="discard"``), compared against ``mode="reconcile"``.
+Adaptive repair restarts when no anchors remain or the last repair accepted
+nothing. Every proposed token still passes through the target verifier.
 """
 
 from __future__ import annotations
@@ -34,10 +18,10 @@ from dart.runtime.types import VerifyResult
 
 @dataclass
 class ReconcilePolicy:
-    mode: Literal["discard", "reconcile"] = "reconcile"
+    mode: Literal["discard", "reconcile", "adaptive"] = "reconcile"
     keep_confidence_above: float = 0.5
     max_keep_fraction: float = 0.75
-    repair_steps: int = 4  # < full denoise steps: this is the saving
+    repair_steps: int = 4
 
 
 def make_warm_canvas(

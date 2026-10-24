@@ -6,15 +6,12 @@ the pending token, already known from the target's own argmax).  This
 costs *zero extra target forwards*: the hidden state is a byproduct of the
 verify pass that just ran.
 
-Heads start random (useless drafts, exactness unaffected - the verifier
-guarantees that) and are trained on teacher traces via
-scripts/train_drafter.py / dart.diffusion.training_losses.
+Heads start random and are trained on teacher traces via scripts/train_mtp.py.
+Greedy verification checks their proposals against the target.
 
-Position bookkeeping (see TargetModel.record_hidden):
-  the verify pass fed [pending, d_1 .. d_K]; with m accepted drafts, row m
-  of the hidden block is the last on-trajectory position.  Its +1
-  prediction is the new pending token, so heads +2.. propose the drafts
-  for the next round.
+Each verifier reports the hidden row that predicted the new pending token.
+Heads +2.. use that row to propose the following tokens, including after
+another draft lane runs.
 """
 
 from __future__ import annotations
@@ -71,11 +68,9 @@ class MTPDrafter:
         if block is None:
             self._hidden = None
             return
-        # Row of the last on-trajectory token (see module docstring).  After
-        # prefill the engine has not called observe yet, so the first round
-        # is handled by after_prefill().
-        idx = min(result.n_draft_accepted, block.size(0) - 1)
-        self._hidden = block[idx]
+        self._hidden = block[result.hidden_index]
+
+    after_verify = observe
 
     def after_prefill(self) -> None:
         """Use the last prompt position's hidden state for round one."""

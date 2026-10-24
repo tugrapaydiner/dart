@@ -7,8 +7,7 @@ authors:
     given-names: "Tugrap"
 repository-code: "https://github.com/tugrapaydiner/dart"
 license: Apache-2.0
-version: 0.1.0
-date-released: "2026-06-17"
+version: 0.2.0
 keywords:
   - speculative decoding
   - diffusion language models
@@ -16,11 +15,10 @@ keywords:
   - LLM inference
   - exact verification
 abstract: >-
-  DART is a single-sequence LLM inference engine that decouples throughput
-  from fidelity: lossy draft lanes (block-diffusion canvases, multi-token
-  prediction, n-gram retrieval, compressed- and sparse-KV self-drafting)
-  propose token blocks that a full-precision target model verifies in one
-  forward pass, so exact mode is byte-identical to the target's greedy
-  decode by construction. Canvas reconciliation, a diffusion-specific
-  recovery step, re-noises and repairs the unverified canvas suffix after a
-  rejection instead of redrafting it.
+  DART is a single-sequence LLM inference engine with diffusion, multi-token,
+  n-gram, compressed-KV and sparse-KV draft lanes. A target model verifies
+  token proposals. Complete reference comparisons assess numerical agreement
+  for each model, device, precision and attention backend. Canvas
+  reconciliation repairs the unverified suffix after rejection. Local
+  Supra-50M presets, bounded teacher traces and compact training support
+  reproducible decoding experiments.

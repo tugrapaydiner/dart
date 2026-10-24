@@ -18,9 +18,8 @@ Drafters that only return tokens (n-gram, diffusion, ...) are treated as
 one-hot proposals: q(d) = 1, so acceptance is p(d) and the residual is p
 with d zeroed.  This is still exact; richer q only improves acceptance.
 
-The guarantee is DISTRIBUTIONAL, not trace-level: a sampled DART run will
-not reproduce some other run's token sequence, and metadata reports
-``exact_greedy_equivalent: false`` accordingly.
+The guarantee is DISTRIBUTIONAL, not trace-level. Sampling metadata reports
+``greedy_verified: false``. Reference equality is left unmeasured (None).
 """
 
 from __future__ import annotations
@@ -59,7 +58,7 @@ def speculative_accept_step(
         accept_prob = 1.0 if p_d > 0.0 else 0.0
     else:
         accept_prob = min(1.0, p_d / q_d)
-    u = float(torch.rand((), generator=generator))
+    u = float(torch.rand((), device=p.device, generator=generator))
     if u < accept_prob:
         return draft_token, True
 
@@ -67,7 +66,7 @@ def speculative_accept_step(
         residual = p.clone()
         residual[draft_token] = 0.0
     else:
-        residual = (p - q_row).clamp_min(0.0)
+        residual = (p - q_row.to(device=p.device)).clamp_min(0.0)
     z = float(residual.sum())
     if z <= 0.0:  # p == q (or numerically so): any p-sample is exact
         residual = p
@@ -131,4 +130,5 @@ def verify_block_sampling(
         n_draft_accepted=n_accepted,
         all_accepted=(n_accepted == k),
         finished=finished,
+        hidden_index=len(pending_block) + len(committed) - 2,
     )

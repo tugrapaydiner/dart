@@ -2,8 +2,8 @@
 
 Modes (docs/design.md §2):
 
-  * ``exact``          - greedy; output is byte-identical to
-                         ``TargetModel.greedy_generate`` by construction.
+  * ``exact``          - greedy verification. Compare complete outputs with a
+                         matching reference to check numerical equivalence.
   * ``exact_sampling`` - speculative sampling; the emitted distribution is
                          exactly the target's sampling distribution (see
                          verification/sampling.py).  Trace-level identity
@@ -119,6 +119,10 @@ class DartEngine:
     def _all_drafters(self) -> list[Drafter]:
         return list(self.lanes.values()) if self.lanes is not None else [self.drafter]
 
+    def _synchronize_round(self) -> None:
+        if torch.device(self.target.device).type == "cuda":
+            torch.cuda.synchronize(self.target.device)
+
     @staticmethod
     def _gpu_free_gb() -> float:
         if torch.cuda.is_available():
@@ -178,6 +182,8 @@ class DartEngine:
         sampling mode; greedy modes always use the drafter's argmax
         proposals so exact greedy acceptance is not diluted.
         """
+        if budget <= 0:
+            return [], None
         if sampling and hasattr(drafter, "propose_with_probs"):
             drafts, probs = drafter.propose_with_probs(committed, budget)
             return list(drafts), probs
@@ -195,10 +201,10 @@ class DartEngine:
                 raise ValueError("text prompt requires a tokenizer; pass token ids")
             prompt_ids = self.target.tokenizer.encode(prompt_ids)
         config = config or self.default_decode_config or DecodeConfig()
-        if config.mode not in ("exact", "exact_sampling", "approx"):
-            raise ValueError(f"unknown mode {config.mode!r}")
-        if config.mode == "approx" and config.verify_every < 1:
-            raise ValueError("verify_every must be >= 1")
+        config.validate()
+        timed_scheduler = getattr(self.scheduler, "requires_round_timing", False)
+        if timed_scheduler and (config.mode != "exact" or config.full_kv_residency != "gpu"):
+            raise ValueError("time scheduling requires exact mode and resident target KV")
         if self.verifier_name == "tree" and config.mode != "exact":
             raise ValueError(
                 "the tree verifier supports exact (greedy) mode only; "
@@ -207,7 +213,7 @@ class DartEngine:
         sampling = config.mode == "exact_sampling"
         generator = None
         if sampling:
-            generator = torch.Generator()
+            generator = torch.Generator(device=self.target.device)
             generator.manual_seed(config.seed if config.seed is not None else 0)
             verify_fn: VerifyFn = partial(
                 verify_block_sampling,
@@ -228,7 +234,10 @@ class DartEngine:
         t_start = time.perf_counter()
 
         prompt = list(prompt_ids)
+        self.target.validate_generation(len(prompt), config.max_new_tokens)
         state, logits = self.target.prefill(prompt)
+        if self.scheduler is not None and hasattr(self.scheduler, "reset"):
+            self.scheduler.reset()
         for d in self._all_drafters():
             if hasattr(d, "after_prefill"):
                 d.after_prefill()
@@ -268,7 +277,10 @@ class DartEngine:
             d0 = torch.softmax(logits.float(), dim=-1)
             ent_ewma = float(-(d0 * d0.clamp_min(1e-12).log()).sum())
 
+        if timed_scheduler:
+            self._synchronize_round()
         while not finished and len(generated) < config.max_new_tokens:
+            round_start = time.perf_counter() if timed_scheduler else 0.0
             committed_seq = prompt + generated
             drafter, draft_len = self._pick_lane(
                 config, len(prompt), len(generated), entropy_ewma=ent_ewma
@@ -276,16 +288,21 @@ class DartEngine:
 
             t0 = time.perf_counter()
             budget = config.max_new_tokens - len(generated)
-            per_round = min(draft_len, budget)
+            per_round = min(draft_len, budget - 1)  # Leave room for the verifier's token.
             if self.verifier_name == "tree":
                 # Tree-capable drafters propose several candidate branches;
                 # plain drafters degrade to a chain, for which tree and
                 # block verification coincide decision-for-decision.
-                if hasattr(drafter, "propose_tree") and per_round > 0:
+                if per_round <= 0:
+                    drafts = DraftTree.chain([])
+                elif hasattr(drafter, "propose_tree"):
                     drafts = drafter.propose_tree(committed_seq, per_round)
                 else:
                     linear = list(drafter.propose(committed_seq, per_round))
                     drafts = DraftTree.chain(linear[:per_round])
+                if not isinstance(drafts, DraftTree):
+                    drafts = DraftTree.chain(list(drafts))
+                drafts = drafts.truncate(per_round)
                 draft_probs = None
             else:
                 drafts, draft_probs = self._propose(
@@ -344,7 +361,10 @@ class DartEngine:
                 t2 = time.perf_counter()
 
                 drafter.observe(result)
-                if self.scheduler is not None:
+                for other in self._all_drafters():
+                    if other is not drafter and hasattr(other, "after_verify"):
+                        other.after_verify(result)
+                if self.scheduler is not None and not timed_scheduler:
                     self.scheduler.observe(
                         drafter.name, result,
                         draft_ms=(t1 - t0) * 1000.0,
@@ -377,6 +397,14 @@ class DartEngine:
             rounds.append(rec)
             metrics.record_round(rec)
             round_idx += 1
+            if timed_scheduler:
+                kv_gb = self._drafter_kv_gb(drafter)
+                self._synchronize_round()
+                self.scheduler.observe(
+                    drafter.name, result,
+                    draft_ms=rec.draft_ms, verify_ms=rec.verify_ms, kv_gb=kv_gb,
+                    round_ms=(time.perf_counter() - round_start) * 1000.0,
+                )  # Includes loop work; the feedback update itself is outside the timer.
 
         if pending_park is not None:  # drain the final in-flight offload
             parked = pending_park.wait()
@@ -384,17 +412,15 @@ class DartEngine:
             res_stats.moved_bytes += parked.moved_bytes
         prefetcher.close()
 
-        # The last round may overshoot the budget; greedy streams are
-        # prefix-stable, so truncation preserves exactness.
         generated = generated[: config.max_new_tokens]
 
         trailing_unverified = max(0, len(pending_block) - 1)
         if config.mode == "exact":
-            exact_equiv = True
+            greedy_verified = True
         elif config.mode == "approx":
-            exact_equiv = divergence_total == 0 and trailing_unverified == 0
+            greedy_verified = divergence_total == 0 and trailing_unverified == 0
         else:
-            exact_equiv = False  # sampling: distributional, not trace-level
+            greedy_verified = False
 
         metrics.tokens_generated = len(generated)
         metrics.wall_time_ms = (time.perf_counter() - t_start) * 1000.0
@@ -408,7 +434,8 @@ class DartEngine:
         metadata = metrics.to_metadata(
             run_id=run_id,
             verifier=("sampling" if sampling else self.verifier_name),
-            exact_greedy_equivalent=exact_equiv,
+            exact_greedy_equivalent=None,  # No reference generation was run.
+            greedy_verified=greedy_verified,
             output_hash=output_hash(generated),
             finished_eos=bool(generated and generated[-1] in self.target.eos_token_ids),
             gpu_kv_gb=round(kv_gb, 6),
