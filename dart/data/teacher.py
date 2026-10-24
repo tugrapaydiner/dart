@@ -35,6 +35,7 @@ def target_fingerprint(target: TargetModel) -> dict:
         "hidden_size": target.model.config.hidden_size,
         "vocab_size": target.model.config.vocab_size,
         "context_limit": target.model.config.max_position_embeddings,
+        **({"native_rms_norms": target.native_rms_norm_count} if target.native_rms_norm_count else {}),
     }
 
 

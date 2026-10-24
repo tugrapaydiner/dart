@@ -57,6 +57,7 @@ def build_target(spec: dict) -> TargetModel:
         record_hidden=bool(spec.get("record_hidden", False)),
         attn_implementation=spec.get("attn_implementation", "eager"),
         local_files_only=bool(spec.get("local_files_only", False)),
+        native_rms_norm=spec.get("native_rms_norm", False),
     )
 
 
@@ -87,6 +88,7 @@ def build_tiny_target(seed: int, spec: Optional[dict] = None) -> TargetModel:
             spec.get("precision", "fp32"), torch.float32
         ),
         record_hidden=bool(spec.get("record_hidden", False)),
+        native_rms_norm=spec.get("native_rms_norm", False),
     )
 
 

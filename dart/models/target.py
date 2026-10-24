@@ -57,8 +57,18 @@ class TargetModel:
         device: str = "cpu",
         dtype: torch.dtype = torch.float32,
         record_hidden: bool = False,
+        native_rms_norm: bool = False,
     ) -> None:
+        from dart.models.rms_norm import TorchRMSNorm, enable_native_rms_norm
+
+        if type(native_rms_norm) is not bool:
+            raise ValueError("native_rms_norm must be a boolean")
+        if native_rms_norm and dtype != torch.float32:
+            raise ValueError("native RMSNorm requires float32")
         self.model = model.to(device=device, dtype=dtype)
+        if native_rms_norm:
+            enable_native_rms_norm(self.model)
+        self.native_rms_norm_count = sum(isinstance(module, TorchRMSNorm) for module in self.model.modules())
         self.model.eval()
         self.model.requires_grad_(False)
         self.tokenizer = tokenizer
@@ -95,6 +105,7 @@ class TargetModel:
         trust_remote_code: bool = False,
         record_hidden: bool = False,
         local_files_only: bool = False,
+        native_rms_norm: bool = False,
     ) -> "TargetModel":
         if dtype is None:
             dtype = torch.float32 if device == "cpu" else torch.bfloat16
@@ -108,7 +119,8 @@ class TargetModel:
         tokenizer = AutoTokenizer.from_pretrained(
             name_or_path, trust_remote_code=trust_remote_code, local_files_only=local_files_only
         )
-        return cls(model, tokenizer, device=device, dtype=dtype, record_hidden=record_hidden)
+        return cls(model, tokenizer, device=device, dtype=dtype, record_hidden=record_hidden,
+                   native_rms_norm=native_rms_norm)
 
     def _collect_eos_ids(self) -> frozenset[int]:
         ids: set[int] = set()
