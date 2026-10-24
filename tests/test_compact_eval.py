@@ -5,9 +5,9 @@ import json
 import sys
 
 import pytest
-from scripts import run_corpus_eval
 
 from dart.diffusion.compact_training import CompactTrainer
+from scripts import run_corpus_eval
 from tests.test_compact_training import MODEL, TRAIN, training_inputs
 
 

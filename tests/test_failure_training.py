@@ -8,7 +8,6 @@ from unittest.mock import patch
 
 import pytest
 import torch
-from scripts import collect_failures, train_compact
 
 from dart.data.failures import FailureDataset, write_failures
 from dart.diffusion.compact_training import (
@@ -19,6 +18,7 @@ from dart.diffusion.compact_training import (
 )
 from dart.drafters.compact_diffusion import CompactDiffusionModel
 from dart.models.target import TargetModel
+from scripts import collect_failures, train_compact
 from tests.test_compact_training import MODEL, TRAIN, training_inputs
 from tests.test_sampling_devices import DEVICES
 

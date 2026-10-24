@@ -6,7 +6,6 @@ from collections import Counter
 from types import SimpleNamespace
 
 import pytest
-from scripts import build_corpus
 
 from dart.data.corpus import (
     SPLITS,
@@ -16,6 +15,7 @@ from dart.data.corpus import (
     validate_records,
 )
 from dart.data.pilot import FAMILIES, build_pilot
+from scripts import build_corpus
 from tests.test_corpus_storage import Tokenizer
 
 

@@ -7,12 +7,12 @@ from dataclasses import replace
 from statistics import mean
 
 import pytest
-from scripts import run_reconciliation_ablation as command
 
 from benchmarks import reconciliation
 from benchmarks.headroom import BASELINES
 from dart.diffusion.compact_training import CompactTrainer
 from dart.runtime.types import GenerationOutput
+from scripts import run_reconciliation_ablation as command
 from tests.test_compact_training import MODEL, TRAIN, training_inputs
 from tests.test_corpus_eval import Tokenizer, records
 from tests.test_reconciliation_arms import compact_model

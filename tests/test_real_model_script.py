@@ -3,9 +3,9 @@ from __future__ import annotations
 from types import SimpleNamespace
 
 import pytest
-from scripts import run_real_model
 
 from dart.runtime.metrics import output_hash
+from scripts import run_real_model
 
 
 def configure_run(monkeypatch, hf_tokens, baseline_tokens, with_lanes):
