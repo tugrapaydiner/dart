@@ -108,3 +108,17 @@ def test_command_can_skip_profiles_without_skipping_timings(local_model, tmp_pat
     assert report["profile"] is None and report["profiling_requested"] is False
     assert len(report["timing"]["samples"]) == 20
     assert "profiling was skipped" in capsys.readouterr().err
+
+
+def test_native_norm_benchmark_uses_the_same_target_for_every_method(local_model, tmp_path, monkeypatch):
+    directory, built = local_model
+    monkeypatch.setattr("dart.data.pilot.build_pilot", lambda seed: records())
+    output = tmp_path / "native.json"
+    assert cli.main(["bench", "--model", str(directory), "--native-rms-norm", "--skip-profile",
+                     "--warmup", "1", "--repeats", "2", "--out", str(output)]) == 0
+    report = json.loads(output.read_text())
+    assert report["target"]["native_rms_norms"] == 5 and len(built) == 1
+    assert {row["method"] for row in report["timing"]["samples"]} == {
+        "hf_greedy", "hf_prompt_lookup", "target_greedy", "target_only", "dart",
+    }
+    assert len(report["timing"]["samples"]) == 20 and report["correctness"]["summary"]["exact_match_rate"] == 1

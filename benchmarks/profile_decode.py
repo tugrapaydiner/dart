@@ -114,6 +114,7 @@ def main(argv=None):
     parser = argparse.ArgumentParser(description="Capture a bounded decode trace from a frozen pilot or validation prompt.")
     parser.add_argument("--model", required=True, help="existing local Supra-50M directory")
     parser.add_argument("--device", choices=("cpu", "cuda"), default="cpu")
+    parser.add_argument("--native-rms-norm", action="store_true", help="use PyTorch RMSNorm for float32 Llama layers")
     parser.add_argument("--case", default="v03-train-code-00")
     parser.add_argument("--max-new", type=int, default=8)
     parser.add_argument("--out", required=True, help="new JSON report; a .trace.json file is saved beside it")
@@ -124,7 +125,7 @@ def main(argv=None):
         parser.error("max-new must be from 1 to 32")
     if output.exists() or trace.exists():
         parser.error("report and trace paths must be new")
-    with build_engine(supra_config(args.model, args.device)) as engine:
+    with build_engine(supra_config(args.model, args.device, native_rms_norm=args.native_rms_norm)) as engine:
         records = load_frozen(engine.target.tokenizer, engine.target.model.config.max_position_embeddings)
         selected = [row for row in records if row.id == args.case and row.split != "test"]
         if len(selected) != 1:

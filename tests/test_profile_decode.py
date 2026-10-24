@@ -11,6 +11,8 @@ from dart.drafters.ngram import NGramDrafter
 from dart.runtime.engine import DartEngine
 from dart.runtime.types import DecodeConfig
 from tests.conftest import build_tiny_target
+from tests.test_cli_check import local_model as local_model
+from tests.test_corpus_eval import records
 
 
 def test_trace_records_real_operators_and_preserves_output_and_hooks(tmp_path):
@@ -93,3 +95,23 @@ def test_command_preserves_existing_report_before_loading(tmp_path, monkeypatch)
     with pytest.raises(SystemExit) as error:
         main(["--model", "missing", "--out", str(output)])
     assert error.value.code == 2 and output.read_text() == "keep"
+
+
+def test_command_profiles_the_selected_native_norm_backend(local_model, tmp_path, monkeypatch):
+    from benchmarks import profile_decode
+    from dart.runtime import factory
+
+    directory, built = local_model
+
+    def build(config):
+        engine = factory.build_engine(config)
+        engine.default_decode_config = DecodeConfig(**config["decode"])
+        return engine
+
+    monkeypatch.setattr(profile_decode, "build_engine", build)
+    monkeypatch.setattr(profile_decode, "load_frozen", lambda *args: records())
+    output = tmp_path / "native-profile.json"
+    main(["--model", str(directory), "--native-rms-norm", "--case", "a", "--max-new", "3", "--out", str(output)])
+    report = json.loads(output.read_text())
+    assert report["target"]["native_rms_norms"] == 5 and len(built) == 1
+    assert any("rms_norm" in row["name"] for row in report["operations"])

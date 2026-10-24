@@ -25,6 +25,7 @@ def _parser() -> argparse.ArgumentParser:
     for command in (check, bench, demo):
         command.add_argument("--model", required=True, help="existing local Supra-50M model directory")
         command.add_argument("--device", choices=("cpu", "cuda"), default="cpu")
+        command.add_argument("--native-rms-norm", action="store_true", help="use PyTorch RMSNorm for float32 Llama layers")
     for command in (check, bench):
         command.add_argument("--corpus", help="versioned corpus directory; otherwise generate the fixed pilot")
         command.add_argument("--split", choices=("train", "validation", "test"), default="validation")
@@ -77,7 +78,7 @@ def _run(args) -> int:
     timing_output = output.with_suffix(".timing.json")
     if args.command == "bench" and timing_output.exists():
         raise FileExistsError(f"timing output already exists: {timing_output}")
-    config = supra_config(args.model, args.device)
+    config = supra_config(args.model, args.device, native_rms_norm=args.native_rms_norm)
 
     def progress(done, total):
         if done % 8 == 0 or done == total:
@@ -150,7 +151,7 @@ def _demo(args) -> int:
     from dart.runtime.factory import build_engine
     from dart.runtime.server import serve
 
-    with build_engine(supra_config(args.model, args.device)) as engine:
+    with build_engine(supra_config(args.model, args.device, native_rms_norm=args.native_rms_norm)) as engine:
         try:
             serve(engine, port=args.port)
         except KeyboardInterrupt:

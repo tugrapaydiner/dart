@@ -34,13 +34,25 @@ def local_model(tmp_path, monkeypatch):
     def build(config):
         model = build_tiny_target().model
         model.set_attn_implementation(config["target"]["attn_implementation"])
-        target = TargetModel(model, tokenizer=Tokenizer(), device=config["target"]["device"])
+        target = TargetModel(model, tokenizer=Tokenizer(), device=config["target"]["device"],
+                             native_rms_norm=config["target"].get("native_rms_norm", False))
         engine = DartEngine(target, NGramDrafter())
         built.append((config, engine))
         return engine
 
     monkeypatch.setattr("dart.runtime.factory.build_engine", build)
     return directory, built
+
+
+def test_check_command_can_enable_and_record_native_norm(local_model, tmp_path, monkeypatch):
+    directory, built = local_model
+    monkeypatch.setattr("dart.data.pilot.build_pilot", lambda seed: records())
+    output = tmp_path / "native.json"
+    assert cli.main(["check", "--model", str(directory), "--native-rms-norm", "--out", str(output)]) == 0
+    report = json.loads(output.read_text())
+    assert report["target"]["native_rms_norms"] == 5
+    assert report["preset"]["target"]["native_rms_norm"] is True
+    assert report["summary"]["exact_match_rate"] == 1 and len(built) == 1
 
 
 @pytest.mark.parametrize("device", DEVICES)
