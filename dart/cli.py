@@ -33,6 +33,7 @@ def _parser() -> argparse.ArgumentParser:
     bench.add_argument("--per-workload", type=int, default=1, help="first sorted IDs per workload, 1-32 (default: 1)")
     bench.add_argument("--warmup", type=int, default=2, help="warm-up passes, 1-10 (default: 2)")
     bench.add_argument("--repeats", type=int, default=10, help="measured repeats, 2-100 (default: 10)")
+    bench.add_argument("--skip-profile", action="store_true", help="save latency comparisons without separate phase diagnostics")
     demo.add_argument("--port", type=int, default=8400, help="localhost port; 0 picks a free port (default: 8400)")
     add_commands(commands)
     add_command(commands)
@@ -110,12 +111,14 @@ def _run(args) -> int:
                 with timing_output.open("x", encoding="utf-8") as destination:
                     json.dump({**partial, **metadata, "selection": selection}, destination, indent=2)
                     destination.write("\n")
-                print(f"Saved timings to {timing_output}; profiling is still pending", file=sys.stderr, flush=True)
+                phase = "profiling was skipped" if args.skip_profile else "profiling is still pending"
+                print(f"Saved timings to {timing_output}; {phase}", file=sys.stderr, flush=True)
 
             report = benchmark_corpus(
                 engine, selected, warmup=args.warmup, repeats=args.repeats, seed=args.seed,
                 progress=lambda message: print(message, file=sys.stderr, flush=True),
                 on_timing=save_timing,
+                profile=not args.skip_profile,
             )
             report["selection"] = selection
     report.update(metadata)

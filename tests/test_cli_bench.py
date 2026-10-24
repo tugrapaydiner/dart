@@ -95,3 +95,16 @@ def test_existing_timing_file_is_preserved_before_loading(local_model, tmp_path)
         cli.main(["bench", "--model", str(directory), "--out", str(output)])
     assert error.value.code == 2 and not built and not output.exists()
     assert saved.read_text() == "keep previous timings"
+
+
+def test_command_can_skip_profiles_without_skipping_timings(local_model, tmp_path, monkeypatch, capsys):
+    directory, _ = local_model
+    monkeypatch.setattr("dart.data.pilot.build_pilot", lambda seed: records())
+    monkeypatch.setattr("benchmarks.corpus_bench.profile_methods", lambda *a, **k: pytest.fail("unexpected profile"))
+    output = tmp_path / "timings.json"
+    assert cli.main(["bench", "--model", str(directory), "--warmup", "1", "--repeats", "2",
+                     "--skip-profile", "--out", str(output)]) == 0
+    report = json.loads(output.read_text())
+    assert report["profile"] is None and report["profiling_requested"] is False
+    assert len(report["timing"]["samples"]) == 20
+    assert "profiling was skipped" in capsys.readouterr().err

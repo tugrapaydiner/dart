@@ -49,14 +49,17 @@ def benchmark_corpus(
     warmup: int = 2, repeats: int = 10, seed: int = 17, progress=None,
     on_timing: Callable[[dict], None] | None = None,
     lookup_tokens: int | None = None, lookup_max_ngram: int = 4,
+    profile: bool = True,
 ) -> dict:
-    """Repeated comparisons with separate correctness and phase diagnostics."""
+    """Repeated comparisons with full output checks and optional phase diagnostics."""
     if type(warmup) is not int or type(repeats) is not int or warmup < 1 or repeats < 2:
         raise ValueError("use warmup >= 1 and repeats >= 2")
     if type(seed) is not int or seed < 0:
         raise ValueError("seed must be a nonnegative integer")
+    if type(profile) is not bool:
+        raise ValueError("profile must be a boolean")
     if engine.verifier_name != "block":
-        raise ValueError("benchmark phase profiling requires the block verifier")
+        raise ValueError("corpus benchmarking requires the block verifier")
     target = engine.target
     config = config or engine.default_decode_config or DecodeConfig()
     config.validate()
@@ -95,18 +98,23 @@ def benchmark_corpus(
                 "split": checks["split"], "selected_corpus_hash": checks["selected_corpus_hash"],
                 "seed": seed, "correctness": checks, "timing": timing,
                 "hf_prompt_lookup": lookup_settings,
+                "profiling_requested": profile,
                 "record_hidden_by_method": {name: target.record_hidden if name == "dart" else False for name in methods},
             })
-        if progress:
-            progress("Repeated timing passed; starting separate phase profiling")
-        profile = profile_methods(methods, prompts, target, {"target_only": baseline, "dart": engine})
-    for sample in [*timing["samples"], *profile["samples"]]:
+        profile_report = None
+        if profile:
+            if progress:
+                progress("Repeated timing passed; starting separate phase profiling")
+            profile_report = profile_methods(methods, prompts, target, {"target_only": baseline, "dart": engine})
+    profile_samples = profile_report["samples"] if profile_report is not None else []
+    for sample in [*timing["samples"], *profile_samples]:
         if sample["output_hash"] != checks["outputs"][sample["prompt_index"]]["output_hash"]:
             raise ValueError("reference output changed between correctness, timing and profiling")
     return {
         "schema": "dart-corpus-benchmark-v1", "split": checks["split"],
         "selected_corpus_hash": checks["selected_corpus_hash"], "seed": seed,
-        "correctness": checks, "timing": timing, "profile": profile,
+        "correctness": checks, "timing": timing, "profile": profile_report,
+        "profiling_requested": profile,
         "hf_prompt_lookup": lookup_settings,
         "baseline_methods": list(COMPARISON_BASELINES),
         "lookup_scope": "native HF lookup; prompt must not end in EOS; reserve draft length minus one extra context positions",

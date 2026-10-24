@@ -111,6 +111,21 @@ def test_lookup_budget_can_be_explicit_for_a_no_drafting_ablation():
     assert report["correctness"]["summary"]["draft_tokens_proposed"] == 0
 
 
+def test_skipping_profiles_keeps_all_timing_and_output_checks(monkeypatch):
+    monkeypatch.setattr(corpus_bench, "profile_methods", lambda *a, **k: pytest.fail("profiling was not requested"))
+    saved, progress = [], []
+    with build_engine() as engine:
+        report = corpus_bench.benchmark_corpus(
+            engine, records(), warmup=1, repeats=2, profile=False, on_timing=saved.append, progress=progress.append,
+        )
+        assert engine.target.record_hidden is True
+    assert report["profile"] is None and report["profiling_requested"] is False
+    assert saved[0]["profiling_requested"] is False and len(progress) == 1
+    assert len(report["timing"]["samples"]) == 20
+    for sample in report["timing"]["samples"]:
+        assert sample["output_hash"] == report["correctness"]["outputs"][sample["prompt_index"]]["output_hash"]
+
+
 @pytest.mark.parametrize("phase", ["timing", "profiling"])
 def test_changed_reference_between_phases_fails_the_benchmark(monkeypatch, phase):
     name = "measure_methods" if phase == "timing" else "profile_methods"
@@ -146,6 +161,7 @@ def test_changed_timing_reference_cannot_be_saved(monkeypatch):
 @pytest.mark.parametrize("options", [
     {"warmup": 0}, {"repeats": 1}, {"warmup": True}, {"seed": -1}, {"seed": True},
     {"lookup_tokens": 0}, {"lookup_max_ngram": True}, {"config": DecodeConfig(draft_len=0)},
+    {"profile": 1},
 ])
 def test_invalid_settings_fail_before_generation(monkeypatch, options):
     monkeypatch.setattr(corpus_bench, "evaluate_corpus", lambda *args: pytest.fail("invalid settings reached generation"))
