@@ -1,472 +1,266 @@
-# DART: Diffusion-Augmented Reliable Transformer Serving
+# DART v0.2
 
-[![ci](https://github.com/tugrapaydiner/dart/actions/workflows/ci.yml/badge.svg)](https://github.com/tugrapaydiner/dart/actions/workflows/ci.yml)
-![license](https://img.shields.io/badge/license-Apache--2.0-blue)
-![python](https://img.shields.io/badge/python-3.10%2B-blue)
+Draft several tokens, then let the target verify them.
+Faster greedy decoding on the local Supra-50M model.
 
-> **Abstract.** DART is a single-sequence inference engine that decouples
-> *throughput* from *fidelity*: lossy draft lanes — block-diffusion canvases,
-> multi-token-prediction (MTP) heads, n-gram retrieval, and compressed- or
-> sparse-KV self-drafting — propose token blocks that a full-precision target
-> verifies in one forward pass, committing only tokens that coincide with the
-> target's own argmax. Exact mode is therefore byte-identical to the target's
-> greedy decode by construction and independent of weights, so drafter error is
-> a throughput cost, never a quality one. We add *canvas reconciliation*, a
-> diffusion-specific recovery step that re-noises and repairs the unverified
-> canvas suffix after a rejection instead of redrafting it, raising
-> accepted-tokens-per-diffusion-forward by +55% ± 8% (mean ± sample std over
-> 5 prompt seeds, min +46%) while preserving exactness, and *tree
-> verification*, which decides among several candidate branches in one
-> target forward. The contract is discharged by a
-> weight-independent verifier-equivalence suite and validated byte-exact
-> against Hugging Face greedy decoding on a real checkpoint, on CPU and CUDA;
-> on an RTX 5060 (gpt2, fp32, code prompts) the n-gram lane measures **2.20×**
-> wall-clock over the same-run greedy baseline with every lane byte-exact
-> (§10).
+`FP32 · one sequence · 4-token n-gram drafts · 1,024-token context`
 
----
+## Benchmarks
 
-## 1. Method
+![Throughput comparison: Hugging Face generate, direct target greedy, target-only engine and DART n-gram on CPU and GPU. DART reaches 27.4 and 39.6 tokens per second.](docs/figures/v0.2/throughput.svg)
 
-Decoding proceeds in rounds over a single sequence. Each round selects a lane,
-draws a block of $K$ candidate tokens, runs the target once over the committed
-prefix concatenated with the block, commits the maximal verifier-consistent
-prefix plus one target token, and — for the diffusion lane — reconciles rather
-than discards the rejected suffix. The engine maintains the invariant that the
-target KV cache covers every committed token except the pending one, which is
-re-folded into the next verification pass; greedy decoding is the degenerate
-$K{=}0$ instance of the same path.
+**2.18× GPU · 1.46× CPU** vs the fastest measured target-only baseline.
+All four methods use the same weights, prompts and output limits.
 
-```mermaid
-flowchart LR
-    P["prefix p"] --> S["lane scheduler"]
-    S --> L["draft lane — lossy, cheap<br/>diffusion · MTP · n-gram · compressed/sparse KV"]
-    L -->|"K draft tokens"| V["block verifier<br/>full-precision target · one forward"]
-    V -->|"accept longest argmax-match + 1 target token"| O["committed output ≡ target greedy"]
-    V -.->|"reject"| R["re-noise + repair canvas"]
-    R -.-> L
+24 test cases · 10 repeats · **128/128 complete HF outputs matched per device**.
+All 960 timed and 192 profiled outputs per device matched too.
+
+<details>
+<summary>Speedup on every test case</summary>
+
+![DART per-case speedup versus the fastest of the three measured baselines. Mean latency was lower on 24 of 24 GPU cases and 20 of 24 CPU cases.](docs/figures/v0.2/case-speedups.svg)
+
+Each case uses its fastest baseline: HF generate, direct target greedy or the
+target-only engine. Points compare mean latency over ten repeats on these 24 fixed cases.
+
+</details>
+
+## Workloads
+
+![Direct target greedy versus DART n-gram across code, instruction, repetition and structured workloads on CPU and GPU. Paired bars show mean latency; whiskers show 95% intervals.](docs/figures/v0.2/workload-comparison.svg)
+
+## Output budgets
+
+![Hugging Face and DART latency at 32, 64 and 128-token output budgets. Separate CPU and GPU panels use the same scale; whiskers show 95% intervals.](docs/figures/v0.2/latency-by-budget.svg)
+
+At 32 tokens, CPU speedup was **1.21×**; the **1.25×** target was missed.
+
+## GPU memory
+
+![Peak allocated GPU memory for the four methods: HF generate uses 215.8 MiB; target greedy, target-only engine and DART each round to 227.8 MiB.](docs/figures/v0.2/gpu-memory.svg)
+
+**227.8 MiB** for DART · **215.8 MiB** for HF generate.
+Peak PyTorch allocations; total device memory use is outside this measurement.
+
+<details>
+<summary>Where request time goes</summary>
+
+![Stacked request times for all four methods on CPU and GPU. Setup and prefill are hatched; decoding is solid.](docs/figures/v0.2/request-profile.svg)
+
+Separate diagnostic requests: 24 cases, two repeats, with phase synchronization.
+These instrumented timings are excluded from the headline speedups.
+
+</details>
+
+## Learned drafting
+
+**2.08M parameters · acceptance 5.76% → 12.45% · one training seed.**
+No learned policy beat the fastest target-only baseline in the pilot aggregate.
+The 10% repair latency target was missed.
+
+<details>
+<summary>Compare all drafting policies</summary>
+
+![Nine drafting methods ordered by GPU latency. Each row has GPU and CPU bars on matching scales, with aligned numerical values. DART n-gram is fastest on both devices.](docs/figures/v0.2/policy-comparison.svg)
+
+Separate four-case validation pilot, with a 32-token budget.
+These timings use a different case set from the final benchmark above.
+One row per policy, ordered by GPU latency. Whiskers show 95% intervals.
+
+</details>
+
+[Protocol](benchmarks/results/v0.2/protocol.json) ·
+[All results](benchmarks/results/v0.2/summary.json) ·
+[Outputs](benchmarks/results/v0.2/correctness.json) ·
+[Raw timings](benchmarks/results/v0.2/timings.json) ·
+[Pilots & failures](benchmarks/results/v0.2/validation-pilots.json)
+
+## Run
+
+Use a local **HF-format Supra-50M-Instruct** folder as `MODEL_DIR`.
+GGUF is unsupported. These commands require the [project dependencies](pyproject.toml)
+already installed; they do not download a model.
+
+```sh
+python -m pip install --no-build-isolation --no-deps .
+dart --version
+dart check --model "MODEL_DIR" --device cuda
+dart bench --model "MODEL_DIR" --device cuda --warmup 1 --repeats 2
+dart demo --model "MODEL_DIR" --device cuda
 ```
 
-*Figure 1: The draft → verify → commit loop. Lanes are advisory; only the
-verifier emits tokens, so lossy compute moves throughput, not output.*
-
----
-
-## 2. Exactness contract
-
-Under greedy decoding the engine is observationally equivalent to the target:
-
-$$
-\mathrm{DART}_{\mathrm{exact}}(x_{1:n}) \;=\; \mathrm{Target}_{\mathrm{greedy}}(x_{1:n}),
-$$
-
-token-for-token, including whitespace, structured-output delimiters, and the
-stop token. The property is verifier-induced rather than weight-induced — every
-committed token is, by definition, the target's full-precision argmax at that
-position — so it holds for arbitrary (including randomly-initialised) weights and
-transfers across checkpoints without retuning.
-
-Three verifiers bound the implementation. A reference verifier decides one
-token per single-token forward; a block verifier decides $K{+}1$ tokens per
-forward; a tree verifier decides among several candidate branches in one
-forward (§3). The suite asserts bitwise-identical commit sequences and
-identical KV lengths between the reference and block verifiers across
-adversarial, constant, oracle, n-gram, diffusion, compressed-KV and sparse
-drafters, pins the tree verifier to the block verifier by an enforced
-equivalence on chain-shaped trees, and asserts equality to the target
-baseline throughout.
-
-Ablating the verifier isolates its role: direct decoding on a quantised KV cache
-drifts from the target as precision drops, whereas DART, which uses the same
-cache only to draft, does not.
-
-![Exactness under aggressive KV compression](docs/figures/02_exactness_under_kv_compression.png)
-
-*Figure 2: Exact-match rate against the target greedy, measured per bit-width
-([exactness_vs_bits.md](benchmarks/results/exactness_vs_bits.md)). Unverified
-compressed-KV decoding degrades to zero as bit-width falls; the verified path
-stays at 1.0 while quantisation error surfaces as acceptance, not output.*
-
----
-
-## 3. Block verification
-
-For prefix $p$ and a proposed block $d_1,\dots,d_K$, a single causal forward over
-the concatenation yields the target next-token distribution at every position.
-Writing the target's own continuation and the longest consistent prefix as
-
-$$
-t_i \;=\; \arg\max\,\mathrm{Target}(p, d_1, \dots, d_{i-1}),
-\qquad
-m \;=\; \min\{\, i : d_i \neq t_i \,\} - 1,
-$$
-
-the round commits
-
-$$
-d_1, \dots, d_m,\; t_{m+1}
-\qquad\text{(and a free bonus } t_{K+1}\text{ when } m = K).
-$$
-
-An accepted EOS terminates the round without a correction. KV entries for the
-rejected suffix are rolled back by cropping the cache to length $|p| + m$, which
-re-establishes the round invariant. Because baseline and accelerated decoding
-share this code path, they cannot diverge by implementation; the only free
-parameter is how many of the $K{+}1$ committed tokens a single forward yields.
-
-**Tree verification** generalizes the block to several candidate branches
-sharing prefixes, packed into one forward with a tree-structured attention
-mask and depth-based position ids. The target's argmax walk selects at most
-one root-to-leaf path; the longest matching path is committed plus the usual
-correction or bonus, and the accepted path's KV entries are gathered out of
-the packed tail — valid because a packed node's K/V depend only on the prefix
-and its ancestor chain. A chain-shaped tree coincides with block verification
-decision-for-decision (enforced in tests). Enabled with
-`DartEngine(verifier="tree")`; the n-gram lane proposes multiple historical
-continuations as branches, and drafters without tree support degrade to
-chains. Exact (greedy) mode only; requires a model honoring custom 4D
-attention masks (Llama-family, eager attention).
-
-![Cost versus fidelity, measured on GPT-2](docs/figures/01_cost_vs_fidelity.png)
-
-*Figure 3: Target forward passes per output token (matched model, prompts and
-hardware). Exact methods fall below 1.0; an unverified compressed-KV decode is
-no cheaper and forfeits exactness.*
-
----
-
-## 4. Draft lanes
-
-Lanes are interchangeable behind the verifier; they differ only in how cheaply
-they approximate the target's argmax continuation. The operative metric is the
-acceptance rate $a$ (confirmed / proposed tokens), which sets committed tokens
-per round (§10).
-
-| Lane | Mechanism | Draft cost / round |
-|---|---|---|
-| `ngram` | longest-suffix match in context, continuation copied forward | retrieval only |
-| `mtp` | learned heads predicting offsets $+2,+3,\dots$ from one target hidden state | one head pass |
-| `diffusion` | bidirectional masked canvas, denoised in parallel, trained for acceptance (§5) | $s$ denoise passes |
-| `compressed_kv` | target self-drafting on an INT4 / INT8 / 1-bit-VQ KV cache | $K$ rolls, compressed KV |
-| `sparse_kv` | sink + sliding-window token-drop attention; cost flat in context length | $K$ rolls, compacted seq |
-| `block_sparse_kv` | top-$k$ context blocks by embedding relevance (MSA-style) | $K$ rolls, selected blocks |
-
-The KV lanes have the target draft on a cheaper cache (trading per-forward
-bandwidth); the retrieval/MTP lanes cut forward *count* instead. A scheduler
-arbitrates between them online (§9).
-
-![Draft acceptance by lane](docs/figures/08_draft_acceptance_by_lane.png)
-
-*Figure 4: Per-lane acceptance on the tiny target
-([cpu_bench_tiny.md](benchmarks/results/cpu_bench_tiny.md)). All lanes are
-exact; acceptance is purely a speed lever.*
-
----
-
-## 5. Diffusion drafter and training objective
-
-The diffusion lane denoises a fixed-length masked canvas conditioned on a
-right-aligned context window, via a compact bidirectional encoder. Denoising
-uses a MaskGIT-style cosine schedule with confidence-thresholded commits and
-adaptive early stopping. The drafter is optimised for *verifier acceptance*, not
-perplexity: a fluent but non-argmax token has zero value in exact mode. Training
-minimises a masked-denoising cross-entropy, a temperature-scaled KL to the
-target, a token-level cross-entropy to the target argmax (the acceptance term),
-and a confidence-calibration BCE:
-
-$$
-\mathcal{L} \;=\; \mathcal{L}_{\mathrm{den}} \;+\; 0.3\,\mathcal{L}_{\mathrm{kl}} \;+\; 0.5\,\mathcal{L}_{\mathrm{acc}} \;+\; 0.1\,\mathcal{L}_{\mathrm{cal}}.
-$$
-
-The acceptance term carries the largest weight; the calibration term makes
-per-slot confidence a usable acceptance estimator, which in turn drives adaptive
-stopping and the confidence-gated re-masking of §6. Supervision comes from
-teacher traces (target greedy continuation, per-token logits, entropy) corrupted
-into noisy canvases under masking, random-token, entropy-weighted,
-span-permutation, and syntax-aware noise.
-
----
-
-## 6. Canvas reconciliation
-
-After a rejection, an autoregressive draft suffix is conditioned on an overruled
-token and is discarded wholesale. A bidirectional canvas admits partial reuse.
-With $m$ slots accepted out of $K$, the prefix and correction enter the context,
-and the unverified suffix is re-masked at its low-confidence slots and repaired
-under a reduced step budget $r \ll s$ rather than redrawn:
-
-$$
-\underbrace{d_{m+1},\dots,d_K}_{\text{unverified suffix}}
-\;\xrightarrow{\text{re-mask low-confidence slots}}\;
-\text{repair in } r \ll s \text{ denoise passes}.
-$$
-
-Slots below a confidence threshold are re-masked; if too few qualify, the
-lowest-confidence slots are re-masked up to a cap. Joint refinement makes the
-stale suffix a strong initialisation, so repair dominates a cold redraft in
-accepted-tokens-per-FLOP. The verifier still gates every repaired token, so the
-optimisation is throughput-only.
-
-![Canvas reconciliation ablation](docs/figures/07_canvas_reconciliation.png)
-
-*Figure 5: Reconcile vs the discard/redraft baseline, both exact (bars show
-prompt seed 17). Across 5 prompt seeds reconciliation lifts
-accepted-tokens-per-diffusion-forward by +55% ± 8% (min +46%);
-per-seed table in
-[reconciliation_ablation.md](benchmarks/results/reconciliation_ablation.md).*
-
----
-
-## 7. Verified KV-cache compression
-
-In the long-context, batch-1 regime the KV cache dominates HBM traffic. For $L$
-layers, $H$ key/value heads, head dimension $d$, $s$ tokens and $b$ bytes per
-element, the full and DART caches are
-
-$$
-\mathrm{KV}_{\mathrm{full}}(s) = 2\,L\,H\,d\,s\,b,
-\qquad
-\mathrm{KV}_{\mathrm{DART}}(s) = 2\,L\,H\,d\,\big[\, w\,b_{\mathrm{hi}} + (s-w)\,b_{\mathrm{lo}} \,\big],
-$$
-
-where the leading factor 2 covers keys and values, $w$ is the full-precision
-sink + recent window, and the remaining tokens are stored at the low bit-width.
-A precision policy raises bit-width per token or per layer for attention sinks,
-the first/last layers, structural delimiters, and high-entropy positions, taking
-the maximum applicable width. The full-precision verifier cache may reside in
-pinned host memory and stream device-ward per round, overlapped with the next
-round's drafting, so device residency is the compressed cache alone. Aggressive
-quantisation is admissible precisely because verification runs on full KV:
-dequantisation error perturbs $a$, not the committed token.
-
-![GPU KV cache memory at scale](docs/figures/03_kv_cache_memory_at_scale.png)
-
-*Figure 6: Exact byte accounting for a 27B-class configuration (46 layers ×
-16 KV heads × d=128, bf16 baseline; fp window 1024 + int8 sinks + int4 rest,
-including fp32 scale/zero overhead); reduction rises with context as the
-fixed full-precision window amortises — 71% at 128K.*
-
----
-
-## 8. Distribution-exact sampling
-
-Greedy verification compares argmaxes. To preserve the target's full sampling
-distribution rather than only its mode, DART applies speculative sampling: a
-draft $d$ drawn from proposal $q$ is accepted with probability $\min(1, p(d)/q(d))$,
-a rejection resamples from the normalised positive residual, and full acceptance
-draws a bonus from the target. Token-only lanes are treated as one-hot proposals
-($q(d){=}1$), for which acceptance reduces to $p(d)$:
-
-$$
-\alpha(d) = \min\!\Big(1, \tfrac{p(d)}{q(d)}\Big),
-\quad
-d' \sim \frac{(p-q)^{+}}{\lVert (p-q)^{+}\rVert_1},
-\quad
-\min(p,q) + (p-q)^{+} = p.
-$$
-
-The identity on the right gives marginal correctness: the emitted token is
-distributed exactly as $p$. This is a distributional guarantee, not a trace-level
-one, and metadata flags it (`exact_greedy_equivalent: false`,
-`distribution_exact: true`).
-
----
-
-## 9. Online lane scheduling
-
-A scheduler maps a decode state (context length, prompt class, device headroom,
-per-lane acceptance EWMAs) to a lane each round. The default is a heuristic with
-sticky rejection-based fallback; a UCB contextual bandit is also provided, with
-per-lane reward
-
-$$
-\mathrm{reward}(\ell) = \frac{\text{committed tokens}}{\text{round latency}}
-\;-\; \lambda_{\mathrm{rej}}\,\rho_{\mathrm{rej}}
-\;-\; \lambda_{\mathrm{mem}}\,m_{\mathrm{KV}}
-$$
-
-i.e. accepted-tokens-per-second penalised by the rejection fraction and the
-observed per-lane KV footprint, with hard constraints that bench any lane
-breaching a rejection-rate or KV-budget ceiling.
-Scheduling is advisory: a poor arm costs latency, not correctness.
-
----
-
-## 10. Measured results and the speedup bound
-
-Measured on an NVIDIA RTX 5060 Laptop GPU (gpt2, fp32, eager attention,
-6 code prompts × 64 tokens, draft length 8; `speedup` is wall-clock against
-the same-run trusted greedy baseline — same model, device, prompts). One
-run per lane; exactness is gated per run, but run-to-run wall-clock
-variance has not been characterized. Full artifact:
-[gpu_bench_rtx5060.md](benchmarks/results/gpu_bench_rtx5060.md).
-
-| lane | exact match | acceptance | tokens/round | speedup |
-|---|---|---|---|---|
-| target_only | 1.000 | — | 1.02 | 1.03× |
-| **ngram** | **1.000** | 0.395 | 3.23 | **2.20×** |
-| compressed_kv_int8 | 1.000 | 0.976 | 8.76 | 0.56× |
-| compressed_kv_int4 | 1.000 | 0.931 | 8.42 | 0.54× |
-| sparse_kv | 1.000 | 0.745 | 7.00 | 0.51× |
-| diffusion (untrained) | 1.000 | 0.000 | 1.02 | 0.54–0.73× |
-
-Two honest readings. The retrieval lane wins outright: 2.20× measured,
-byte-exact. The compressed-KV lanes accept almost everything (0.98 at INT8 —
-the quantized cache preserves the target argmax) yet *lose* wall-clock here,
-because a 124M-parameter target is compute-bound and the draft rolls run in
-unfused PyTorch: their operating regime is long-context, memory-bound
-decoding, which is precisely what the (not yet GPU-validated) Triton kernels
-target. Acceptance transfers across hardware; wall-clock does not.
-
-Under i.i.d. per-token acceptance $\alpha$ at draft length $K$, expected committed
-tokens per round follow the standard speculative-decoding result, which equals
-the measured block acceptance rate $a$ via $R = 1 + Ka$:
-
-$$
-R \;=\; \frac{1 - \alpha^{K+1}}{1 - \alpha} \;=\; 1 + K a .
-$$
-
-In the batch-1, memory-bound regime a block-verify costs ≈ one decode step of HBM
-traffic, so $R$ upper-bounds the attainable speedup for a near-free drafter:
-the compressed-KV rows above are running at $R \approx 8$ committed tokens per
-verify, a ceiling the wall-clock will approach only once draft-side kernels
-stop being the bottleneck. That ceiling — a roofline *projection*, labelled as
-such wherever it appears — situates DART within the published
-lossless-acceleration landscape.
-
-![Acceleration landscape](docs/figures/04_acceleration_landscape.png)
-
-*Figure 7: Published peak speedups of comparable lossless methods (their own
-hardware/models), with DART's measured lane and projected ceiling shown
-separately — a positioning landscape, not a controlled head-to-head.*
-
----
-
-## 11. Speed–fidelity trade-off
-
-The differentiator is the joint position in (speed, fidelity), not speed alone:
-unverified KV quantisation is fast but lossy; speculative methods are exact but
-single-technique. DART attains the exact-fidelity tier while composing multiple
-techniques behind one verifier.
-
-![Speed versus fidelity](docs/figures/05_speed_vs_fidelity.png)
-
-*Figure 8: Speedup against the fidelity guarantee. DART occupies the
-lossless/exact tier at competitive (projected) speedup.*
-
----
-
-## 12. Technique coverage
-
-The architectural claim is breadth under one contract: a scheduler composes
-diffusion, MTP, compressed-KV and sparse lanes round-by-round, with the
-canvas-reconciliation step absent from the surveyed systems.
-
-![Technique coverage](docs/figures/06_technique_coverage.png)
-
-*Figure 9: Technique coverage across systems (from their papers); a capability
-map, not a quality benchmark.*
-
----
-
-## 13. Positioning
-
-DART is a serving layer, not a model: it does not improve answer quality, it
-reproduces a chosen target's output at lower cost, and it is not comparable to
-hosted chat models on quality — that would be a category error. Its operating
-regime is batch-1, long-context decoding, where KV memory binds and the
-compression of §7 applies. What it adds over serving the target directly is
-byte-exact reproducible output under lossy internal compute, self-hosting, and
-composition of acceleration techniques behind one verifier; quality is
-inherited from whichever target it serves.
-
----
-
-## 14. Reproduction
-
-All commands run on CPU against a seeded tiny target (no downloads), since
-exactness is weight-independent; set `target.model` to `hf:<name>` for a real
-model.
-
-```bash
-pip install -e ".[dev]"
-
-pytest                                                  # verifier-equivalence suite
-python scripts/run_baseline.py                          # trusted greedy baseline
-python benchmarks/run_bench.py                          # per-lane comparison + exact gate
-python scripts/run_exact_eval.py --config configs/dart_diffusion.yaml
-python scripts/train_drafter.py                         # train the diffusion drafter
-python scripts/train_mtp.py                             # train MTP heads
-python scripts/run_reconciliation_ablation.py           # the §6 result (multi-seed)
-python scripts/measure_exactness_vs_bits.py             # the Figure 2 data
-python -m dart.verification.tests --config configs/dart_exact.yaml
-python scripts/run_server.py --config configs/target_qwen.yaml   # OpenAI-style API + /demo
-python scripts/run_real_model.py --model gpt2           # byte-exact vs HF greedy
-python scripts/make_figures.py                          # regenerate ALL figures from artifacts
-
-# the §10 measured-GPU table (any CUDA box; hardware is recorded in the artifact)
-python benchmarks/run_bench.py --target hf:gpt2 --device cuda --dtype float32 \
-    --prompts-file benchmarks/prompts/code.jsonl --max-new 64 --draft-len 8
+`--device cpu` selects CPU. Check correctness before timing.
+Demo: `http://127.0.0.1:8400` · stop with Ctrl+C.
+The two-repeat benchmark is a smoke run.
+
+## Limits
+
+- One model, one machine, procedural prompts. Repetitive outputs favor n-gram copying; speed is not answer quality.
+- Tested presets: FP32, CPU/SDPA and CUDA/eager. CUDA bfloat16/eager failed a token/EOS comparison and is excluded.
+- Single-seed pilots: repair and the scheduler were slower; failure-mask training reduced acceptance.
+
+<details>
+<summary>Training & resume</summary>
+
+```sh
+dart corpus --model "MODEL_DIR" --out runs/corpus/pilot-v1
+dart collect --model "MODEL_DIR" --corpus runs/corpus/pilot-v1 --split train --device cuda --max-storage-mib 32 --out runs/traces/train
+dart train --model "MODEL_DIR" --traces runs/traces/train --device cuda --steps 200 --out runs/training/part
+dart train --model "MODEL_DIR" --traces runs/traces/train --device cuda --steps 400 --resume runs/training/part/latest.pt --out runs/training/resumed
 ```
+
+Use new output directories. `--steps` includes completed steps; resume with the
+same target, traces, device and options. CPU/CUDA resume checks matched
+uninterrupted training, including optimizer, RNG and losses.
+
+```text
+Corpus    train 192 │ validation 64 │ test 128
+Families  disjoint across splits
+Context   prompt + output + lookahead ≤ 1,024 tokens
+Drafter   2,084,288 learned parameters
+```
+
+The selected pilot used 400 steps, seed 17 and the installed training defaults.
+Keep test data out of configuration selection. After fixing all choices,
+compare the initial and trained checkpoints:
+
+```sh
+python scripts/run_corpus_eval.py --model "MODEL_DIR" --corpus runs/corpus/pilot-v1 --split test --device cuda --dtype float32 --attention eager --threads 1 --lane compact --draft-len 4 --checkpoint runs/training/part/initial.pt --out runs/eval/initial-test.json
+python scripts/run_corpus_eval.py --model "MODEL_DIR" --corpus runs/corpus/pilot-v1 --split test --device cuda --dtype float32 --attention eager --threads 1 --lane compact --draft-len 4 --checkpoint runs/training/resumed/latest.pt --out runs/eval/trained-test.json
+```
+
+These checks measure acceptance and full-output agreement, not latency.
+Full settings and hashes: [protocol](benchmarks/results/v0.2/protocol.json).
+
+</details>
+
+<details>
+<summary>Reproduce the full benchmark</summary>
+
+| Method | What runs |
+|---|---|
+| HF generate | Hugging Face Transformers `generate`, greedy decoding |
+| Target greedy | Direct cached greedy loop |
+| Target-only engine | DART with drafting disabled |
+| DART n-gram | Four-token copying drafts + target verification |
+
+| Speedup vs fastest baseline | Estimate | Paired 95% interval |
+|---|---:|---:|
+| CPU | 1.464× | 1.459–1.469× |
+| GPU | 2.181× | 2.155–2.212× |
+
+Intervals describe repeated measurements of these fixed cases and the
+observed fastest baseline; they do not establish results on new tasks or machines.
+
+Save as `benchmark_release.py`. It selects the first sorted ID for every
+test-family/budget pair: 8 families × 3 budgets = 24 cases.
 
 ```python
-from dart import DartEngine, DecodeConfig
+import json
+import sys
+from pathlib import Path
 
-engine = DartEngine.from_config("configs/dart_exact.yaml")
-out = engine.generate("def binary_search(arr, target):\n",
-                      DecodeConfig(mode="exact", max_new_tokens=128))
-print(out.text, out.metadata)   # acceptance, lanes_used, exact_greedy_equivalent, ...
+import torch
+
+from benchmarks.corpus_bench import benchmark_corpus
+from dart.data.pilot import build_pilot
+from dart.presets import supra_config
+from dart.runtime.factory import build_engine
+
+output = Path(sys.argv[3])
+timing_output = output.with_suffix(".timing.json")
+if output.exists() or timing_output.exists():
+    raise FileExistsError("Choose new report paths")
+output.parent.mkdir(parents=True, exist_ok=True)
+
+def save_timing(report):
+    with timing_output.open("x", encoding="utf-8") as stream:
+        json.dump(report, stream, indent=2)
+
+torch.set_num_threads(1)
+torch.manual_seed(17)
+torch.set_float32_matmul_precision("highest")
+assert not torch.are_deterministic_algorithms_enabled()
+records = sorted((row for row in build_pilot(17) if row.split == "test"), key=lambda row: row.id)
+selected = {}
+for row in records:
+    selected.setdefault((row.family, row.max_new_tokens), row)
+cases = sorted(selected.values(), key=lambda row: row.id)
+assert len(cases) == 24
+with build_engine(supra_config(sys.argv[1], sys.argv[2])) as engine:
+    report = benchmark_corpus(engine, cases, warmup=2, repeats=10, seed=17, on_timing=save_timing)
+with output.open("x", encoding="utf-8") as stream:
+    json.dump(report, stream, indent=2)
 ```
 
-Modes: `exact` (greedy, byte-identical), `exact_sampling` (distribution-exact),
-`approx` (verification skipped every $N$-th round; divergence audited in
-metadata, never silent).
-
----
-
-## 15. Repository layout
-
-```
-dart/
-  runtime/       engine, scheduler, OpenAI-style server, metrics, types
-  verification/  reference + block + tree verifiers, speculative sampling
-  drafters/      n-gram, MTP, diffusion, compressed-KV, sparse, block-sparse lanes
-  diffusion/     canvas, noise schedules, denoise loop, reconciliation, losses
-  kv/            quantized cache, INT4/INT8/VQ/token-drop codecs, residency, prefetch
-  attention/     sliding-window+global, block-sparse, verifier masks, Triton kernels
-  models/        target wrapper, tokenizer bridge, teacher-trace capture
-configs/         exact / diffusion / long-context / research-max + target presets
-benchmarks/      per-lane harness, workload prompts, committed result artifacts
-scripts/         baseline, eval, training, server, real-model validation
-tests/           verifier-equivalence and exactness suite
-docs/            design document, exactness contract, methodology, result figures
+```sh
+dart check --model "MODEL_DIR" --device cpu --split test
+python benchmark_release.py "MODEL_DIR" cpu runs/cpu-timing.json
+dart check --model "MODEL_DIR" --device cuda --split test
+python benchmark_release.py "MODEL_DIR" cuda runs/cuda-timing.json
 ```
 
+| Setting | Value |
+|---|---|
+| Baselines | HF greedy · direct target greedy · target-only engine |
+| Timing | 2 warm-ups · 10 repeats · rotating method order |
+| Profiling | 2 separate repeats; excluded from request timing |
+| Excluded | Loading · tokenization · correctness checks · warm-up |
+| Prompt lengths | Timing: 30–101; full correctness: 30–527 tokens |
+| Generation budgets | 32 / 64 / 128 tokens |
+| Runtime on tested machine | CPU ~84 min; GPU ~87 min |
+
+CUDA timing is synchronized. Ratios use the fastest observed baseline in
+each group. Checked timings are saved to `.timing.json` before profiling;
+the final report requires profiling to finish.
+
+The earlier GPU attempt stopped during profiling and lost its numeric timings.
+Only the completed retry contributes GPU latency results; settings and inference
+code were unchanged. [Protocol and run history](benchmarks/results/v0.2/protocol.json).
+
+</details>
+
+<details>
+<summary>Environment & validation scope</summary>
+
+| Item | Tested |
+|---|---|
+| OS / GPU | Windows 11 / RTX 5060 Laptop |
+| Python / PyTorch | 3.13.14 / 2.11.0+cu128 |
+| Transformers | 5.16.1 |
+| NumPy / PyYAML / safetensors | 2.5.2 / 6.0.3 / 0.8.0 |
+| Threads / precision | 1 / FP32 |
+| Peak allocated GPU memory, timed benchmark | 227.84 MiB |
+
+Package checks used a fresh project environment with existing system dependencies:
+
+```sh
+python -m venv --system-site-packages .venv
+```
+
+Activate with `.venv\Scripts\Activate.ps1` (PowerShell) or
+`source .venv/bin/activate` (POSIX), then use the install command above.
+Broader dependency versions have not been independently tested.
+
+Default `dart check`: 64 validation prompts. Default `dart bench`: four
+validation cases. Final results above use 128 test prompts and 24 timing cases.
+
+CPU/correctness revision: `fc0c81c`. GPU timing-save revision: `d8e6beb`.
+The latest full suite passed 782 tests with five skips and 21 warnings.
+The skips cover optional Triton and an
+unavailable tiny-GPT2 checkpoint. Actual Supra checks are listed above.
+The 44 later checks cover the timing-save fix, not another full-suite run.
+
+`greedy_verified` describes the engine's mode; independent agreement requires
+`dart check`. Precision and attention kernels can change token decisions.
+
+</details>
+
 ---
 
-## 16. Scope and limitations
+Built on [speculative decoding](https://arxiv.org/abs/2211.17192).
+Repair uses token anchors; it does not reproduce
+[ReTrace's hidden-state repair](https://arxiv.org/abs/2608.29748v2).
 
-Batch-1, low-concurrency, long-context serving. Exact-greedy claims are gated by
-an exact-match check in every benchmark and test run; sampling exactness is
-distributional and Monte-Carlo tested; approx mode self-reports divergence and
-never mixes silently with exact mode. Acceptance and KV-memory figures are
-measured or exactly computed; wall-clock speedups are measured on the stated
-hardware (§10), and frontier-scale ceilings are *projected* from a transparent
-batch-1 roofline model and labelled as such, never reported as measured. The
-tree verifier is greedy-mode only and requires models honoring custom 4D
-attention masks. The Triton kernels ship with CPU-tested reference
-implementations and are not yet GPU-validated. See
-[docs/exactness_contract.md](docs/exactness_contract.md) and
-[docs/design.md](docs/design.md) before quoting numbers.
-
----
-
-## Citation
-
-If you use DART, please cite it via [CITATION.cff](CITATION.cff).
-
----
-
-## License
-
-Apache-2.0. See [LICENSE](LICENSE).
+[Apache-2.0](LICENSE) · [Cite DART](CITATION.cff) · Target weights and trained
+checkpoints are not included in the v0.2 package.

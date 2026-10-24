@@ -1,0 +1,1826 @@
+{
+  "code_commit": "fc0c81c63390c16b73db3e14619f378f93d99951",
+  "code_tree": "0874a4d2a304c6ec62a93fd6605f54e8f6fbaf1b",
+  "frozen_at": "2026-10-23T19:53:19.998163+00:00",
+  "package_versions": {
+    "dart-serving": "0.2.0",
+    "torch": "2.11.0+cu128",
+    "transformers": "5.16.1",
+    "numpy": "2.5.2",
+    "PyYAML": "6.0.3",
+    "safetensors": "0.8.0"
+  },
+  "python": "3.13.14",
+  "platform": "Windows-11-10.0.26200-SP0",
+  "processor": "Intel64 Family 6 Model 186 Stepping 2, GenuineIntel",
+  "gpu": "NVIDIA GeForce RTX 5060 Laptop GPU",
+  "threads": 1,
+  "seed": 17,
+  "matmul_precision": "highest",
+  "deterministic": false,
+  "installation_scope": "Installed wheel outside checkout, existing system dependencies, no downloads.",
+  "all_test_ids": [
+    "v1-answer_from_records-000000",
+    "v1-answer_from_records-000001",
+    "v1-answer_from_records-000002",
+    "v1-answer_from_records-000003",
+    "v1-answer_from_records-000004",
+    "v1-answer_from_records-000005",
+    "v1-answer_from_records-000006",
+    "v1-answer_from_records-000007",
+    "v1-answer_from_records-000008",
+    "v1-answer_from_records-000009",
+    "v1-answer_from_records-000010",
+    "v1-answer_from_records-000011",
+    "v1-answer_from_records-000012",
+    "v1-answer_from_records-000013",
+    "v1-answer_from_records-000014",
+    "v1-answer_from_records-000015",
+    "v1-balanced_brackets-000000",
+    "v1-balanced_brackets-000001",
+    "v1-balanced_brackets-000002",
+    "v1-balanced_brackets-000003",
+    "v1-balanced_brackets-000004",
+    "v1-balanced_brackets-000005",
+    "v1-balanced_brackets-000006",
+    "v1-balanced_brackets-000007",
+    "v1-balanced_brackets-000008",
+    "v1-balanced_brackets-000009",
+    "v1-balanced_brackets-000010",
+    "v1-balanced_brackets-000011",
+    "v1-balanced_brackets-000012",
+    "v1-balanced_brackets-000013",
+    "v1-balanced_brackets-000014",
+    "v1-balanced_brackets-000015",
+    "v1-copy_grid-000000",
+    "v1-copy_grid-000001",
+    "v1-copy_grid-000002",
+    "v1-copy_grid-000003",
+    "v1-copy_grid-000004",
+    "v1-copy_grid-000005",
+    "v1-copy_grid-000006",
+    "v1-copy_grid-000007",
+    "v1-copy_grid-000008",
+    "v1-copy_grid-000009",
+    "v1-copy_grid-000010",
+    "v1-copy_grid-000011",
+    "v1-copy_grid-000012",
+    "v1-copy_grid-000013",
+    "v1-copy_grid-000014",
+    "v1-copy_grid-000015",
+    "v1-extract_actions-000000",
+    "v1-extract_actions-000001",
+    "v1-extract_actions-000002",
+    "v1-extract_actions-000003",
+    "v1-extract_actions-000004",
+    "v1-extract_actions-000005",
+    "v1-extract_actions-000006",
+    "v1-extract_actions-000007",
+    "v1-extract_actions-000008",
+    "v1-extract_actions-000009",
+    "v1-extract_actions-000010",
+    "v1-extract_actions-000011",
+    "v1-extract_actions-000012",
+    "v1-extract_actions-000013",
+    "v1-extract_actions-000014",
+    "v1-extract_actions-000015",
+    "v1-json_schema-000000",
+    "v1-json_schema-000001",
+    "v1-json_schema-000002",
+    "v1-json_schema-000003",
+    "v1-json_schema-000004",
+    "v1-json_schema-000005",
+    "v1-json_schema-000006",
+    "v1-json_schema-000007",
+    "v1-json_schema-000008",
+    "v1-json_schema-000009",
+    "v1-json_schema-000010",
+    "v1-json_schema-000011",
+    "v1-json_schema-000012",
+    "v1-json_schema-000013",
+    "v1-json_schema-000014",
+    "v1-json_schema-000015",
+    "v1-merge_intervals-000000",
+    "v1-merge_intervals-000001",
+    "v1-merge_intervals-000002",
+    "v1-merge_intervals-000003",
+    "v1-merge_intervals-000004",
+    "v1-merge_intervals-000005",
+    "v1-merge_intervals-000006",
+    "v1-merge_intervals-000007",
+    "v1-merge_intervals-000008",
+    "v1-merge_intervals-000009",
+    "v1-merge_intervals-000010",
+    "v1-merge_intervals-000011",
+    "v1-merge_intervals-000012",
+    "v1-merge_intervals-000013",
+    "v1-merge_intervals-000014",
+    "v1-merge_intervals-000015",
+    "v1-numbered_refrain-000000",
+    "v1-numbered_refrain-000001",
+    "v1-numbered_refrain-000002",
+    "v1-numbered_refrain-000003",
+    "v1-numbered_refrain-000004",
+    "v1-numbered_refrain-000005",
+    "v1-numbered_refrain-000006",
+    "v1-numbered_refrain-000007",
+    "v1-numbered_refrain-000008",
+    "v1-numbered_refrain-000009",
+    "v1-numbered_refrain-000010",
+    "v1-numbered_refrain-000011",
+    "v1-numbered_refrain-000012",
+    "v1-numbered_refrain-000013",
+    "v1-numbered_refrain-000014",
+    "v1-numbered_refrain-000015",
+    "v1-xml_records-000000",
+    "v1-xml_records-000001",
+    "v1-xml_records-000002",
+    "v1-xml_records-000003",
+    "v1-xml_records-000004",
+    "v1-xml_records-000005",
+    "v1-xml_records-000006",
+    "v1-xml_records-000007",
+    "v1-xml_records-000008",
+    "v1-xml_records-000009",
+    "v1-xml_records-000010",
+    "v1-xml_records-000011",
+    "v1-xml_records-000012",
+    "v1-xml_records-000013",
+    "v1-xml_records-000014",
+    "v1-xml_records-000015"
+  ],
+  "all_test_records": [
+    {
+      "id": "v1-answer_from_records-000000",
+      "family": "answer_from_records",
+      "workload": "instruction",
+      "prompt_tokens": 98,
+      "max_new_tokens": 32
+    },
+    {
+      "id": "v1-answer_from_records-000001",
+      "family": "answer_from_records",
+      "workload": "instruction",
+      "prompt_tokens": 193,
+      "max_new_tokens": 32
+    },
+    {
+      "id": "v1-answer_from_records-000002",
+      "family": "answer_from_records",
+      "workload": "instruction",
+      "prompt_tokens": 446,
+      "max_new_tokens": 32
+    },
+    {
+      "id": "v1-answer_from_records-000003",
+      "family": "answer_from_records",
+      "workload": "instruction",
+      "prompt_tokens": 101,
+      "max_new_tokens": 64
+    },
+    {
+      "id": "v1-answer_from_records-000004",
+      "family": "answer_from_records",
+      "workload": "instruction",
+      "prompt_tokens": 192,
+      "max_new_tokens": 64
+    },
+    {
+      "id": "v1-answer_from_records-000005",
+      "family": "answer_from_records",
+      "workload": "instruction",
+      "prompt_tokens": 449,
+      "max_new_tokens": 64
+    },
+    {
+      "id": "v1-answer_from_records-000006",
+      "family": "answer_from_records",
+      "workload": "instruction",
+      "prompt_tokens": 96,
+      "max_new_tokens": 128
+    },
+    {
+      "id": "v1-answer_from_records-000007",
+      "family": "answer_from_records",
+      "workload": "instruction",
+      "prompt_tokens": 193,
+      "max_new_tokens": 128
+    },
+    {
+      "id": "v1-answer_from_records-000008",
+      "family": "answer_from_records",
+      "workload": "instruction",
+      "prompt_tokens": 445,
+      "max_new_tokens": 128
+    },
+    {
+      "id": "v1-answer_from_records-000009",
+      "family": "answer_from_records",
+      "workload": "instruction",
+      "prompt_tokens": 98,
+      "max_new_tokens": 32
+    },
+    {
+      "id": "v1-answer_from_records-000010",
+      "family": "answer_from_records",
+      "workload": "instruction",
+      "prompt_tokens": 192,
+      "max_new_tokens": 32
+    },
+    {
+      "id": "v1-answer_from_records-000011",
+      "family": "answer_from_records",
+      "workload": "instruction",
+      "prompt_tokens": 440,
+      "max_new_tokens": 32
+    },
+    {
+      "id": "v1-answer_from_records-000012",
+      "family": "answer_from_records",
+      "workload": "instruction",
+      "prompt_tokens": 100,
+      "max_new_tokens": 64
+    },
+    {
+      "id": "v1-answer_from_records-000013",
+      "family": "answer_from_records",
+      "workload": "instruction",
+      "prompt_tokens": 197,
+      "max_new_tokens": 64
+    },
+    {
+      "id": "v1-answer_from_records-000014",
+      "family": "answer_from_records",
+      "workload": "instruction",
+      "prompt_tokens": 444,
+      "max_new_tokens": 64
+    },
+    {
+      "id": "v1-answer_from_records-000015",
+      "family": "answer_from_records",
+      "workload": "instruction",
+      "prompt_tokens": 97,
+      "max_new_tokens": 128
+    },
+    {
+      "id": "v1-balanced_brackets-000000",
+      "family": "balanced_brackets",
+      "workload": "code",
+      "prompt_tokens": 62,
+      "max_new_tokens": 32
+    },
+    {
+      "id": "v1-balanced_brackets-000001",
+      "family": "balanced_brackets",
+      "workload": "code",
+      "prompt_tokens": 124,
+      "max_new_tokens": 32
+    },
+    {
+      "id": "v1-balanced_brackets-000002",
+      "family": "balanced_brackets",
+      "workload": "code",
+      "prompt_tokens": 276,
+      "max_new_tokens": 32
+    },
+    {
+      "id": "v1-balanced_brackets-000003",
+      "family": "balanced_brackets",
+      "workload": "code",
+      "prompt_tokens": 64,
+      "max_new_tokens": 64
+    },
+    {
+      "id": "v1-balanced_brackets-000004",
+      "family": "balanced_brackets",
+      "workload": "code",
+      "prompt_tokens": 120,
+      "max_new_tokens": 64
+    },
+    {
+      "id": "v1-balanced_brackets-000005",
+      "family": "balanced_brackets",
+      "workload": "code",
+      "prompt_tokens": 279,
+      "max_new_tokens": 64
+    },
+    {
+      "id": "v1-balanced_brackets-000006",
+      "family": "balanced_brackets",
+      "workload": "code",
+      "prompt_tokens": 62,
+      "max_new_tokens": 128
+    },
+    {
+      "id": "v1-balanced_brackets-000007",
+      "family": "balanced_brackets",
+      "workload": "code",
+      "prompt_tokens": 126,
+      "max_new_tokens": 128
+    },
+    {
+      "id": "v1-balanced_brackets-000008",
+      "family": "balanced_brackets",
+      "workload": "code",
+      "prompt_tokens": 273,
+      "max_new_tokens": 128
+    },
+    {
+      "id": "v1-balanced_brackets-000009",
+      "family": "balanced_brackets",
+      "workload": "code",
+      "prompt_tokens": 62,
+      "max_new_tokens": 32
+    },
+    {
+      "id": "v1-balanced_brackets-000010",
+      "family": "balanced_brackets",
+      "workload": "code",
+      "prompt_tokens": 126,
+      "max_new_tokens": 32
+    },
+    {
+      "id": "v1-balanced_brackets-000011",
+      "family": "balanced_brackets",
+      "workload": "code",
+      "prompt_tokens": 280,
+      "max_new_tokens": 32
+    },
+    {
+      "id": "v1-balanced_brackets-000012",
+      "family": "balanced_brackets",
+      "workload": "code",
+      "prompt_tokens": 60,
+      "max_new_tokens": 64
+    },
+    {
+      "id": "v1-balanced_brackets-000013",
+      "family": "balanced_brackets",
+      "workload": "code",
+      "prompt_tokens": 124,
+      "max_new_tokens": 64
+    },
+    {
+      "id": "v1-balanced_brackets-000014",
+      "family": "balanced_brackets",
+      "workload": "code",
+      "prompt_tokens": 281,
+      "max_new_tokens": 64
+    },
+    {
+      "id": "v1-balanced_brackets-000015",
+      "family": "balanced_brackets",
+      "workload": "code",
+      "prompt_tokens": 64,
+      "max_new_tokens": 128
+    },
+    {
+      "id": "v1-copy_grid-000000",
+      "family": "copy_grid",
+      "workload": "repetition",
+      "prompt_tokens": 93,
+      "max_new_tokens": 32
+    },
+    {
+      "id": "v1-copy_grid-000001",
+      "family": "copy_grid",
+      "workload": "repetition",
+      "prompt_tokens": 169,
+      "max_new_tokens": 32
+    },
+    {
+      "id": "v1-copy_grid-000002",
+      "family": "copy_grid",
+      "workload": "repetition",
+      "prompt_tokens": 380,
+      "max_new_tokens": 32
+    },
+    {
+      "id": "v1-copy_grid-000003",
+      "family": "copy_grid",
+      "workload": "repetition",
+      "prompt_tokens": 93,
+      "max_new_tokens": 64
+    },
+    {
+      "id": "v1-copy_grid-000004",
+      "family": "copy_grid",
+      "workload": "repetition",
+      "prompt_tokens": 173,
+      "max_new_tokens": 64
+    },
+    {
+      "id": "v1-copy_grid-000005",
+      "family": "copy_grid",
+      "workload": "repetition",
+      "prompt_tokens": 391,
+      "max_new_tokens": 64
+    },
+    {
+      "id": "v1-copy_grid-000006",
+      "family": "copy_grid",
+      "workload": "repetition",
+      "prompt_tokens": 94,
+      "max_new_tokens": 128
+    },
+    {
+      "id": "v1-copy_grid-000007",
+      "family": "copy_grid",
+      "workload": "repetition",
+      "prompt_tokens": 167,
+      "max_new_tokens": 128
+    },
+    {
+      "id": "v1-copy_grid-000008",
+      "family": "copy_grid",
+      "workload": "repetition",
+      "prompt_tokens": 385,
+      "max_new_tokens": 128
+    },
+    {
+      "id": "v1-copy_grid-000009",
+      "family": "copy_grid",
+      "workload": "repetition",
+      "prompt_tokens": 94,
+      "max_new_tokens": 32
+    },
+    {
+      "id": "v1-copy_grid-000010",
+      "family": "copy_grid",
+      "workload": "repetition",
+      "prompt_tokens": 174,
+      "max_new_tokens": 32
+    },
+    {
+      "id": "v1-copy_grid-000011",
+      "family": "copy_grid",
+      "workload": "repetition",
+      "prompt_tokens": 386,
+      "max_new_tokens": 32
+    },
+    {
+      "id": "v1-copy_grid-000012",
+      "family": "copy_grid",
+      "workload": "repetition",
+      "prompt_tokens": 93,
+      "max_new_tokens": 64
+    },
+    {
+      "id": "v1-copy_grid-000013",
+      "family": "copy_grid",
+      "workload": "repetition",
+      "prompt_tokens": 174,
+      "max_new_tokens": 64
+    },
+    {
+      "id": "v1-copy_grid-000014",
+      "family": "copy_grid",
+      "workload": "repetition",
+      "prompt_tokens": 379,
+      "max_new_tokens": 64
+    },
+    {
+      "id": "v1-copy_grid-000015",
+      "family": "copy_grid",
+      "workload": "repetition",
+      "prompt_tokens": 93,
+      "max_new_tokens": 128
+    },
+    {
+      "id": "v1-extract_actions-000000",
+      "family": "extract_actions",
+      "workload": "instruction",
+      "prompt_tokens": 98,
+      "max_new_tokens": 32
+    },
+    {
+      "id": "v1-extract_actions-000001",
+      "family": "extract_actions",
+      "workload": "instruction",
+      "prompt_tokens": 213,
+      "max_new_tokens": 32
+    },
+    {
+      "id": "v1-extract_actions-000002",
+      "family": "extract_actions",
+      "workload": "instruction",
+      "prompt_tokens": 521,
+      "max_new_tokens": 32
+    },
+    {
+      "id": "v1-extract_actions-000003",
+      "family": "extract_actions",
+      "workload": "instruction",
+      "prompt_tokens": 97,
+      "max_new_tokens": 64
+    },
+    {
+      "id": "v1-extract_actions-000004",
+      "family": "extract_actions",
+      "workload": "instruction",
+      "prompt_tokens": 214,
+      "max_new_tokens": 64
+    },
+    {
+      "id": "v1-extract_actions-000005",
+      "family": "extract_actions",
+      "workload": "instruction",
+      "prompt_tokens": 523,
+      "max_new_tokens": 64
+    },
+    {
+      "id": "v1-extract_actions-000006",
+      "family": "extract_actions",
+      "workload": "instruction",
+      "prompt_tokens": 98,
+      "max_new_tokens": 128
+    },
+    {
+      "id": "v1-extract_actions-000007",
+      "family": "extract_actions",
+      "workload": "instruction",
+      "prompt_tokens": 212,
+      "max_new_tokens": 128
+    },
+    {
+      "id": "v1-extract_actions-000008",
+      "family": "extract_actions",
+      "workload": "instruction",
+      "prompt_tokens": 527,
+      "max_new_tokens": 128
+    },
+    {
+      "id": "v1-extract_actions-000009",
+      "family": "extract_actions",
+      "workload": "instruction",
+      "prompt_tokens": 94,
+      "max_new_tokens": 32
+    },
+    {
+      "id": "v1-extract_actions-000010",
+      "family": "extract_actions",
+      "workload": "instruction",
+      "prompt_tokens": 214,
+      "max_new_tokens": 32
+    },
+    {
+      "id": "v1-extract_actions-000011",
+      "family": "extract_actions",
+      "workload": "instruction",
+      "prompt_tokens": 514,
+      "max_new_tokens": 32
+    },
+    {
+      "id": "v1-extract_actions-000012",
+      "family": "extract_actions",
+      "workload": "instruction",
+      "prompt_tokens": 97,
+      "max_new_tokens": 64
+    },
+    {
+      "id": "v1-extract_actions-000013",
+      "family": "extract_actions",
+      "workload": "instruction",
+      "prompt_tokens": 212,
+      "max_new_tokens": 64
+    },
+    {
+      "id": "v1-extract_actions-000014",
+      "family": "extract_actions",
+      "workload": "instruction",
+      "prompt_tokens": 523,
+      "max_new_tokens": 64
+    },
+    {
+      "id": "v1-extract_actions-000015",
+      "family": "extract_actions",
+      "workload": "instruction",
+      "prompt_tokens": 98,
+      "max_new_tokens": 128
+    },
+    {
+      "id": "v1-json_schema-000000",
+      "family": "json_schema",
+      "workload": "structured",
+      "prompt_tokens": 89,
+      "max_new_tokens": 32
+    },
+    {
+      "id": "v1-json_schema-000001",
+      "family": "json_schema",
+      "workload": "structured",
+      "prompt_tokens": 134,
+      "max_new_tokens": 32
+    },
+    {
+      "id": "v1-json_schema-000002",
+      "family": "json_schema",
+      "workload": "structured",
+      "prompt_tokens": 252,
+      "max_new_tokens": 32
+    },
+    {
+      "id": "v1-json_schema-000003",
+      "family": "json_schema",
+      "workload": "structured",
+      "prompt_tokens": 88,
+      "max_new_tokens": 64
+    },
+    {
+      "id": "v1-json_schema-000004",
+      "family": "json_schema",
+      "workload": "structured",
+      "prompt_tokens": 133,
+      "max_new_tokens": 64
+    },
+    {
+      "id": "v1-json_schema-000005",
+      "family": "json_schema",
+      "workload": "structured",
+      "prompt_tokens": 247,
+      "max_new_tokens": 64
+    },
+    {
+      "id": "v1-json_schema-000006",
+      "family": "json_schema",
+      "workload": "structured",
+      "prompt_tokens": 86,
+      "max_new_tokens": 128
+    },
+    {
+      "id": "v1-json_schema-000007",
+      "family": "json_schema",
+      "workload": "structured",
+      "prompt_tokens": 131,
+      "max_new_tokens": 128
+    },
+    {
+      "id": "v1-json_schema-000008",
+      "family": "json_schema",
+      "workload": "structured",
+      "prompt_tokens": 256,
+      "max_new_tokens": 128
+    },
+    {
+      "id": "v1-json_schema-000009",
+      "family": "json_schema",
+      "workload": "structured",
+      "prompt_tokens": 86,
+      "max_new_tokens": 32
+    },
+    {
+      "id": "v1-json_schema-000010",
+      "family": "json_schema",
+      "workload": "structured",
+      "prompt_tokens": 131,
+      "max_new_tokens": 32
+    },
+    {
+      "id": "v1-json_schema-000011",
+      "family": "json_schema",
+      "workload": "structured",
+      "prompt_tokens": 252,
+      "max_new_tokens": 32
+    },
+    {
+      "id": "v1-json_schema-000012",
+      "family": "json_schema",
+      "workload": "structured",
+      "prompt_tokens": 89,
+      "max_new_tokens": 64
+    },
+    {
+      "id": "v1-json_schema-000013",
+      "family": "json_schema",
+      "workload": "structured",
+      "prompt_tokens": 129,
+      "max_new_tokens": 64
+    },
+    {
+      "id": "v1-json_schema-000014",
+      "family": "json_schema",
+      "workload": "structured",
+      "prompt_tokens": 251,
+      "max_new_tokens": 64
+    },
+    {
+      "id": "v1-json_schema-000015",
+      "family": "json_schema",
+      "workload": "structured",
+      "prompt_tokens": 87,
+      "max_new_tokens": 128
+    },
+    {
+      "id": "v1-merge_intervals-000000",
+      "family": "merge_intervals",
+      "workload": "code",
+      "prompt_tokens": 55,
+      "max_new_tokens": 32
+    },
+    {
+      "id": "v1-merge_intervals-000001",
+      "family": "merge_intervals",
+      "workload": "code",
+      "prompt_tokens": 96,
+      "max_new_tokens": 32
+    },
+    {
+      "id": "v1-merge_intervals-000002",
+      "family": "merge_intervals",
+      "workload": "code",
+      "prompt_tokens": 202,
+      "max_new_tokens": 32
+    },
+    {
+      "id": "v1-merge_intervals-000003",
+      "family": "merge_intervals",
+      "workload": "code",
+      "prompt_tokens": 56,
+      "max_new_tokens": 64
+    },
+    {
+      "id": "v1-merge_intervals-000004",
+      "family": "merge_intervals",
+      "workload": "code",
+      "prompt_tokens": 93,
+      "max_new_tokens": 64
+    },
+    {
+      "id": "v1-merge_intervals-000005",
+      "family": "merge_intervals",
+      "workload": "code",
+      "prompt_tokens": 199,
+      "max_new_tokens": 64
+    },
+    {
+      "id": "v1-merge_intervals-000006",
+      "family": "merge_intervals",
+      "workload": "code",
+      "prompt_tokens": 56,
+      "max_new_tokens": 128
+    },
+    {
+      "id": "v1-merge_intervals-000007",
+      "family": "merge_intervals",
+      "workload": "code",
+      "prompt_tokens": 96,
+      "max_new_tokens": 128
+    },
+    {
+      "id": "v1-merge_intervals-000008",
+      "family": "merge_intervals",
+      "workload": "code",
+      "prompt_tokens": 200,
+      "max_new_tokens": 128
+    },
+    {
+      "id": "v1-merge_intervals-000009",
+      "family": "merge_intervals",
+      "workload": "code",
+      "prompt_tokens": 56,
+      "max_new_tokens": 32
+    },
+    {
+      "id": "v1-merge_intervals-000010",
+      "family": "merge_intervals",
+      "workload": "code",
+      "prompt_tokens": 96,
+      "max_new_tokens": 32
+    },
+    {
+      "id": "v1-merge_intervals-000011",
+      "family": "merge_intervals",
+      "workload": "code",
+      "prompt_tokens": 206,
+      "max_new_tokens": 32
+    },
+    {
+      "id": "v1-merge_intervals-000012",
+      "family": "merge_intervals",
+      "workload": "code",
+      "prompt_tokens": 54,
+      "max_new_tokens": 64
+    },
+    {
+      "id": "v1-merge_intervals-000013",
+      "family": "merge_intervals",
+      "workload": "code",
+      "prompt_tokens": 98,
+      "max_new_tokens": 64
+    },
+    {
+      "id": "v1-merge_intervals-000014",
+      "family": "merge_intervals",
+      "workload": "code",
+      "prompt_tokens": 198,
+      "max_new_tokens": 64
+    },
+    {
+      "id": "v1-merge_intervals-000015",
+      "family": "merge_intervals",
+      "workload": "code",
+      "prompt_tokens": 56,
+      "max_new_tokens": 128
+    },
+    {
+      "id": "v1-numbered_refrain-000000",
+      "family": "numbered_refrain",
+      "workload": "repetition",
+      "prompt_tokens": 34,
+      "max_new_tokens": 32
+    },
+    {
+      "id": "v1-numbered_refrain-000001",
+      "family": "numbered_refrain",
+      "workload": "repetition",
+      "prompt_tokens": 118,
+      "max_new_tokens": 32
+    },
+    {
+      "id": "v1-numbered_refrain-000002",
+      "family": "numbered_refrain",
+      "workload": "repetition",
+      "prompt_tokens": 318,
+      "max_new_tokens": 32
+    },
+    {
+      "id": "v1-numbered_refrain-000003",
+      "family": "numbered_refrain",
+      "workload": "repetition",
+      "prompt_tokens": 30,
+      "max_new_tokens": 64
+    },
+    {
+      "id": "v1-numbered_refrain-000004",
+      "family": "numbered_refrain",
+      "workload": "repetition",
+      "prompt_tokens": 110,
+      "max_new_tokens": 64
+    },
+    {
+      "id": "v1-numbered_refrain-000005",
+      "family": "numbered_refrain",
+      "workload": "repetition",
+      "prompt_tokens": 318,
+      "max_new_tokens": 64
+    },
+    {
+      "id": "v1-numbered_refrain-000006",
+      "family": "numbered_refrain",
+      "workload": "repetition",
+      "prompt_tokens": 34,
+      "max_new_tokens": 128
+    },
+    {
+      "id": "v1-numbered_refrain-000007",
+      "family": "numbered_refrain",
+      "workload": "repetition",
+      "prompt_tokens": 110,
+      "max_new_tokens": 128
+    },
+    {
+      "id": "v1-numbered_refrain-000008",
+      "family": "numbered_refrain",
+      "workload": "repetition",
+      "prompt_tokens": 342,
+      "max_new_tokens": 128
+    },
+    {
+      "id": "v1-numbered_refrain-000009",
+      "family": "numbered_refrain",
+      "workload": "repetition",
+      "prompt_tokens": 34,
+      "max_new_tokens": 32
+    },
+    {
+      "id": "v1-numbered_refrain-000010",
+      "family": "numbered_refrain",
+      "workload": "repetition",
+      "prompt_tokens": 110,
+      "max_new_tokens": 32
+    },
+    {
+      "id": "v1-numbered_refrain-000011",
+      "family": "numbered_refrain",
+      "workload": "repetition",
+      "prompt_tokens": 342,
+      "max_new_tokens": 32
+    },
+    {
+      "id": "v1-numbered_refrain-000012",
+      "family": "numbered_refrain",
+      "workload": "repetition",
+      "prompt_tokens": 32,
+      "max_new_tokens": 64
+    },
+    {
+      "id": "v1-numbered_refrain-000013",
+      "family": "numbered_refrain",
+      "workload": "repetition",
+      "prompt_tokens": 118,
+      "max_new_tokens": 64
+    },
+    {
+      "id": "v1-numbered_refrain-000014",
+      "family": "numbered_refrain",
+      "workload": "repetition",
+      "prompt_tokens": 318,
+      "max_new_tokens": 64
+    },
+    {
+      "id": "v1-numbered_refrain-000015",
+      "family": "numbered_refrain",
+      "workload": "repetition",
+      "prompt_tokens": 34,
+      "max_new_tokens": 128
+    },
+    {
+      "id": "v1-xml_records-000000",
+      "family": "xml_records",
+      "workload": "structured",
+      "prompt_tokens": 97,
+      "max_new_tokens": 32
+    },
+    {
+      "id": "v1-xml_records-000001",
+      "family": "xml_records",
+      "workload": "structured",
+      "prompt_tokens": 171,
+      "max_new_tokens": 32
+    },
+    {
+      "id": "v1-xml_records-000002",
+      "family": "xml_records",
+      "workload": "structured",
+      "prompt_tokens": 391,
+      "max_new_tokens": 32
+    },
+    {
+      "id": "v1-xml_records-000003",
+      "family": "xml_records",
+      "workload": "structured",
+      "prompt_tokens": 97,
+      "max_new_tokens": 64
+    },
+    {
+      "id": "v1-xml_records-000004",
+      "family": "xml_records",
+      "workload": "structured",
+      "prompt_tokens": 172,
+      "max_new_tokens": 64
+    },
+    {
+      "id": "v1-xml_records-000005",
+      "family": "xml_records",
+      "workload": "structured",
+      "prompt_tokens": 388,
+      "max_new_tokens": 64
+    },
+    {
+      "id": "v1-xml_records-000006",
+      "family": "xml_records",
+      "workload": "structured",
+      "prompt_tokens": 99,
+      "max_new_tokens": 128
+    },
+    {
+      "id": "v1-xml_records-000007",
+      "family": "xml_records",
+      "workload": "structured",
+      "prompt_tokens": 175,
+      "max_new_tokens": 128
+    },
+    {
+      "id": "v1-xml_records-000008",
+      "family": "xml_records",
+      "workload": "structured",
+      "prompt_tokens": 376,
+      "max_new_tokens": 128
+    },
+    {
+      "id": "v1-xml_records-000009",
+      "family": "xml_records",
+      "workload": "structured",
+      "prompt_tokens": 99,
+      "max_new_tokens": 32
+    },
+    {
+      "id": "v1-xml_records-000010",
+      "family": "xml_records",
+      "workload": "structured",
+      "prompt_tokens": 180,
+      "max_new_tokens": 32
+    },
+    {
+      "id": "v1-xml_records-000011",
+      "family": "xml_records",
+      "workload": "structured",
+      "prompt_tokens": 382,
+      "max_new_tokens": 32
+    },
+    {
+      "id": "v1-xml_records-000012",
+      "family": "xml_records",
+      "workload": "structured",
+      "prompt_tokens": 97,
+      "max_new_tokens": 64
+    },
+    {
+      "id": "v1-xml_records-000013",
+      "family": "xml_records",
+      "workload": "structured",
+      "prompt_tokens": 174,
+      "max_new_tokens": 64
+    },
+    {
+      "id": "v1-xml_records-000014",
+      "family": "xml_records",
+      "workload": "structured",
+      "prompt_tokens": 378,
+      "max_new_tokens": 64
+    },
+    {
+      "id": "v1-xml_records-000015",
+      "family": "xml_records",
+      "workload": "structured",
+      "prompt_tokens": 97,
+      "max_new_tokens": 128
+    }
+  ],
+  "presets": {
+    "cpu": {
+      "threads": 1,
+      "mode": "exact",
+      "verifier": "block",
+      "target": {
+        "model": "MODEL_DIR",
+        "device": "cpu",
+        "precision": "fp32",
+        "attn_implementation": "sdpa",
+        "local_files_only": true,
+        "trust_remote_code": false,
+        "record_hidden": false
+      },
+      "lanes": {
+        "ngram": {
+          "max_ngram": 4,
+          "min_ngram": 1
+        }
+      },
+      "decode": {
+        "max_new_tokens": 32,
+        "draft_len": 4
+      }
+    },
+    "cuda": {
+      "threads": 1,
+      "mode": "exact",
+      "verifier": "block",
+      "target": {
+        "model": "MODEL_DIR",
+        "device": "cuda",
+        "precision": "fp32",
+        "attn_implementation": "eager",
+        "local_files_only": true,
+        "trust_remote_code": false,
+        "record_hidden": false
+      },
+      "lanes": {
+        "ngram": {
+          "max_ngram": 4,
+          "min_ngram": 1
+        }
+      },
+      "decode": {
+        "max_new_tokens": 32,
+        "draft_len": 4
+      }
+    }
+  },
+  "correctness": {
+    "records": 128,
+    "devices": [
+      "cpu",
+      "cuda"
+    ],
+    "reference": "plain HF greedy",
+    "requirement": "Every complete token sequence and length must match, with original budgets and EOS behavior."
+  },
+  "compact": {
+    "checkpoints": {
+      "initial": {
+        "sha256": "a2e85b8020252730ead606661fac5e5aa6d6de8aa2fb1f670cd956937333aaec",
+        "bytes": 8367721,
+        "step": 0
+      },
+      "trained": {
+        "sha256": "f5fe8aed809b42406736d930b16937662770daf49f34243ef448fe0596272321",
+        "bytes": 25089185,
+        "step": 400
+      }
+    },
+    "model_config": {
+      "hidden_size": 192,
+      "num_layers": 4,
+      "num_heads": 6,
+      "ffn_mult": 4,
+      "ctx_window": 32,
+      "max_canvas": 8,
+      "dropout": 0.0,
+      "embedding_init_std": 0.02
+    },
+    "training_config": {
+      "seed": 17,
+      "batch_size": 16,
+      "canvas_len": 4,
+      "learning_rate": 0.001,
+      "weight_decay": 0.01,
+      "grad_clip": 1.0,
+      "full_mask_fraction": 0.5,
+      "distill_weight": 0.5,
+      "distill_temperature": 2.0,
+      "cache_shards": 8,
+      "dtype": "float32"
+    },
+    "training_metadata": {
+      "target": {
+        "weights_sha256": "2e5b4b5665765191eec06a1ff85282909ed13ed8532fbaa82aeca2e01d0a1237",
+        "config_sha256": "eb69500ec59456da38a169320968050d0f4344b7a7ff85708ac765714f9c4e88",
+        "dtype": "torch.float32",
+        "attention": "eager",
+        "device": "cuda",
+        "eos_token_ids": [
+          2
+        ],
+        "hidden_size": 512,
+        "vocab_size": 32000,
+        "context_limit": 1024
+      },
+      "tokenizer_hash": "05f724bd53dff6b881473d597441548e92fc71d833f410e9e2f1aed2e9063952",
+      "corpus_hash": "a05ea02a0cd6960c895ec4fe96cb7e0132755523a07ae971b69d22126abb984a",
+      "traces_sha256": "f0284f34bd020d0ad617ce6fb35103e747b9c978d5ba3f38c9f893664bd083bb",
+      "environment": {
+        "torch": "2.11.0+cu128",
+        "transformers": "5.16.1",
+        "threads": 1,
+        "cuda": "12.8",
+        "gpu": "NVIDIA GeForce RTX 5060 Laptop GPU",
+        "deterministic": false,
+        "matmul_precision": "highest"
+      }
+    },
+    "learned_parameters": 2084288,
+    "decode": {
+      "mode": "exact",
+      "max_new_tokens": 256,
+      "target_model": null,
+      "allowed_lanes": null,
+      "draft_len": 4,
+      "canvas_len": 4,
+      "temperature": 1.0,
+      "verify_every": 1,
+      "prompt_kind": "chat",
+      "seed": null,
+      "full_kv_residency": "gpu"
+    },
+    "inference": {
+      "device": "cuda",
+      "dtype": "float32",
+      "attention": "eager",
+      "canvas_len": 4,
+      "denoise_steps": 1,
+      "reconcile": "discard",
+      "adaptive_stop": true,
+      "min_confidence": 0.65,
+      "seed": 0
+    },
+    "records": 128,
+    "acceptance_metric": "Total accepted draft tokens divided by total proposed draft tokens.",
+    "completion_gate": "All full outputs match HF and aggregate held-out acceptance is higher after training than at initialization.",
+    "uncertainty": "Report 2000 paired family-cluster bootstrap resamples (8 fixed test families), seed 17, 95% percentile interval for the acceptance difference; one training seed only."
+  },
+  "timing": {
+    "selection_rule": "First lexicographically sorted ID for every test family and original generation budget.",
+    "ids": [
+      "v1-answer_from_records-000000",
+      "v1-answer_from_records-000003",
+      "v1-answer_from_records-000006",
+      "v1-balanced_brackets-000000",
+      "v1-balanced_brackets-000003",
+      "v1-balanced_brackets-000006",
+      "v1-copy_grid-000000",
+      "v1-copy_grid-000003",
+      "v1-copy_grid-000006",
+      "v1-extract_actions-000000",
+      "v1-extract_actions-000003",
+      "v1-extract_actions-000006",
+      "v1-json_schema-000000",
+      "v1-json_schema-000003",
+      "v1-json_schema-000006",
+      "v1-merge_intervals-000000",
+      "v1-merge_intervals-000003",
+      "v1-merge_intervals-000006",
+      "v1-numbered_refrain-000000",
+      "v1-numbered_refrain-000003",
+      "v1-numbered_refrain-000006",
+      "v1-xml_records-000000",
+      "v1-xml_records-000003",
+      "v1-xml_records-000006"
+    ],
+    "selected_corpus_hash": "aff4b722f1954e16944e9245974a7847e9332529dc17f2ab39d0efa3076fa28d",
+    "records": 24,
+    "warmup": 2,
+    "repeats": 10,
+    "profile_repeats": 2,
+    "methods": [
+      "hf_greedy",
+      "target_greedy",
+      "target_only",
+      "dart"
+    ],
+    "baseline": "Observed fastest of the three target-only references, separately for aggregate, each workload and each budget.",
+    "weights": "Equal weight for each family-budget cell; does not use the original split's unequal budget frequencies.",
+    "order": "Seeded prompt permutations per repeat; method order rotates and alternates direction as implemented in benchmarks.timing.",
+    "scope": "Generation plus output decoding; loading, tokenization, correctness and warm-up excluded. GPU timing has explicit device barriers. Phase profiling is separate.",
+    "intervals": "2000 paired bootstrap resamples of repeat means; 95% percentile intervals conditional on these fixed cases and the observed fastest baseline.",
+    "speed_target": 1.25,
+    "speed_target_gate": "For each device, all correctness checks pass and the aggregate 95% speedup interval's lower bound is at least 1.25. Report every workload and budget, including regressions.",
+    "generalization_limit": "Procedural decoding workloads, one local target and machine; not answer-quality or broad deployment benchmarks."
+  },
+  "limits": {
+    "learned_parameters": 5000000,
+    "peak_gpu_bytes": 6442450944,
+    "context_tokens": 1024
+  },
+  "phase_order": [
+    "check_cpu",
+    "check_cuda",
+    "compact_initial",
+    "compact_trained",
+    "bench_cpu",
+    "bench_cuda"
+  ],
+  "schema": "dart-public-evaluation-protocol-v1",
+  "original_local_plan_sha256": "c860ae752bacaa6d25536740faba2b73fced054d17dacd4da926d1db1509eeac",
+  "freeze_scope": "Locally frozen before test inference; not an externally preregistered protocol.",
+  "execution": {
+    "completed_phases": [
+      "check_cpu",
+      "check_cuda",
+      "compact_initial",
+      "compact_trained",
+      "bench_cpu",
+      "bench_cuda"
+    ],
+    "incomplete_phases": {},
+    "prior_attempt_failures": {
+      "bench_cuda_attempt_1": {
+        "type": "RuntimeStopped",
+        "stage": "separate profiling",
+        "timed_output_matches": 960,
+        "final_latency_report_available": false,
+        "message": "Stopped for runtime during profiling. Numeric timings were not saved and are not included in the reported estimates."
+      }
+    },
+    "retry": {
+      "phase": "bench_cuda",
+      "attempt": 2,
+      "status": "passed",
+      "code_commit": "d8e6bebae41024ddb98543b9f3b8967550014f9b",
+      "change_scope": "Timing persistence and post-timing output-hash checks; inference, measured methods and experimental settings unchanged.",
+      "reason": "The earlier attempt was interrupted before its numeric timing report was written.",
+      "wall_minutes": 86.60990578333333,
+      "timing_report_sha256": "3bcd3c4b507c93dcfd73acc14f37e777d0fbeb144da712b8db714f9e270bb166"
+    },
+    "selection": "Settings, prompts, budgets and seeds were fixed before test inference. No test-based tuning or score-based retries were performed.",
+    "expansion": "Negative validation results did not justify learned-policy held-out timing, more failure-mask training, or three-seed studies.",
+    "wall_time": "CPU benchmark completed in about 84 minutes. GPU retry completed in 86.61 minutes; its earlier attempt stopped during profiling after about 51 minutes."
+  },
+  "target": {
+    "parameters": 51786240,
+    "fingerprint": {
+      "weights_sha256": "2e5b4b5665765191eec06a1ff85282909ed13ed8532fbaa82aeca2e01d0a1237",
+      "config_sha256": "eb69500ec59456da38a169320968050d0f4344b7a7ff85708ac765714f9c4e88",
+      "dtype": "torch.float32",
+      "eos_token_ids": [
+        2
+      ],
+      "hidden_size": 512,
+      "vocab_size": 32000,
+      "context_limit": 1024
+    },
+    "name": "Supra-50M-Instruct"
+  },
+  "corpus": {
+    "context_limit": 1024,
+    "corpus_hash": "a05ea02a0cd6960c895ec4fe96cb7e0132755523a07ae971b69d22126abb984a",
+    "schema": "dart-corpus-v1",
+    "seed": 17,
+    "splits": {
+      "test": {
+        "corpus_hash": "ab6b0dcbdfe6b3a54cbd5907f993db4ed2446bf712c956b41abc684b26ce8609",
+        "families": [
+          "answer_from_records",
+          "balanced_brackets",
+          "copy_grid",
+          "extract_actions",
+          "json_schema",
+          "merge_intervals",
+          "numbered_refrain",
+          "xml_records"
+        ],
+        "generation_budgets": [
+          32,
+          64,
+          128
+        ],
+        "prompt_tokens": {
+          "max": 527,
+          "min": 30
+        },
+        "records": 128,
+        "sha256": "2708513d389b6423ada0705b545ce2e4ed6c9bc6b9d1e03a758fcacd0676e7f4",
+        "sources": [
+          "generated:answer_from_records:000000",
+          "generated:answer_from_records:000001",
+          "generated:answer_from_records:000002",
+          "generated:answer_from_records:000003",
+          "generated:answer_from_records:000004",
+          "generated:answer_from_records:000005",
+          "generated:answer_from_records:000006",
+          "generated:answer_from_records:000007",
+          "generated:answer_from_records:000008",
+          "generated:answer_from_records:000009",
+          "generated:answer_from_records:000010",
+          "generated:answer_from_records:000011",
+          "generated:answer_from_records:000012",
+          "generated:answer_from_records:000013",
+          "generated:answer_from_records:000014",
+          "generated:answer_from_records:000015",
+          "generated:balanced_brackets:000000",
+          "generated:balanced_brackets:000001",
+          "generated:balanced_brackets:000002",
+          "generated:balanced_brackets:000003",
+          "generated:balanced_brackets:000004",
+          "generated:balanced_brackets:000005",
+          "generated:balanced_brackets:000006",
+          "generated:balanced_brackets:000007",
+          "generated:balanced_brackets:000008",
+          "generated:balanced_brackets:000009",
+          "generated:balanced_brackets:000010",
+          "generated:balanced_brackets:000011",
+          "generated:balanced_brackets:000012",
+          "generated:balanced_brackets:000013",
+          "generated:balanced_brackets:000014",
+          "generated:balanced_brackets:000015",
+          "generated:copy_grid:000000",
+          "generated:copy_grid:000001",
+          "generated:copy_grid:000002",
+          "generated:copy_grid:000003",
+          "generated:copy_grid:000004",
+          "generated:copy_grid:000005",
+          "generated:copy_grid:000006",
+          "generated:copy_grid:000007",
+          "generated:copy_grid:000008",
+          "generated:copy_grid:000009",
+          "generated:copy_grid:000010",
+          "generated:copy_grid:000011",
+          "generated:copy_grid:000012",
+          "generated:copy_grid:000013",
+          "generated:copy_grid:000014",
+          "generated:copy_grid:000015",
+          "generated:extract_actions:000000",
+          "generated:extract_actions:000001",
+          "generated:extract_actions:000002",
+          "generated:extract_actions:000003",
+          "generated:extract_actions:000004",
+          "generated:extract_actions:000005",
+          "generated:extract_actions:000006",
+          "generated:extract_actions:000007",
+          "generated:extract_actions:000008",
+          "generated:extract_actions:000009",
+          "generated:extract_actions:000010",
+          "generated:extract_actions:000011",
+          "generated:extract_actions:000012",
+          "generated:extract_actions:000013",
+          "generated:extract_actions:000014",
+          "generated:extract_actions:000015",
+          "generated:json_schema:000000",
+          "generated:json_schema:000001",
+          "generated:json_schema:000002",
+          "generated:json_schema:000003",
+          "generated:json_schema:000004",
+          "generated:json_schema:000005",
+          "generated:json_schema:000006",
+          "generated:json_schema:000007",
+          "generated:json_schema:000008",
+          "generated:json_schema:000009",
+          "generated:json_schema:000010",
+          "generated:json_schema:000011",
+          "generated:json_schema:000012",
+          "generated:json_schema:000013",
+          "generated:json_schema:000014",
+          "generated:json_schema:000015",
+          "generated:merge_intervals:000000",
+          "generated:merge_intervals:000001",
+          "generated:merge_intervals:000002",
+          "generated:merge_intervals:000003",
+          "generated:merge_intervals:000004",
+          "generated:merge_intervals:000005",
+          "generated:merge_intervals:000006",
+          "generated:merge_intervals:000007",
+          "generated:merge_intervals:000008",
+          "generated:merge_intervals:000009",
+          "generated:merge_intervals:000010",
+          "generated:merge_intervals:000011",
+          "generated:merge_intervals:000012",
+          "generated:merge_intervals:000013",
+          "generated:merge_intervals:000014",
+          "generated:merge_intervals:000015",
+          "generated:numbered_refrain:000000",
+          "generated:numbered_refrain:000001",
+          "generated:numbered_refrain:000002",
+          "generated:numbered_refrain:000003",
+          "generated:numbered_refrain:000004",
+          "generated:numbered_refrain:000005",
+          "generated:numbered_refrain:000006",
+          "generated:numbered_refrain:000007",
+          "generated:numbered_refrain:000008",
+          "generated:numbered_refrain:000009",
+          "generated:numbered_refrain:000010",
+          "generated:numbered_refrain:000011",
+          "generated:numbered_refrain:000012",
+          "generated:numbered_refrain:000013",
+          "generated:numbered_refrain:000014",
+          "generated:numbered_refrain:000015",
+          "generated:xml_records:000000",
+          "generated:xml_records:000001",
+          "generated:xml_records:000002",
+          "generated:xml_records:000003",
+          "generated:xml_records:000004",
+          "generated:xml_records:000005",
+          "generated:xml_records:000006",
+          "generated:xml_records:000007",
+          "generated:xml_records:000008",
+          "generated:xml_records:000009",
+          "generated:xml_records:000010",
+          "generated:xml_records:000011",
+          "generated:xml_records:000012",
+          "generated:xml_records:000013",
+          "generated:xml_records:000014",
+          "generated:xml_records:000015"
+        ],
+        "workloads": {
+          "code": 32,
+          "instruction": 32,
+          "repetition": 32,
+          "structured": 32
+        }
+      },
+      "train": {
+        "corpus_hash": "eced2d7945ee3d8c25b4aed782a6511526c597a50cb18edfccfc8864106a322c",
+        "families": [
+          "clean_words",
+          "copy_sentences",
+          "explain_processing",
+          "lookup_record",
+          "plan_work",
+          "records_to_csv",
+          "records_to_json",
+          "repeat_key_values",
+          "sum_above_threshold",
+          "summarize_reports",
+          "word_cycle",
+          "yaml_config"
+        ],
+        "generation_budgets": [
+          32,
+          64,
+          128
+        ],
+        "prompt_tokens": {
+          "max": 551,
+          "min": 28
+        },
+        "records": 192,
+        "sha256": "e09b35ac2c76ed903d2b40ec4b024e60cf1bf34c13be74e289a2f746c6431169",
+        "sources": [
+          "generated:clean_words:000000",
+          "generated:clean_words:000001",
+          "generated:clean_words:000002",
+          "generated:clean_words:000003",
+          "generated:clean_words:000004",
+          "generated:clean_words:000005",
+          "generated:clean_words:000006",
+          "generated:clean_words:000007",
+          "generated:clean_words:000008",
+          "generated:clean_words:000009",
+          "generated:clean_words:000010",
+          "generated:clean_words:000011",
+          "generated:clean_words:000012",
+          "generated:clean_words:000013",
+          "generated:clean_words:000014",
+          "generated:clean_words:000015",
+          "generated:copy_sentences:000000",
+          "generated:copy_sentences:000001",
+          "generated:copy_sentences:000002",
+          "generated:copy_sentences:000003",
+          "generated:copy_sentences:000004",
+          "generated:copy_sentences:000005",
+          "generated:copy_sentences:000006",
+          "generated:copy_sentences:000007",
+          "generated:copy_sentences:000008",
+          "generated:copy_sentences:000009",
+          "generated:copy_sentences:000010",
+          "generated:copy_sentences:000011",
+          "generated:copy_sentences:000012",
+          "generated:copy_sentences:000013",
+          "generated:copy_sentences:000014",
+          "generated:copy_sentences:000015",
+          "generated:explain_processing:000000",
+          "generated:explain_processing:000001",
+          "generated:explain_processing:000002",
+          "generated:explain_processing:000003",
+          "generated:explain_processing:000004",
+          "generated:explain_processing:000005",
+          "generated:explain_processing:000006",
+          "generated:explain_processing:000007",
+          "generated:explain_processing:000008",
+          "generated:explain_processing:000009",
+          "generated:explain_processing:000010",
+          "generated:explain_processing:000011",
+          "generated:explain_processing:000012",
+          "generated:explain_processing:000013",
+          "generated:explain_processing:000014",
+          "generated:explain_processing:000015",
+          "generated:lookup_record:000000",
+          "generated:lookup_record:000001",
+          "generated:lookup_record:000002",
+          "generated:lookup_record:000003",
+          "generated:lookup_record:000004",
+          "generated:lookup_record:000005",
+          "generated:lookup_record:000006",
+          "generated:lookup_record:000007",
+          "generated:lookup_record:000008",
+          "generated:lookup_record:000009",
+          "generated:lookup_record:000010",
+          "generated:lookup_record:000011",
+          "generated:lookup_record:000012",
+          "generated:lookup_record:000013",
+          "generated:lookup_record:000014",
+          "generated:lookup_record:000015",
+          "generated:plan_work:000000",
+          "generated:plan_work:000001",
+          "generated:plan_work:000002",
+          "generated:plan_work:000003",
+          "generated:plan_work:000004",
+          "generated:plan_work:000005",
+          "generated:plan_work:000006",
+          "generated:plan_work:000007",
+          "generated:plan_work:000008",
+          "generated:plan_work:000009",
+          "generated:plan_work:000010",
+          "generated:plan_work:000011",
+          "generated:plan_work:000012",
+          "generated:plan_work:000013",
+          "generated:plan_work:000014",
+          "generated:plan_work:000015",
+          "generated:records_to_csv:000000",
+          "generated:records_to_csv:000001",
+          "generated:records_to_csv:000002",
+          "generated:records_to_csv:000003",
+          "generated:records_to_csv:000004",
+          "generated:records_to_csv:000005",
+          "generated:records_to_csv:000006",
+          "generated:records_to_csv:000007",
+          "generated:records_to_csv:000008",
+          "generated:records_to_csv:000009",
+          "generated:records_to_csv:000010",
+          "generated:records_to_csv:000011",
+          "generated:records_to_csv:000012",
+          "generated:records_to_csv:000013",
+          "generated:records_to_csv:000014",
+          "generated:records_to_csv:000015",
+          "generated:records_to_json:000000",
+          "generated:records_to_json:000001",
+          "generated:records_to_json:000002",
+          "generated:records_to_json:000003",
+          "generated:records_to_json:000004",
+          "generated:records_to_json:000005",
+          "generated:records_to_json:000006",
+          "generated:records_to_json:000007",
+          "generated:records_to_json:000008",
+          "generated:records_to_json:000009",
+          "generated:records_to_json:000010",
+          "generated:records_to_json:000011",
+          "generated:records_to_json:000012",
+          "generated:records_to_json:000013",
+          "generated:records_to_json:000014",
+          "generated:records_to_json:000015",
+          "generated:repeat_key_values:000000",
+          "generated:repeat_key_values:000001",
+          "generated:repeat_key_values:000002",
+          "generated:repeat_key_values:000003",
+          "generated:repeat_key_values:000004",
+          "generated:repeat_key_values:000005",
+          "generated:repeat_key_values:000006",
+          "generated:repeat_key_values:000007",
+          "generated:repeat_key_values:000008",
+          "generated:repeat_key_values:000009",
+          "generated:repeat_key_values:000010",
+          "generated:repeat_key_values:000011",
+          "generated:repeat_key_values:000012",
+          "generated:repeat_key_values:000013",
+          "generated:repeat_key_values:000014",
+          "generated:repeat_key_values:000015",
+          "generated:sum_above_threshold:000000",
+          "generated:sum_above_threshold:000001",
+          "generated:sum_above_threshold:000002",
+          "generated:sum_above_threshold:000003",
+          "generated:sum_above_threshold:000004",
+          "generated:sum_above_threshold:000005",
+          "generated:sum_above_threshold:000006",
+          "generated:sum_above_threshold:000007",
+          "generated:sum_above_threshold:000008",
+          "generated:sum_above_threshold:000009",
+          "generated:sum_above_threshold:000010",
+          "generated:sum_above_threshold:000011",
+          "generated:sum_above_threshold:000012",
+          "generated:sum_above_threshold:000013",
+          "generated:sum_above_threshold:000014",
+          "generated:sum_above_threshold:000015",
+          "generated:summarize_reports:000000",
+          "generated:summarize_reports:000001",
+          "generated:summarize_reports:000002",
+          "generated:summarize_reports:000003",
+          "generated:summarize_reports:000004",
+          "generated:summarize_reports:000005",
+          "generated:summarize_reports:000006",
+          "generated:summarize_reports:000007",
+          "generated:summarize_reports:000008",
+          "generated:summarize_reports:000009",
+          "generated:summarize_reports:000010",
+          "generated:summarize_reports:000011",
+          "generated:summarize_reports:000012",
+          "generated:summarize_reports:000013",
+          "generated:summarize_reports:000014",
+          "generated:summarize_reports:000015",
+          "generated:word_cycle:000000",
+          "generated:word_cycle:000001",
+          "generated:word_cycle:000002",
+          "generated:word_cycle:000003",
+          "generated:word_cycle:000004",
+          "generated:word_cycle:000005",
+          "generated:word_cycle:000006",
+          "generated:word_cycle:000007",
+          "generated:word_cycle:000008",
+          "generated:word_cycle:000009",
+          "generated:word_cycle:000010",
+          "generated:word_cycle:000011",
+          "generated:word_cycle:000012",
+          "generated:word_cycle:000013",
+          "generated:word_cycle:000014",
+          "generated:word_cycle:000015",
+          "generated:yaml_config:000000",
+          "generated:yaml_config:000001",
+          "generated:yaml_config:000002",
+          "generated:yaml_config:000003",
+          "generated:yaml_config:000004",
+          "generated:yaml_config:000005",
+          "generated:yaml_config:000006",
+          "generated:yaml_config:000007",
+          "generated:yaml_config:000008",
+          "generated:yaml_config:000009",
+          "generated:yaml_config:000010",
+          "generated:yaml_config:000011",
+          "generated:yaml_config:000012",
+          "generated:yaml_config:000013",
+          "generated:yaml_config:000014",
+          "generated:yaml_config:000015"
+        ],
+        "workloads": {
+          "code": 48,
+          "instruction": 48,
+          "repetition": 48,
+          "structured": 48
+        }
+      },
+      "validation": {
+        "corpus_hash": "2642cdf080400fbf31a5c4dc1448dabe99774c583fa8fcc38a1479a95ecff82c",
+        "families": [
+          "compare_options",
+          "count_characters",
+          "echo_letter",
+          "flatten_lists",
+          "markdown_table",
+          "rewrite_message",
+          "symbol_cycle",
+          "tool_arguments"
+        ],
+        "generation_budgets": [
+          32,
+          64,
+          128
+        ],
+        "prompt_tokens": {
+          "max": 462,
+          "min": 21
+        },
+        "records": 64,
+        "sha256": "4ddce0f333a68f63f86179b6b86c328de9cf7126a19f4bae8c8a05641ab00cf3",
+        "sources": [
+          "generated:compare_options:000000",
+          "generated:compare_options:000001",
+          "generated:compare_options:000002",
+          "generated:compare_options:000003",
+          "generated:compare_options:000004",
+          "generated:compare_options:000005",
+          "generated:compare_options:000006",
+          "generated:compare_options:000007",
+          "generated:count_characters:000000",
+          "generated:count_characters:000001",
+          "generated:count_characters:000002",
+          "generated:count_characters:000003",
+          "generated:count_characters:000004",
+          "generated:count_characters:000005",
+          "generated:count_characters:000006",
+          "generated:count_characters:000007",
+          "generated:echo_letter:000000",
+          "generated:echo_letter:000001",
+          "generated:echo_letter:000002",
+          "generated:echo_letter:000003",
+          "generated:echo_letter:000004",
+          "generated:echo_letter:000005",
+          "generated:echo_letter:000006",
+          "generated:echo_letter:000007",
+          "generated:flatten_lists:000000",
+          "generated:flatten_lists:000001",
+          "generated:flatten_lists:000002",
+          "generated:flatten_lists:000003",
+          "generated:flatten_lists:000004",
+          "generated:flatten_lists:000005",
+          "generated:flatten_lists:000006",
+          "generated:flatten_lists:000007",
+          "generated:markdown_table:000000",
+          "generated:markdown_table:000001",
+          "generated:markdown_table:000002",
+          "generated:markdown_table:000003",
+          "generated:markdown_table:000004",
+          "generated:markdown_table:000005",
+          "generated:markdown_table:000006",
+          "generated:markdown_table:000007",
+          "generated:rewrite_message:000000",
+          "generated:rewrite_message:000001",
+          "generated:rewrite_message:000002",
+          "generated:rewrite_message:000003",
+          "generated:rewrite_message:000004",
+          "generated:rewrite_message:000005",
+          "generated:rewrite_message:000006",
+          "generated:rewrite_message:000007",
+          "generated:symbol_cycle:000000",
+          "generated:symbol_cycle:000001",
+          "generated:symbol_cycle:000002",
+          "generated:symbol_cycle:000003",
+          "generated:symbol_cycle:000004",
+          "generated:symbol_cycle:000005",
+          "generated:symbol_cycle:000006",
+          "generated:symbol_cycle:000007",
+          "generated:tool_arguments:000000",
+          "generated:tool_arguments:000001",
+          "generated:tool_arguments:000002",
+          "generated:tool_arguments:000003",
+          "generated:tool_arguments:000004",
+          "generated:tool_arguments:000005",
+          "generated:tool_arguments:000006",
+          "generated:tool_arguments:000007"
+        ],
+        "workloads": {
+          "code": 16,
+          "instruction": 16,
+          "repetition": 16,
+          "structured": 16
+        }
+      }
+    },
+    "tokenization": {
+      "add_special_tokens": true,
+      "format_version": "supra-alpaca-v1",
+      "truncation": false
+    },
+    "tokenizer_hash": "05f724bd53dff6b881473d597441548e92fc71d833f410e9e2f1aed2e9063952",
+    "version": "dart-procedural-v1"
+  },
+  "wheel_sha256": "39ada66c0d2449557295636e33591ae8036957ebd0baa5f5b89d56d4ebe10f4d",
+  "gpu_retry": {
+    "code_commit": "d8e6bebae41024ddb98543b9f3b8967550014f9b",
+    "code_tree": "d75c1f70278ce54a068157f63edbe252c9714564",
+    "original_code_commit": "fc0c81c63390c16b73db3e14619f378f93d99951",
+    "original_plan_sha256": "c860ae752bacaa6d25536740faba2b73fced054d17dacd4da926d1db1509eeac",
+    "original_failure_sha256": "a13a1ae653d6687ddee4fd88f5573f904b20e5b9cec2cd148bb9d030277e920e",
+    "prior_correctness_sha256": "50ee64fcef02eae1468e86812b3b763c14a4553a8204e39997d5b3344955b253",
+    "frozen_at": "2026-10-23T23:59:38.259033+00:00",
+    "attempt": 2,
+    "plan_sha256": "49dca2aa9e44145412f47fe43b41e700dd6c4eedc819284b48fee84ea2cf6ace",
+    "wheel_sha256": "8c3d8850c21a9e8d4b252b56f68b3aa249d9ba529da7d86bd2039880e59c7a27"
+  }
+}
