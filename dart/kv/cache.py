@@ -320,7 +320,7 @@ class QuantizedKVCache(DynamicCache):
 
     def crop(self, max_length: int) -> None:
         if max_length < 0:
-            raise ValueError("max_length must be >= 0")
+            max_length = max(0, self.get_seq_length() + max_length)
         for li in range(len(self._kq)):
             qlen = self._kq[li].length
             if max_length <= qlen:

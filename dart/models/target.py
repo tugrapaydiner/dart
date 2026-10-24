@@ -310,11 +310,13 @@ class TargetModel:
 
     def crop(self, state: TargetState, length: int) -> None:
         """Roll the KV state back so it covers only the first ``length`` tokens."""
-        if length > state.seq_len:
+        current_length = state.seq_len
+        if length < 0 or length > current_length:
             raise ValueError(
-                f"cannot crop cache of length {state.seq_len} to {length}"
+                f"cannot crop cache of length {current_length} to {length}"
             )
-        state.cache.crop(length)
+        if length < current_length:
+            state.cache.crop(length - current_length)  # HF accepts negative removal counts.
 
     # ------------------------------------------------------------------ #
     # Trusted baseline
