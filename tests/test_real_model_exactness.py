@@ -1,14 +1,11 @@
-"""Exactness on a REAL pretrained model (docs/design.md §13.4).
+"""Optional pretrained-model checks using a local DART_TEST_MODEL directory.
 
-The rest of the suite proves the contract on random tiny targets, which is
-correct (exactness is weight-independent) but leaves one question open: does
-the pipeline still hold with a real tokenizer, real vocabulary, and real
-attention/RoPE?  This test answers it on ``sshleifer/tiny-gpt2`` (a small
-real GPT-2 checkpoint), and is skipped automatically when the model cannot
-be fetched (offline CI).
+Configured models must load successfully; loading errors fail the checks.
 """
 
 from __future__ import annotations
+
+import os
 
 import pytest
 import torch
@@ -22,15 +19,16 @@ from dart.models.target import TargetModel
 from dart.runtime.engine import DartEngine
 from dart.runtime.types import DecodeConfig
 
-MODEL = "sshleifer/tiny-gpt2"
-
 
 @pytest.fixture(scope="module")
 def real_target():
-    try:
-        return TargetModel.from_pretrained(MODEL, device="cpu", dtype=torch.float32)
-    except Exception as e:  # offline / hub error -> skip, do not fail
-        pytest.skip(f"could not load real model {MODEL}: {type(e).__name__}")
+    model = os.environ.get("DART_TEST_MODEL")
+    if not model:
+        pytest.skip("set DART_TEST_MODEL to an existing local model directory")
+    return TargetModel.from_pretrained(
+        model, device="cpu", dtype=torch.float32, attn_implementation="sdpa",
+        local_files_only=True, trust_remote_code=False,
+    )
 
 
 PROMPTS = [
@@ -45,11 +43,13 @@ def test_dart_baseline_matches_hf_generate_on_real_model(real_target):
     for text in PROMPTS:
         ids = tok.encode(text)
         base = real_target.greedy_generate(ids, max_new_tokens=24)
+        inputs = torch.tensor([ids])
         hf = real_target.model.generate(
-            torch.tensor([ids]), max_new_tokens=24, do_sample=False, num_beams=1,
+            inputs, attention_mask=torch.ones_like(inputs),
+            max_new_tokens=24, do_sample=False, num_beams=1,
             use_cache=True, pad_token_id=real_target.model.config.eos_token_id,
         )[0, len(ids):].tolist()
-        assert hf[: len(base)] == base[: len(hf)]  # DART baseline == HF greedy
+        assert hf == base
 
 
 @pytest.mark.parametrize("lane_name", ["ngram", "compressed_kv_int4", "sparse_kv"])
