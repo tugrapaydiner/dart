@@ -175,7 +175,15 @@ def _state_dict_fits(module: torch.nn.Module, state: dict) -> bool:
     )
 
 
-def build_hf_method(target, max_new_tokens: int, record_hidden: bool | None = None):
+def build_hf_method(
+    target, max_new_tokens: int, record_hidden: bool | None = None, *,
+    prompt_lookup_num_tokens: int | None = None, max_matching_ngram_size: int = 4,
+):
+    if prompt_lookup_num_tokens is not None:
+        for name, value in (("prompt_lookup_num_tokens", prompt_lookup_num_tokens),
+                            ("max_matching_ngram_size", max_matching_ngram_size)):
+            if type(value) is not int or value < 1:
+                raise ValueError(f"{name} must be a positive integer")
     eos = sorted(target.eos_token_ids)
     pad = getattr(target.model.config, "pad_token_id", None)
     settings = GenerationConfig().to_dict()
@@ -187,10 +195,17 @@ def build_hf_method(target, max_new_tokens: int, record_hidden: bool | None = No
         eos_token_id=eos or None, pad_token_id=pad if pad is not None else (eos[0] if eos else 0),
         output_hidden_states=target.record_hidden if record_hidden is None else record_hidden,
     )
+    if prompt_lookup_num_tokens is not None:
+        settings.update(prompt_lookup_num_tokens=prompt_lookup_num_tokens,
+                        max_matching_ngram_size=max_matching_ngram_size)
 
     @torch.inference_mode()
     def generate(prompt):
         target.validate_generation(len(prompt), max_new_tokens)
+        if prompt_lookup_num_tokens is not None and prompt[-1] in target.eos_token_ids:
+            raise ValueError("HF prompt lookup requires a prompt that does not end in EOS")
+        if prompt_lookup_num_tokens is not None and max_new_tokens > 1:
+            target.validate_generation(len(prompt), max_new_tokens + prompt_lookup_num_tokens - 1)  # HF may score past the output budget.
         ids = torch.tensor([prompt], device=target.device)
         output = target.model.generate(ids, attention_mask=torch.ones_like(ids), **settings)  # Every prompt token is real input.
         token_ids = output[0, len(prompt):].tolist()
