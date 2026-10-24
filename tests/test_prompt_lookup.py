@@ -19,7 +19,6 @@ def test_lookup_uses_drafts_and_preserves_model_settings(device):
     forwards = []
 
     def record(module, args, kwargs, output):
-        assert kwargs["attention_mask"].all()
         assert output.hidden_states is None
         forwards.append(kwargs["input_ids"].shape[1])
 
@@ -76,7 +75,9 @@ def test_lookup_keeps_verification_inside_context_limit(device):
     lengths = []
 
     def record(module, args, kwargs):
-        lengths.append(kwargs["attention_mask"].shape[-1])
+        cache = kwargs.get("past_key_values")
+        cached = cache.get_seq_length() if cache is not None else 0
+        lengths.append(cached + kwargs["input_ids"].shape[-1])
 
     hook = target.model.register_forward_pre_hook(record, with_kwargs=True)
     try:

@@ -24,13 +24,14 @@ def test_benchmark_command_uses_validation_and_records_full_comparisons(local_mo
                                     "available_prompts": 4, "selected_prompts": 2}
     assert report["correctness"]["summary"]["exact_match_rate"] == 1
     assert [row["id"] for row in report["correctness"]["outputs"]] == ["a", "b"]
-    assert len(report["timing"]["samples"]) == 16 and len(report["profile"]["samples"]) == 16
+    assert len(report["timing"]["samples"]) == 20 and len(report["profile"]["samples"]) == 20
+    assert report["hf_prompt_lookup"] == {"prompt_lookup_num_tokens": 4, "max_matching_ngram_size": 4}
     assert report["timing"]["warmup"] == 1 and report["timing"]["repeats"] == 2
     assert report["preset"]["target"]["local_files_only"] is True and len(built) == 1
     assert report["environment"]["platform"]
     saved = json.loads(output.with_suffix(".timing.json").read_text())
     assert saved["status"] == "timing_complete" and "profile" not in saved
-    for key in ("correctness", "timing", "preset", "target", "corpus", "environment", "selection"):
+    for key in ("correctness", "timing", "preset", "target", "corpus", "environment", "selection", "hf_prompt_lookup"):
         assert saved[key] == report[key]
     console = capsys.readouterr().out
     assert "DART vs " in console and "draft acceptance" in console
@@ -72,7 +73,7 @@ def test_completed_timings_survive_interrupted_profiling(local_model, tmp_path, 
     def interrupt(*args, **kwargs):
         saved = json.loads(output.with_suffix(".timing.json").read_text())
         assert saved["status"] == "timing_complete" and "profile" not in saved
-        assert len(saved["timing"]["samples"]) == 16
+        assert len(saved["timing"]["samples"]) == 20
         assert saved["correctness"]["summary"]["exact_match_rate"] == 1
         for sample in saved["timing"]["samples"]:
             assert sample["output_hash"] == saved["correctness"]["outputs"][sample["prompt_index"]]["output_hash"]

@@ -16,6 +16,8 @@ from dart.data.corpus import Prompt, encode_prompt
 from dart.runtime.engine import DartEngine
 from dart.runtime.types import DecodeConfig
 
+COMPARISON_BASELINES = (*BASELINES, "hf_prompt_lookup")
+
 
 def select_records(records: list[Prompt], per_workload: int) -> list[Prompt]:
     if type(per_workload) is not int or not 1 <= per_workload <= 32:
@@ -33,7 +35,7 @@ def select_records(records: list[Prompt], per_workload: int) -> list[Prompt]:
 
 def _summarize(samples: list[dict], seed: int) -> dict:
     timing = summarize_samples(samples, "hf_greedy", seed)
-    fastest = min(BASELINES, key=lambda name: timing[name]["mean_ms"])
+    fastest = min(COMPARISON_BASELINES, key=lambda name: timing[name]["mean_ms"])
     comparison = summarize_samples(samples, fastest, seed)
     return {
         "timing": timing, "fastest_baseline": fastest,
@@ -46,6 +48,7 @@ def benchmark_corpus(
     engine: DartEngine, records: list[Prompt], config: DecodeConfig | None = None, *,
     warmup: int = 2, repeats: int = 10, seed: int = 17, progress=None,
     on_timing: Callable[[dict], None] | None = None,
+    lookup_tokens: int | None = None, lookup_max_ngram: int = 4,
 ) -> dict:
     """Repeated comparisons with separate correctness and phase diagnostics."""
     if type(warmup) is not int or type(repeats) is not int or warmup < 1 or repeats < 2:
@@ -56,6 +59,13 @@ def benchmark_corpus(
         raise ValueError("benchmark phase profiling requires the block verifier")
     target = engine.target
     config = config or engine.default_decode_config or DecodeConfig()
+    config.validate()
+    lookup_settings = {
+        "prompt_lookup_num_tokens": config.draft_len if lookup_tokens is None else lookup_tokens,
+        "max_matching_ngram_size": lookup_max_ngram,
+    }
+    lookup = {budget: build_hf_method(target, budget, record_hidden=False, **lookup_settings)
+              for budget in {row.max_new_tokens for row in records}}
     checks = evaluate_corpus(engine, records, config)
     if progress:
         progress("Correctness checks passed; starting warm-up and repeated timing")
@@ -68,6 +78,7 @@ def benchmark_corpus(
     with DartEngine(target) as baseline:
         methods = {
             "hf_greedy": lambda prompt: hf[tuple(prompt)](prompt),
+            "hf_prompt_lookup": lambda prompt: lookup[configs[tuple(prompt)].max_new_tokens](prompt),
             "target_greedy": lambda prompt: direct[tuple(prompt)](prompt),
             "target_only": lambda prompt: baseline.generate(prompt, configs[tuple(prompt)]),
             "dart": lambda prompt: engine.generate(prompt, configs[tuple(prompt)]),
@@ -83,6 +94,7 @@ def benchmark_corpus(
                 "schema": "dart-corpus-timing-v1", "status": "timing_complete",
                 "split": checks["split"], "selected_corpus_hash": checks["selected_corpus_hash"],
                 "seed": seed, "correctness": checks, "timing": timing,
+                "hf_prompt_lookup": lookup_settings,
                 "record_hidden_by_method": {name: target.record_hidden if name == "dart" else False for name in methods},
             })
         if progress:
@@ -95,6 +107,9 @@ def benchmark_corpus(
         "schema": "dart-corpus-benchmark-v1", "split": checks["split"],
         "selected_corpus_hash": checks["selected_corpus_hash"], "seed": seed,
         "correctness": checks, "timing": timing, "profile": profile,
+        "hf_prompt_lookup": lookup_settings,
+        "baseline_methods": list(COMPARISON_BASELINES),
+        "lookup_scope": "native HF lookup; prompt must not end in EOS; reserve draft length minus one extra context positions",
         "timing_scope": "token ids through generation and output decoding; loading, tokenization, correctness and warm-up excluded",
         "acceptance_scope": "one separate full-output correctness pass",
         "memory_scope": "allocator peak with one shared target and both engine instances resident",
