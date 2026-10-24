@@ -34,6 +34,7 @@ include = ["dart*", "benchmarks*"]
 
 [tool.setuptools.package-data]
 dart = ["py.typed"]
+benchmarks = ["fixtures/v0.3-prompts.jsonl", "fixtures/v0.3-sources.json"]
 
 [tool.ruff]
 line-length = 88
