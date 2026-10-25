@@ -5,6 +5,7 @@ import json
 import platform
 import sys
 import uuid
+from contextlib import ExitStack
 from datetime import datetime, timezone
 from importlib.metadata import version
 from pathlib import Path
@@ -27,6 +28,7 @@ def _parser() -> argparse.ArgumentParser:
         command.add_argument("--device", choices=("cpu", "cuda"), default="cpu")
         command.add_argument("--native-rms-norm", action="store_true", help="use PyTorch RMSNorm for float32 Llama layers")
     for command in (check, bench):
+        command.add_argument("--norm-control", action="store_true", help="compare with original RMSNorm; requires --native-rms-norm")
         command.add_argument("--corpus", help="versioned corpus directory; otherwise generate the fixed pilot")
         command.add_argument("--split", choices=("train", "validation", "test"), default="validation")
         command.add_argument("--seed", type=int, default=17, help="pilot seed; also controls benchmark ordering")
@@ -66,6 +68,10 @@ def _run(args) -> int:
     from dart.presets import supra_config
     from dart.runtime.factory import build_engine
 
+    if args.norm_control and not args.native_rms_norm:
+        raise ValueError("norm-control requires native-rms-norm")
+    if args.command == "bench" and args.norm_control and not args.skip_profile:
+        raise ValueError("norm-control benchmarks require skip-profile; use separate decode traces")
     if args.command == "bench":
         if not 1 <= args.warmup <= 10 or not 2 <= args.repeats <= 100:
             raise ValueError("use warmup from 1 to 10 and repeats from 2 to 100")
@@ -84,11 +90,14 @@ def _run(args) -> int:
         if done % 8 == 0 or done == total:
             print(f"Checked {done}/{total} prompts", file=sys.stderr, flush=True)
 
-    with build_engine(config) as engine:
+    with ExitStack() as stack:
+        engine = stack.enter_context(build_engine(config))
+        control = stack.enter_context(build_engine(supra_config(args.model, args.device))) if args.norm_control else None
         records, manifest = _records(args, engine.target)
         fingerprint = target_fingerprint(engine.target)
         metadata = {
             "command": args.command, "preset": config, "target": fingerprint, "corpus": manifest,
+            **({"norm_control_target": target_fingerprint(control.target)} if control is not None else {}),
             "environment": {
                 "dart": __version__, "python": platform.python_version(), "threads": torch.get_num_threads(),
                 "platform": platform.platform(), "processor": platform.processor(), "cuda": torch.version.cuda,
@@ -97,7 +106,8 @@ def _run(args) -> int:
             },
         }
         if args.command == "check":
-            report = evaluate_corpus(engine, records, engine.default_decode_config, progress=progress)
+            report = evaluate_corpus(engine, records, engine.default_decode_config, progress=progress,
+                                     reference_target=control.target if control is not None else None)
         else:
             from benchmarks.corpus_bench import benchmark_corpus, select_records
 
@@ -120,6 +130,7 @@ def _run(args) -> int:
                 progress=lambda message: print(message, file=sys.stderr, flush=True),
                 on_timing=save_timing,
                 profile=not args.skip_profile,
+                norm_control=control,
             )
             report["selection"] = selection
     report.update(metadata)
@@ -136,6 +147,10 @@ def _run(args) -> int:
         comparison = report["summary"]["vs_fastest"]["dart"]
         low, high = comparison["ci95_speedup"]
         print(f"DART vs {report['summary']['fastest_baseline']}: {comparison['speedup']:.3f}x, 95% CI [{low:.3f}, {high:.3f}]")
+        if "norm_ablation" in report["summary"]:
+            ablation = report["summary"]["norm_ablation"]
+            low, high = ablation["ci95_speedup"]
+            print(f"Native vs original RMSNorm: {ablation['speedup']:.3f}x, 95% CI [{low:.3f}, {high:.3f}]")
         for row in report["correctness"]["outputs"]:
             print(f"{row['id']}: matching hash {row['output_hash']}, {row['generated_tokens']} tokens, "
                   f"draft acceptance {row['draft_tokens_accepted']}/{row['draft_tokens_proposed']}")
