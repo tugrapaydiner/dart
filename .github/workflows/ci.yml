@@ -46,7 +46,7 @@ jobs:
           from pathlib import Path
 
           wheel, = Path("dist").glob("*.whl")
-          subprocess.run([sys.executable, "-m", "pip", "install", f"{wheel}[dev]"], check=True)
+          subprocess.run([sys.executable, "-m", "pip", "install", f"{wheel}[dev,figures]"], check=True)
           PY
       - name: Check installed package
         working-directory: ${{ runner.temp }}

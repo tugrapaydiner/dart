@@ -25,6 +25,7 @@ dart = "dart.cli:main"
 
 [project.optional-dependencies]
 dev = ["pytest>=7.0", "pytest-timeout", "ruff>=0.4"]
+figures = ["matplotlib>=3.8", "fonttools>=4.47"]
 
 [tool.setuptools]
 include-package-data = false
