@@ -115,7 +115,9 @@ def benchmark_corpus(
                 norm_control.target if name == NORM_CONTROL else target, hidden_settings[name], method,
             ) for name, method in methods.items()
         }
-        timing = measure_methods(methods, prompts, target.device, warmup=warmup, repeats=repeats, seed=seed)
+        timing = measure_methods(
+            methods, prompts, target.device, warmup=warmup, repeats=repeats, seed=seed, progress=progress,
+        )
         for sample in timing["samples"]:
             if sample["output_hash"] != checks["outputs"][sample["prompt_index"]]["output_hash"]:
                 raise ValueError("reference output changed between correctness and timing")

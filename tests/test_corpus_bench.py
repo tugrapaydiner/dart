@@ -36,7 +36,8 @@ def test_benchmark_preserves_budgets_eos_and_separate_measurements(device, early
     assert report["hf_prompt_lookup"] == {"prompt_lookup_num_tokens": 2, "max_matching_ngram_size": 4}
     assert set(report["by_workload"]) == {"instruction", "code"}
     assert set(report["by_budget"]) == {"3", "7"}
-    assert len(progress) == 2
+    assert progress[-2] == "Timed 20/20 samples"
+    assert progress[-1] == "Repeated timing passed; starting separate phase profiling"
     checks = report["correctness"]
     assert checks["summary"]["exact_match_rate"] == 1
     assert checks["summary"]["draft_tokens_proposed"] == 0
@@ -120,7 +121,9 @@ def test_skipping_profiles_keeps_all_timing_and_output_checks(monkeypatch):
         )
         assert engine.target.record_hidden is True
     assert report["profile"] is None and report["profiling_requested"] is False
-    assert saved[0]["profiling_requested"] is False and len(progress) == 1
+    assert saved[0]["profiling_requested"] is False
+    assert progress[-1] == "Timed 20/20 samples"
+    assert not any("starting separate phase profiling" in message for message in progress)
     assert len(report["timing"]["samples"]) == 20
     for sample in report["timing"]["samples"]:
         assert sample["output_hash"] == report["correctness"]["outputs"][sample["prompt_index"]]["output_hash"]

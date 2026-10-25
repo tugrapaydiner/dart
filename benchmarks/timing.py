@@ -67,13 +67,18 @@ def measure_methods(
     warmup: int = 2,
     repeats: int = 10,
     seed: int = 17,
+    progress: Callable[[str], None] | None = None,
 ) -> dict:
     if reference not in methods:
         raise ValueError("reference method is missing")
     if not prompts or type(warmup) is not int or type(repeats) is not int or warmup < 1 or repeats < 2:
         raise ValueError("use nonempty prompts, warmup >= 1, and repeats >= 2")
     rng = np.random.default_rng(seed)
-    expected = [list(tokens(methods[reference](prompt))) for prompt in prompts]
+    expected = []
+    for index, prompt in enumerate(prompts):
+        expected.append(list(tokens(methods[reference](prompt))))
+        if progress:
+            progress(f"Reference outputs: {index + 1}/{len(prompts)} prompts")
     synchronize(device)
 
     def check(name, index, output):
@@ -83,12 +88,16 @@ def measure_methods(
     for index, prompt in enumerate(prompts):
         for name, method in methods.items():
             check(name, index, method(prompt))
+        if progress:
+            progress(f"Preflight checks: {index + 1}/{len(prompts)} prompts")
     synchronize(device)
-    for _ in range(warmup):
+    for iteration in range(warmup):
         for index, prompt in enumerate(prompts):
             for name, method in methods.items():
                 check(name, index, method(prompt))
                 synchronize(device)
+            if progress:
+                progress(f"Warm-up {iteration + 1}/{warmup}: {index + 1}/{len(prompts)} prompts")
 
     samples = []
     names = list(methods)
@@ -114,6 +123,8 @@ def measure_methods(
                     "output_hash": output_hash(tokens(output)),
                     "peak_gpu_bytes": torch.cuda.max_memory_allocated(device) if cuda else 0,
                 })
+            if progress:
+                progress(f"Timed {len(samples)}/{repeats * len(prompts) * len(names)} samples")
     return {
         "reference": reference, "warmup": warmup, "repeats": repeats,
         "samples": samples, "summary": summarize_samples(samples, reference, seed),
