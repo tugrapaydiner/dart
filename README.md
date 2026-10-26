@@ -4,7 +4,7 @@
 
 Exact greedy decoding with n-gram drafts and CUDA replay. No extra learned weights.
 
-**[Run & reproduce →](docs/reproduce.md)** · [Raw results](benchmarks/results/v0.3-feedback) · [How it works](#how-it-works)
+**[Run & reproduce →](docs/reproduce.md)** · [Benchmark setup](docs/reproduce.md#benchmark-setup) · [How it works](#how-it-works)
 
 ### Frozen benchmark
 
@@ -19,8 +19,8 @@ HF retains its generation loop. **48 cases, seven methods, three processes.**
 | **4,176 / 4,176** | **46 / 48** | **0** |
 
 Token IDs, lengths and EOS all match. Five cases end naturally at EOS.
-[Measured revision](https://github.com/tugrapaydiner/dart/tree/3d651482538e15d427fd8533340e98a53b7eec8b);
-[later runtime changes](docs/reproduce.md#later-runtime-changes) are reported separately.
+[Later runtime changes](docs/reproduce.md#later-runtime-changes) are reported separately.
+Raw run records are not distributed with the repository.
 
 ### Where it helps
 
@@ -59,11 +59,11 @@ Fixed-four drafting was selected on development inputs.
 ![All 48 case means; two slower instruction cases are highlighted in pink.](docs/figures/v0.3-feedback/cases.svg)
 
 Two instruction cases take **3.7% and 11.8% longer**. Both case intervals cross
-parity. [Per-case timings and intervals →](benchmarks/results/v0.3-feedback/analysis.json)
+parity. [Measurement scope →](docs/reproduce.md#losses-and-limits)
 
 **Scope:** one 51.8M model and one laptop. Warm timings exclude preparation.
 Peak allocation is **0.589 GiB**, including two model copies and shared workspaces.
 No larger-model, answer-quality or independent-reproduction result is claimed.
 
-**[Reproduce →](docs/reproduce.md)** · [Development & alternatives](benchmarks/results/v0.3-feedback/development.json) ·
+**[Reproduce →](docs/reproduce.md)** · [Development & alternatives](docs/reproduce.md#later-runtime-changes) ·
 [Apache-2.0](LICENSE) · [Data attribution](benchmarks/fixtures/feedback-sources.json) · [Cite DART](CITATION.cff)

@@ -1,7 +1,9 @@
-# Reproduce the feedback study
+# Run the feedback benchmark
 
-[Results](../README.md) · [Raw evidence](../benchmarks/results/v0.3-feedback) ·
-[Study record](../benchmarks/results/v0.3-feedback/study.json)
+[Results](../README.md) · [Data attribution](../benchmarks/fixtures/feedback-sources.json)
+
+Raw historical runs are not distributed. These commands generate new records
+under `runs/`; they do not reproduce the historical timings exactly.
 
 Use an existing **HF-format Supra-50M-Instruct** directory as `MODEL_DIR`.
 Commands load local files only; GGUF is unsupported. Run from the repository
@@ -23,59 +25,14 @@ then the recorded dependencies and project:
 
 ```sh
 python -m pip install torch==2.11.0 --index-url https://download.pytorch.org/whl/cu128
-python -m pip install -c constraints-tested.txt -r benchmarks/results/v0.3-execution/requirements.txt ".[dev,figures]"
+python -m pip install -c constraints-tested.txt ".[dev,figures]"
 python -m pip check
 dart --version
 ```
 
-The dependency pins describe this measured environment, not every platform.
-The original feedback confirmation reused system dependencies. A later
-[clean validation](../benchmarks/results/v0.3-feedback/reproduction.json) installed
-the public wheel from revision `de28a986` and all runtime/plotting dependencies in a **new venv
-without system or user packages**, entirely from cached wheels. Every installed
-distribution and project import was verified inside that environment.
-Public commands ran outside the checkout: **352 complete outputs matched on
-16 development cases**, and the four original final-study SVGs reproduced byte for byte.
-This is same-host installation validation, not independent performance reproduction.
-
-CPU CI separately builds and installs the current wheel with fresh dependencies
-and test extras on Python 3.10/3.12. Local CUDA and Supra output checks complement
-its skips. The earlier execution study keeps its separate
-[fresh-dependency record](../benchmarks/results/v0.3-execution/reproduction.json).
-
-## Inspect the published records
-
-No model or GPU is needed to reanalyze records or regenerate figures:
-
-```sh
-python -m benchmarks.feedback_analysis --run benchmarks/results/v0.3-feedback --out runs/feedback-analysis.json
-python -m benchmarks.feedback_figures --run benchmarks/results/v0.3-feedback --out runs/feedback-figures --previews runs/feedback-previews
-```
-
-Both commands validate complete output sequences, hashes, timing matrices,
-settings and process records. Figures recompute results from the raw sessions,
-ignoring any precomputed analysis. Missing or mismatched records fail.
-`confirmation_passed` covers the frozen quantitative gates, not a release or
-portfolio-quality judgment. Archive checks do not rerun weights or re-tokenize.
-
-Published figures use Matplotlib 3.11.1, fontTools 4.63.0 and
-[Inter](https://github.com/google/fonts/blob/main/ofl/inter/Inter%5Bopsz%2Cwght%5D.ttf)
-under the [SIL Open Font License](https://github.com/google/fonts/blob/main/ofl/inter/OFL.txt).
-Default typography is DejaVu Sans. Add `--font-file Inter-variable.ttf` for Inter;
-its SHA256 is `29160a80ff49ddcab2c97711247e08b1fab27a484a329ce8b813d820dc559031`
-(weights 400/500/600, optical size 18). No font is downloaded by the command.
-[Figure data](figures/v0.3-feedback/figure-data.json) records raw evidence and
-SVG hashes. The current five-chart presentation was rebuilt from the same raw
-records, then reproduced byte for byte from the rebuilt wheel. No model run was
-repeated. The original four-chart installation record remains historical evidence;
-the new hashes are recorded under `presentation_revision` in
-[reproduction.json](../benchmarks/results/v0.3-feedback/reproduction.json).
-Whiskers in the baseline chart span three process means. Workload pairs and
-entropy slopes show matched means; the latter share one vertical scale. Case
-dots show every mean reduction, including the two losses; their 95% intervals
-remain in the raw analysis. Budget panels share a zero-based scale and contain
-different cases, so they do not represent a controlled output-length sweep.
-On a restricted host, set `MPLCONFIGDIR` to a writable scratch directory.
+The pins describe this measured environment, not every platform. CPU CI builds
+and installs the wheel with fresh dependencies on Python 3.10/3.12. CUDA and
+real-model tests require compatible local hardware and weights.
 
 ## Start with validation
 
@@ -86,12 +43,11 @@ python -m benchmarks.feedback_analysis --run runs/feedback-validation --out runs
 ```
 
 The pilot freezes 16 development cases, seven methods, one warm-up and two timed
-repeats in one fresh process, with a **300-second cap**. The recorded public run
-took **58.2 seconds**; all **352 outputs** matched. A pilot has no three-session
-interval and cannot pass confirmation. Inspect outputs, latency and memory
-before expanding. Keep logs and partial records if a run fails.
+repeats in one fresh process, with a **300-second cap**. A pilot has no
+three-session interval and cannot pass confirmation. Inspect outputs, latency
+and memory before expanding. Keep logs and partial records if a run fails.
 
-## Freeze and run confirmation
+## Run the full comparison
 
 ```sh
 python -m benchmarks.feedback_protocol --model "MODEL_DIR" --split test --out runs/feedback-test-protocol.json
@@ -100,26 +56,25 @@ python -m benchmarks.feedback_analysis --run runs/feedback-test --out runs/feedb
 python -m benchmarks.feedback_figures --run runs/feedback-test --out runs/feedback-test-figures
 ```
 
-All **48 fresh cases** run in **three fresh processes**, with one warm-up and
+All **48 cases** run in **three fresh processes**, with one warm-up and
 three timed repeats for each method and case. The **1,800-second cap** includes
 setup and full-output checks. The recorded run took **573.8 seconds**:
 144 DART checks, 1,008 warm-ups and 3,024 timed outputs all matched complete
 original-norm HF greedy references. Five unique cases reached EOS. Reference
 outputs also match across processes. No case or timing was removed.
 
-Measured code: `3d651482538e15d427fd8533340e98a53b7eec8b`.
-Original chart tooling: `be81f207f89e81c3ce5c1a52e510a3de06e1cb2a`.
-Current chart layout: `e4bb0d91240cee68c3c928e8f759ff698b3b23b0`.
-The [protocol](../benchmarks/results/v0.3-feedback/protocol.json) fingerprints
-source, weights, tokenizer and core packages. To execute that exact archived
-protocol, use its measured code revision in a separate checkout. A newer
-checkout must freeze a new protocol; the added chart module changes the source
-inventory. Do not edit hashes to make an older protocol pass. Archived analysis
-and plotting accept the recorded source fingerprints.
+These published inputs are already exposed; tuning on them does not establish
+a new held-out result. Each protocol fingerprints source, weights, tokenizer
+and core packages. Freeze a new protocol when the source changes; do not edit
+hashes to bypass checks. Analysis validates complete outputs, hashes, timing
+matrices, settings and process records. Figures recompute results from the
+sessions. Missing or mismatched records fail. Archive analysis does not rerun
+weights or re-tokenize. `confirmation_passed` covers quantitative gates,
+not a release-quality judgment.
 
-## Inputs and controls
+## Benchmark setup
 
-The new final corpus has **12 cases per workload**, with 16/32/64-token budgets
+The final corpus has **12 cases per workload**, with 16/32/64-token budgets
 balanced within each workload. All are timed. Prompts contain 39–696 tokens.
 Its hash is `e1c8af374753b723a00dc9bd4546394f83daa08e9faac8d30350cf15c1d77f6c`.
 The 36-case subset excludes the synthetic repetition workload; it does not
@@ -177,9 +132,6 @@ $$
 The matched on/off ablation isolates **7.6% lower mean latency**, with geometric
 ratio **1.081 [1.040, 1.123]** and improvements in all three processes. On all
 48 cases, fixed4 takes 74.2 ms, fixed2 79.3 ms and TimeScheduler 84.2 ms.
-The [development record](../benchmarks/results/v0.3-feedback/development.json)
-retains the two-process pilot; the public validation run then applied the same
-optimization to TimeScheduler before freezing confirmation.
 
 The frozen targets required ≥5% mean reduction from entropy elision and ≥5%
 against direct greedy outside repetition, improvement in every process, both
@@ -206,9 +158,12 @@ Bar whiskers show the range of process means, not confidence intervals.
 
 Instruction cases **06 and 09** lose to direct greedy by **3.7% and 11.8%**.
 Both have a 16-token budget; case 06 has a 677-token prompt, case 09 has 40.
-Their case intervals cross parity. Every loss, natural EOS and timing remains
-in the published records. Fixed2 and TimeScheduler also beat fixed4 on some
-individual cases; the frozen policy was not retuned on these outcomes.
+Their case intervals cross parity. Fixed2 and TimeScheduler also beat fixed4
+on some individual cases; the frozen policy was not retuned on these outcomes.
+
+Raw historical runs are not included, so readers can inspect the summary charts
+and run the public benchmark, but cannot independently audit those historical
+samples here.
 
 This is one 51.8M model on a shared laptop, batch one and short outputs.
 Absolute times decreased across processes. Paired ratios improve in every
@@ -226,9 +181,9 @@ logits, interleaved requests, scheduler consumers and incomplete evidence.
 
 ## Overhead validation
 
-The later [bounded comparison](../benchmarks/results/v0.3-efficiency/study.json)
-uses 16 existing development cases, six methods and three completed fresh
-processes. It is separate from the 48-case confirmation and README charts.
+The later bounded comparison uses 16 existing development cases, six methods
+and three completed fresh processes. It is separate from the 48-case confirmation
+and README charts.
 The earlier results are unchanged; these exposed inputs are not fresh held-out
 confirmation or independent reproduction.
 
@@ -261,8 +216,7 @@ an additional full-request benefit from lookup alone is not established.
 Three case means lose to the prior control: **code 03 by 0.6%, repetition 03
 by 11.8%, and structured 03 by 5.5%**. Against direct greedy, code 03,
 instruction 01 and repetition 01 lose by 0.2%, 6.4% and 0.5%. These case
-intervals cross parity. [Every timing and interval](../benchmarks/results/v0.3-efficiency/analysis.json)
-is retained, including lookup-only losses.
+intervals cross parity. The lookup-only losses are included in the means.
 
 All **912 complete outputs** match cached original-norm HF references, including
 IDs, lengths and EOS; one unique case reaches EOS. Cached references are accepted
@@ -281,16 +235,11 @@ attempt and setup, not GPU kernel time. No timed samples were discarded.
 The 16 partial-attempt matches are reported separately from the 912 completed-run
 matches. `development_passed` is true; `confirmation_passed` remains false.
 
-Reanalyze the archived records without a model or GPU:
+After generating validation records above, run a new comparison:
 
 ```sh
-python -m benchmarks.overhead_bench --out benchmarks/results/v0.3-efficiency --analyze
-```
-
-To freeze and run a new comparison using the published validation references:
-
-```sh
-python -m benchmarks.overhead_bench --model "MODEL_DIR" --reference-protocol benchmarks/results/v0.3-feedback/validation/protocol.json --reference-session benchmarks/results/v0.3-feedback/validation/session-0.json --out runs/overhead
+python -m benchmarks.overhead_bench --model "MODEL_DIR" --reference-protocol runs/feedback-validation/protocol.json --reference-session runs/feedback-validation/session-0.json --out runs/overhead
+python -m benchmarks.overhead_bench --out runs/overhead --analyze
 ```
 
 An explicit retry is available only when the first two processes completed and
@@ -301,54 +250,39 @@ once, for at most 60 seconds, retaining the original files:
 python -m benchmarks.overhead_bench --model "MODEL_DIR" --out runs/overhead --resume
 ```
 
-Measured code: `f7a32f74082e9d31b3bb1a42a8a1fda51543ef4e`.
-Archived analysis and public retry support: `58a9ef420f142982b6c2bf3b31423dd62989fd96`.
-Runtime code is unchanged between them. New runs fingerprint the current source;
-do not edit an archived protocol to bypass its source checks. Analysis accepts
-archived fingerprints. The package command was checked outside the checkout,
-without model inference or dependency downloads.
+New runs fingerprint the current source; do not edit an archived protocol
+to bypass source checks. Analysis accepts archived fingerprints.
 
 ## Later runtime changes
 
-The charts retain the measured revision linked in the README. The separate
+The charts retain the frozen study. The separate
 [overhead validation](#overhead-validation) measures the later 7.0% development
 improvement; it does not update or compound the 22.7% frozen-study result.
 
 Two subsequent changes improve the request path:
 
-- [Worker cleanup](https://github.com/tugrapaydiner/dart/commit/b7ab87a2bee52436d5abdb1bccc7e49d43fafef4)
-  closes and drains request workers on failure or interruption. Six regressions
-  reproduced the missing cleanup before the fix.
-- [Token validation](https://github.com/tugrapaydiner/dart/commit/ca1b597c6faf09af4907cb6a9e1d36417917d18d)
-  checks short Python integer blocks before allocation, avoiding tensor
-  reductions. Tensor inputs and longer prompts retain their existing path.
+- Worker cleanup closes and drains request workers on failure or interruption.
+  Six regressions reproduced the missing cleanup before the fix.
+- Token validation checks short Python integer blocks before allocation,
+  avoiding tensor reductions. Tensor inputs and longer prompts retain their path.
   All 170 replay, adapter and input checks passed, including CUDA execution.
 
 Neither change adds model parameters. These maintenance changes are not a new
-held-out latency study; use the recorded revision when reproducing each result.
+held-out latency study. A prefix-reuse pilot did not improve latency and was
+reverted.
 
-## Earlier execution study
+## Figure style
 
-New execution protocols use schema v2: the eager control and replay paths run
-from the same recorded source. They do not claim to execute historical commit
-`6341186`. Archived v1 analysis keeps its original provenance; rerunning that
-study requires its pinned source revision.
+Published figures use Matplotlib 3.11.1, fontTools 4.63.0 and
+[Inter](https://github.com/google/fonts/blob/main/ofl/inter/Inter%5Bopsz%2Cwght%5D.ttf)
+under the [SIL Open Font License](https://github.com/google/fonts/blob/main/ofl/inter/OFL.txt).
+Default typography is DejaVu Sans. Add `--font-file Inter-variable.ttf` for Inter;
+no font is downloaded by the command. Figure metadata is written beside your
+generated SVGs under `runs/`.
 
-[Raw execution records](../benchmarks/results/v0.3-execution) and the
-[original guide](https://github.com/tugrapaydiner/dart/blob/2c9a6a8ad32172b3d92a557af575c4c2a71cac79/docs/reproduce.md)
-preserve the separate static/replay ablation, architecture, development failures
-and fresh-dependency check. The earlier 12 timed cases showed 12.8% less latency
-than direct replay greedy, but structured requests lost 9.7%. An exploratory
-check assigned 89.7% of saved time to repetition; the other nine cases improved
-1.8%, with interval 1.018 [0.963, 1.077]. That motivated the fresh study.
-
-The earlier CUDA executor introduced fixed per-block buffers, request-owned KV
-snapshots, valid-prefix masking, rollback and retained graph inputs. Its
-static/replay ablation isolates execution replay. The new entropy ablation
-isolates only feedback removal. **Different corpora and sessions cannot establish
-a direct version-speed comparison.** The old result and thresholds are unchanged.
-
-The existing `benchmarks.execution_analysis` and `benchmarks.execution_figures`
-commands still inspect that archive. [v0.2](https://github.com/tugrapaydiner/dart/tree/v0.2)
-and the [normalization study](https://github.com/tugrapaydiner/dart/blob/63411869e4a8ed832c0cc4c1ecb560801625d84e/README.md)
-also remain separate experiments.
+Whiskers in the baseline chart span three process means. Workload pairs and
+entropy slopes show matched means; the latter share one vertical scale. Case
+dots show every mean reduction, including the two losses. Budget panels share
+a zero-based scale and contain different cases, so they do not represent a
+controlled output-length sweep. On a restricted host, set `MPLCONFIGDIR` to a
+writable scratch directory.

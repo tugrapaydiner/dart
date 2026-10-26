@@ -6,3 +6,5 @@ PyYAML==6.0.3
 safetensors==0.8.0
 pytest==9.1.1
 ruff==0.16.4
+matplotlib==3.11.1
+fonttools==4.63.0
