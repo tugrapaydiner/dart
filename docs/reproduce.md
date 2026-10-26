@@ -70,9 +70,11 @@ records, then reproduced byte for byte from the rebuilt wheel. No model run was
 repeated. The original four-chart installation record remains historical evidence;
 the new hashes are recorded under `presentation_revision` in
 [reproduction.json](../benchmarks/results/v0.3-feedback/reproduction.json).
-Bar whiskers show the range of three process means. The case matrix shows mean
-latency reductions; its 95% intervals remain in the raw analysis. Budget lines
-connect different cases at each budget, not a controlled output-length sweep.
+Whiskers in the baseline chart span three process means. Workload pairs and
+entropy slopes show matched means; the latter share one vertical scale. Case
+dots show every mean reduction, including the two losses; their 95% intervals
+remain in the raw analysis. Budget panels share a zero-based scale and contain
+different cases, so they do not represent a controlled output-length sweep.
 On a restricted host, set `MPLCONFIGDIR` to a writable scratch directory.
 
 ## Start with validation

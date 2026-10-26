@@ -33,10 +33,15 @@ def read_data(directory: Path) -> dict:
 
 def render(data: dict, directory: Path, *, font_file: Path | None = None,
            previews: Path | None = None) -> dict:
+    import math
+
     import matplotlib
 
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
+    from matplotlib.lines import Line2D
+    from matplotlib.patches import Patch
+    from matplotlib.ticker import MaxNLocator
 
     destinations = [directory / (name + ".svg") for name in NAMES]
     if previews is not None:
@@ -47,41 +52,33 @@ def render(data: dict, directory: Path, *, font_file: Path | None = None,
     if previews is not None:
         previews.mkdir(parents=True, exist_ok=True)
     hashes = {}
+    width = 982
+    colors = {"entropy_off4": SAGE, "replay_greedy": BLUE,
+              "replay_hf_greedy": LILAC, "replay_hf_lookup": PINK}
+    workloads = ("code", "instruction", "structured", "repetition")
 
-    def frame(title, subtitle, height, direction="Lower is better"):
-        fig = plt.figure(figsize=(9.82, height / 100), dpi=100, facecolor=BG)
-        fig.patch.set_edgecolor(INK)
-        fig.patch.set_linewidth(.7)
-        fig.text(25 / 982, 1 - 38 / height, title, fontsize=13, weight="semibold", va="center")
-        fig.text(25 / 982, 1 - 71 / height, subtitle, fontsize=10, color=MUTED, va="center")
-        fig.text(957 / 982, 1 - 38 / height, direction, fontsize=10, color=MUTED, ha="right", va="center")
+    def frame(title, height, context):
+        fig = plt.figure(figsize=(width / 100, height / 100), dpi=100, facecolor=BG)
+        fig.text(32 / width, 1 - 32 / height, title, fontsize=14, weight="semibold", va="top")
+        fig.text(950 / width, 1 - 35 / height, context, fontsize=10.5, color=MUTED, ha="right", va="top")
         return fig
 
-    def axes(fig, left=85, bottom=94, right=38, top=124, grid="y"):
-        from matplotlib.ticker import MaxNLocator
-
+    def label(fig, x, y, text, **kwargs):
         height = fig.get_figheight() * 100
-        ax = fig.add_axes([left / 982, bottom / height, (982 - left - right) / 982,
-                           (height - bottom - top) / height], facecolor=BG)
-        ax.spines[["top", "right"]].set_visible(False)
+        return fig.text(x / width, 1 - y / height, text, va="center", **kwargs)
+
+    def axes(fig, left, top, plot_width, plot_height, grid="x"):
+        height = fig.get_figheight() * 100
+        ax = fig.add_axes([left / width, 1 - (top + plot_height) / height,
+                           plot_width / width, plot_height / height], facecolor=BG)
+        ax.spines[["top", "right", "left"]].set_visible(False)
         ax.set_axisbelow(True)
         ax.grid(axis=grid, color=GRID, linewidth=.8)
-        ax.tick_params(length=0, pad=8)
-        ax.xaxis.set_major_locator(MaxNLocator(5, prune="upper"))
-        ax.yaxis.set_major_locator(MaxNLocator(5, prune="upper"))
+        ax.tick_params(length=0, pad=9)
         return ax
 
-    def legend(ax, labels, colors, *, columns=2):
-        from matplotlib.patches import Patch
-
-        handles = [Patch(facecolor=color, edgecolor=INK, linewidth=.6, label=label)
-                   for label, color in zip(labels, colors)]
-        ax.legend(handles=handles, loc="lower right", bbox_to_anchor=(1.02, 1.06), ncol=columns,
-                  frameon=False, fontsize=10, handlelength=1, handleheight=1, columnspacing=1.8)
-
-    def footer(fig, line):
-        height = fig.get_figheight() * 100
-        fig.text(25 / 982, 23 / height, line, fontsize=9, color=MUTED)
+    def footer(fig, text):
+        label(fig, 32, fig.get_figheight() * 100 - 28, text, fontsize=10, color=MUTED)
 
     def range_error(group, method):
         value = group["mean_latency_ms"][method]
@@ -112,107 +109,140 @@ def render(data: dict, directory: Path, *, font_file: Path | None = None,
 
     family = _font(font_file) if font_file else "DejaVu Sans"
     with plt.rc_context({
-        "font.family": family, "font.size": 10.5, "text.color": INK,
-        "axes.labelcolor": INK, "axes.edgecolor": "#7D7C77", "axes.linewidth": .75,
-        "xtick.color": MUTED, "ytick.color": MUTED, "xtick.labelsize": 10,
-        "svg.fonttype": "path", "svg.hashsalt": "dart-feedback-v2", "savefig.facecolor": BG,
+        "font.family": family, "font.size": 11, "text.color": INK,
+        "axes.labelcolor": INK, "axes.edgecolor": "#9A9991", "axes.linewidth": .7,
+        "xtick.color": MUTED, "ytick.color": INK, "xtick.labelsize": 10.5,
+        "svg.fonttype": "path", "svg.hashsalt": "dart-feedback-editorial-v3", "savefig.facecolor": BG,
     }):
         group = data["nonrepetitive"]
-        fig = frame("Latency against matched baselines", "36 code, instruction and structured cases · Synthetic repetition excluded", 520)
-        ax = axes(fig)
+        reduction = group["candidate_comparisons"]["replay_greedy"]["mean_latency_reduction"]
+        fig = frame("Latency against matched baselines", 530, "Supra-50M · FP32 · batch one")
+        label(fig, 32, 111, f"{abs(reduction) * 100:.1f}%", fontsize=36, weight="semibold")
+        label(fig, 245, 97, "less latency" if reduction >= 0 else "more latency", fontsize=17, weight="semibold")
+        label(fig, 245, 128, "than direct greedy · 36 cases excluding synthetic repetition", fontsize=11, color=MUTED)
+        label(fig, 32, 178, "METHOD", fontsize=9.5, color=MUTED)
+        label(fig, 950, 178, "MEAN REQUEST TIME", fontsize=9.5, color=MUTED, ha="right")
+        ax = axes(fig, 208, 202, 626, 232)
         order = sorted(LABELS, key=group["mean_latency_ms"].__getitem__)
         maximum = max(row[method] for row in group["session_mean_latency_ms"] for method in order)
-        colors = {"entropy_off4": SAGE, "replay_greedy": BLUE,
-                  "replay_hf_greedy": LILAC, "replay_hf_lookup": PINK}
         for index, method in enumerate(order):
-            value = group["mean_latency_ms"][method]
-            error = range_error(group, method)
-            ax.bar(index, value, width=.53, color=colors[method], edgecolor=INK, linewidth=.65)
-            ax.errorbar(index, value, yerr=error, fmt="none", ecolor=INK, elinewidth=.8, capsize=4)
-            ax.text(index, value + error[1][0] + maximum * .04, f"{value:.1f}", ha="center", fontsize=11)
-        ax.set(xlim=(-.65, 3.65), ylim=(0, maximum * 1.19), xticks=range(4),
-               xticklabels=[LABELS[name] for name in order], ylabel="Mean request latency (ms)")
-        ax.tick_params(axis="x", colors=INK)
-        for tick, method in zip(ax.get_xticklabels(), order):
+            y, value = 3 - index, group["mean_latency_ms"][method]
+            ax.barh(y, value, height=.47, color=colors[method], edgecolor=INK, linewidth=.6)
+            ax.errorbar(value, y, xerr=range_error(group, method), fmt="none", ecolor=INK, elinewidth=.8, capsize=4)
+            ax.text((950 - 208) / 626, y, f"{value:.1f} ms", transform=ax.get_yaxis_transform(),
+                    ha="right", va="center", fontsize=12, weight="semibold" if method == "entropy_off4" else "normal")
+        ax.set(xlim=(0, math.ceil(maximum * 1.02 / 25) * 25), ylim=(-.6, 3.6), yticks=[3, 2, 1, 0],
+               yticklabels=[LABELS[name] for name in order], xlabel="Latency (ms) →")
+        ax.xaxis.set_major_locator(MaxNLocator(5, steps=[1, 2, 2.5, 5, 10]))
+        ax.xaxis.label.set_size(10.5)
+        for tick, method in zip(ax.get_yticklabels(), order):
             tick.set_weight("semibold" if method == "entropy_off4" else "normal")
-        footer(fig, "Same replay executor · Three processes · Whiskers show the range of process means")
+        footer(fig, "Same weights and replay executor · Whiskers span three process means · Lower is better")
         save(fig, "methods")
 
-        fig = frame("The cost of unused entropy", "Same engine, draft policy and 48 inputs · Only unused feedback is toggled", 490)
-        ax = axes(fig, left=142, right=60, top=136, bottom=88, grid="x")
-        maximum = max(row[method] for row in data["aggregate"]["session_mean_latency_ms"]
-                      for method in ("entropy_on4", "entropy_off4"))
-        for index, row in enumerate(data["aggregate"]["session_mean_latency_ms"]):
-            y = 2 - index
-            for offset, method, color in ((.19, "entropy_on4", PINK), (-.19, "entropy_off4", LILAC)):
-                value = row[method]
-                ax.barh(y + offset, value, height=.30, color=color, edgecolor=INK, linewidth=.65)
-                ax.text(value + maximum * .013, y + offset, f"{value:.1f}", va="center", fontsize=10)
-        ax.set(xlim=(0, maximum * 1.10), ylim=(-.55, 2.55), yticks=[2, 1, 0],
-               yticklabels=["Process 1", "Process 2", "Process 3"], xlabel="Mean request latency (ms)")
-        ax.tick_params(axis="y", colors=INK)
-        legend(ax, ["Entropy on", "Entropy off"], [PINK, LILAC])
-        footer(fig, "Paired within each process · Absolute latency varies across processes")
-        save(fig, "feedback")
-
-        workloads = ("code", "instruction", "structured", "repetition")
-        fig = frame("Latency across workloads", "12 fresh cases per workload · Both methods use CUDA graph replay", 520)
-        ax = axes(fig, top=137)
-        maximum = max(row[method] for group in data["workloads"].values()
-                      for row in group["session_mean_latency_ms"] for method in ("entropy_off4", "replay_greedy"))
-        for index, workload in enumerate(workloads):
-            group = data["workloads"][workload]
-            for offset, method, color in ((-.18, "entropy_off4", SAGE), (.18, "replay_greedy", BLUE)):
-                value, error = group["mean_latency_ms"][method], range_error(group, method)
-                ax.bar(index + offset, value, width=.29, color=color, edgecolor=INK, linewidth=.65)
-                ax.errorbar(index + offset, value, yerr=error, fmt="none", ecolor=INK, elinewidth=.7, capsize=3)
-                ax.text(index + offset, value + error[1][0] + maximum * .035,
-                        f"{value:.1f}", ha="center", fontsize=9.5)
-        ax.set(xlim=(-.6, 3.6), ylim=(0, maximum * 1.17), xticks=range(4),
-               xticklabels=[name.title() for name in workloads], ylabel="Mean request latency (ms)")
-        ax.tick_params(axis="x", colors=INK)
-        legend(ax, ["DART", "Direct greedy"], [SAGE, BLUE])
-        footer(fig, "Three processes · Whiskers show the range of process means")
+        fig = frame("Latency by workload", 480, "12 cases per workload")
+        legend = [Line2D([], [], marker="o", linestyle="none", color=INK, markerfacecolor=colors[method],
+                         markeredgewidth=.7, markersize=8, label=LABELS[method])
+                  for method in ("entropy_off4", "replay_greedy")]
+        fig.legend(handles=legend, loc="upper left", bbox_to_anchor=(24 / width, 1 - 72 / 480),
+                   ncol=2, frameon=False, handletextpad=.3, columnspacing=1.6)
+        label(fig, 950, 97, "DART VS GREEDY", fontsize=9.5, color=MUTED, ha="right")
+        ax = axes(fig, 180, 138, 610, 240)
+        maximum = max(data["workloads"][name]["mean_latency_ms"][method]
+                      for name in workloads for method in ("entropy_off4", "replay_greedy"))
+        for index, name in enumerate(workloads):
+            group, y = data["workloads"][name], 3 - index
+            candidate, control = [group["mean_latency_ms"][method] for method in ("entropy_off4", "replay_greedy")]
+            ax.plot([candidate, control], [y, y], color="#B4B7AE", linewidth=2, zorder=2)
+            for value, color in ((candidate, SAGE), (control, BLUE)):
+                ax.scatter(value, y, s=100, facecolor=color, edgecolor=INK, linewidth=.65, zorder=3)
+                ax.annotate(f"{value:.1f}", (value, y), xytext=(0, 13), textcoords="offset points",
+                            ha="center", fontsize=10.5)
+            reduction = 1 - candidate / control
+            ax.text((950 - 180) / 610, y, f"{abs(reduction) * 100:.1f}% " + ("less" if reduction >= 0 else "more"),
+                    transform=ax.get_yaxis_transform(), ha="right", va="center", fontsize=14, weight="semibold")
+        ax.set(xlim=(0, maximum * 1.12), ylim=(-.65, 3.65), yticks=[3, 2, 1, 0],
+               yticklabels=[name.title() for name in workloads], xlabel="Mean request latency (ms) →")
+        ax.xaxis.set_major_locator(MaxNLocator(5))
+        footer(fig, "Means over three processes · Repetition is synthetic · Lower is better")
         save(fig, "workloads")
 
-        fig = frame("Latency by output budget", "All 48 cases, including repetition · 16 cases at each budget", 520)
-        ax = axes(fig, right=207, bottom=95)
-        budgets = sorted(map(int, data["budgets"]))
-        markers = {"entropy_off4": "o", "replay_greedy": "s", "replay_hf_greedy": "D", "replay_hf_lookup": "^"}
-        values = []
-        for method in LABELS:
-            means = [data["budgets"][str(budget)]["mean_latency_ms"][method] for budget in budgets]
-            values += means
-            ax.plot(budgets, means, color=colors[method], linewidth=2, marker=markers[method],
-                    markersize=8, markeredgecolor=INK, markeredgewidth=.6)
-            ax.annotate(LABELS[method], (budgets[-1], means[-1]), xytext=(15, 0), textcoords="offset points",
-                        va="center", fontsize=10, weight="semibold" if method == "entropy_off4" else "normal")
-        ax.set(xlim=(min(budgets) - 3, max(budgets) + 2), ylim=(0, max(values) * 1.12), xticks=budgets,
-               xlabel="Maximum new tokens", ylabel="Mean request latency (ms)")
-        footer(fig, "Budgets contain different cases · Lines connect observed means, not a controlled length sweep")
+        comparison = data["aggregate"]["candidate_comparisons"]["entropy_on4"]
+        improvement = comparison["mean_latency_reduction"] * 100
+        fig = frame("Remove unused feedback", 420, f"{abs(improvement):.1f}% " + ("less latency" if improvement >= 0 else "more latency"))
+        label(fig, 32, 83, "Same engine, fixed draft length and 48 inputs. Only entropy computation changes.", fontsize=11, color=MUTED)
+        rows = data["aggregate"]["session_mean_latency_ms"]
+        values = [row[method] for row in rows for method in ("entropy_on4", "entropy_off4")]
+        span = max(max(values) - min(values), 1)
+        low, high = max(0, min(values) - span * .3), max(values) + span * .3
+        for index, row in enumerate(rows):
+            ax = axes(fig, 78 + index * 303, 147, 220, 166, grid="y")
+            before, after = row["entropy_on4"], row["entropy_off4"]
+            ax.plot([0, 1], [before, after], color="#A7A8A2", linewidth=1.6)
+            for x, value, color in ((0, before, PINK), (1, after, LILAC)):
+                ax.scatter(x, value, s=110, facecolor=color, edgecolor=INK, linewidth=.7, zorder=3)
+                ax.annotate(f"{value:.1f}", (x, value), xytext=(0, 13), textcoords="offset points",
+                            ha="center", fontsize=11.5, weight="semibold")
+            ax.set(xlim=(-.23, 1.23), ylim=(low, high), xticks=[0, 1], xticklabels=["Entropy on", "Entropy off"])
+            ax.set_title(f"Process {index + 1}", fontsize=11.5, pad=18)
+            ax.yaxis.set_major_locator(MaxNLocator(4))
+            ax.tick_params(axis="x", colors=INK, labelsize=10.5)
+            if index == 0:
+                ax.set_ylabel("Latency (ms)", fontsize=10.5)
+            else:
+                ax.tick_params(axis="y", labelleft=False)
+        footer(fig, "Paired within each process · Shared vertical scale · Absolute latency varies between processes")
+        save(fig, "feedback")
+
+        fig = frame("Latency at each output budget", 470, "16 cases per budget")
+        handles = [Patch(facecolor=colors[method], edgecolor=INK, linewidth=.6, label=LABELS[method]) for method in LABELS]
+        fig.legend(handles=handles, loc="upper left", bbox_to_anchor=(22 / width, 1 - 72 / 470),
+                   ncol=4, frameon=False, handlelength=1, columnspacing=1.8)
+        maximum = max(group["mean_latency_ms"][method] for group in data["budgets"].values() for method in LABELS)
+        for index, budget in enumerate(sorted(data["budgets"], key=int)):
+            ax = axes(fig, 78 + index * 303, 160, 240, 215, grid="y")
+            group = data["budgets"][budget]
+            for position, method in enumerate(LABELS):
+                value = group["mean_latency_ms"][method]
+                ax.bar(position, value, width=.68, color=colors[method], edgecolor=INK, linewidth=.6)
+                ax.text(position, value + maximum * .035, f"{value:.0f}", ha="center", fontsize=10.5)
+            ax.set(xlim=(-.65, 3.65), ylim=(0, maximum * 1.17), xticks=[])
+            ax.set_title(f"{budget} tokens", fontsize=13, weight="semibold", pad=22)
+            ax.yaxis.set_major_locator(MaxNLocator(4))
+            if index == 0:
+                ax.set_ylabel("Mean latency (ms)", fontsize=10.5)
+            else:
+                ax.tick_params(axis="y", labelleft=False)
+        footer(fig, "Different cases at each budget · Shared scale · EOS may stop generation earlier")
         save(fig, "budgets")
 
-        from matplotlib.patches import Rectangle
-
-        fig = frame("Every case, including the losses", "Mean latency reduction vs direct greedy (%) · Negative values are slower", 630, "Higher is better")
-        ax = fig.add_axes([25 / 982, 77 / 630, 932 / 982, 432 / 630])
-        ax.set(xlim=(-.86, 4), ylim=(-.65, 12.4))
-        ax.axis("off")
-        ax.text(-.82, 12.05, "Case", fontsize=10, color=MUTED)
+        cases = data["cases"]
+        values = [row["candidate_comparisons"]["replay_greedy"]["mean_latency_reduction"] * 100 for row in cases.values()]
+        wins = sum(value > 0 for value in values)
+        fig = frame(f"{wins} of {len(cases)} case means are faster", 570, "DART vs direct greedy")
+        label(fig, 32, 82, "Latency reduction (%) · Left of zero is slower · Every case is shown", fontsize=11, color=MUTED)
+        low, high = min(-20, math.floor(min(values) / 20) * 20 - 5), max(75, math.ceil(max(values) / 20) * 20)
         for column, workload in enumerate(workloads):
-            ax.text(column + .47, 12.05, workload.title(), ha="center", fontsize=10.5, weight="semibold")
-            groups = sorted((name, group) for name, group in data["cases"].items() if group["workload"] == workload)
-            for index, (name, group) in enumerate(groups):
-                row = group["candidate_comparisons"]["replay_greedy"]
-                value, y = 100 * row["mean_latency_reduction"], 11 - index
-                color = SAGE if value >= 0 else PINK
-                ax.add_patch(Rectangle((column + .03, y - .39), .88, .78, facecolor=color,
-                                       edgecolor=GRID, linewidth=.5))
-                ax.text(column + .47, y, f"{value:+.1f}", ha="center", va="center", fontsize=11,
-                        weight="semibold" if value < 0 else "normal")
-                if column == 0:
-                    ax.text(-.82, y, name[-2:], va="center", fontsize=10, color=MUTED)
-        footer(fig, "Each cell is one case mean · All case intervals, token budgets and IDs remain in the raw analysis")
+            ax = axes(fig, 60 + column * 235, 159, 190, 310)
+            ax.set_title(workload.title(), fontsize=12, weight="semibold", pad=23)
+            ax.axvline(0, color="#7F8078", linewidth=.9)
+            groups = sorted((name, group) for name, group in cases.items() if group["workload"] == workload)
+            for index, (_name, group) in enumerate(groups):
+                value = group["candidate_comparisons"]["replay_greedy"]["mean_latency_reduction"] * 100
+                color, y = (SAGE if value >= 0 else PINK), 11 - index
+                ax.plot([0, value], [y, y], color=color, linewidth=3, solid_capstyle="round")
+                ax.scatter(value, y, s=38, facecolor=color, edgecolor=INK, linewidth=.5, zorder=3)
+                if value < 0:
+                    ax.annotate(f"{value:.1f}", (0, y), xytext=(8, 0), textcoords="offset points",
+                                ha="left", va="center", fontsize=10, weight="semibold")
+            ax.set(xlim=(low, high), ylim=(-.65, 11.65), yticks=list(reversed(range(12))),
+                   yticklabels=[name[-2:] for name, _ in groups])
+            ticks = MaxNLocator(4).tick_values(low, high)
+            ax.set_xticks([tick for tick in ticks if low <= tick <= high])
+            ax.tick_params(axis="y", colors=MUTED, labelsize=9.5, pad=6)
+            ax.tick_params(axis="x", labelsize=10)
+        label(fig, 491, 514, "← Slower      Mean latency reduction (%)      Faster →", ha="center", fontsize=10.5, color=MUTED)
+        footer(fig, "Case IDs within each workload · All intervals and token budgets are available in the raw records")
         save(fig, "cases")
     return hashes
 
@@ -234,9 +264,11 @@ def main(argv=None):
         parser.error(str(error))
     write_protocol(audit, {"data": data, "figures_sha256": hashes,
                            "font_sha256": file_hash(args.font_file) if args.font_file else None,
-                           "latency_whiskers": "Range of three process means, not a confidence interval.",
-                           "case_cells": "Percent mean latency reduction vs direct greedy; negative means slower.",
-                           "budget_lines": "Observed means across different cases, not a controlled length sweep.",
+                           "latency_whiskers": "Methods chart: range of three process means, not a confidence interval.",
+                           "workload_points": "Paired method means with arithmetic latency reduction; no interval is drawn.",
+                           "feedback_slopes": "Paired entropy on/off means within each process; shared vertical scale.",
+                           "case_points": "One mean reduction per case vs direct greedy; negative values are slower.",
+                           "budget_bars": "Different cases per budget; shared zero-based scale, not a controlled length sweep.",
                            "analysis_uncertainty": data["uncertainty"]})
     print(json.dumps({"figures": list(hashes), "protocol_hash": data["protocol_hash"]}))
 
