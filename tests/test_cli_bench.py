@@ -24,13 +24,14 @@ def test_benchmark_command_uses_validation_and_records_full_comparisons(local_mo
                                     "available_prompts": 4, "selected_prompts": 2}
     assert report["correctness"]["summary"]["exact_match_rate"] == 1
     assert [row["id"] for row in report["correctness"]["outputs"]] == ["a", "b"]
-    assert len(report["timing"]["samples"]) == 16 and len(report["profile"]["samples"]) == 16
+    assert len(report["timing"]["samples"]) == 20 and len(report["profile"]["samples"]) == 20
+    assert report["hf_prompt_lookup"] == {"prompt_lookup_num_tokens": 4, "max_matching_ngram_size": 4}
     assert report["timing"]["warmup"] == 1 and report["timing"]["repeats"] == 2
     assert report["preset"]["target"]["local_files_only"] is True and len(built) == 1
     assert report["environment"]["platform"]
     saved = json.loads(output.with_suffix(".timing.json").read_text())
     assert saved["status"] == "timing_complete" and "profile" not in saved
-    for key in ("correctness", "timing", "preset", "target", "corpus", "environment", "selection"):
+    for key in ("correctness", "timing", "preset", "target", "corpus", "environment", "selection", "hf_prompt_lookup"):
         assert saved[key] == report[key]
     console = capsys.readouterr().out
     assert "DART vs " in console and "draft acceptance" in console
@@ -72,7 +73,7 @@ def test_completed_timings_survive_interrupted_profiling(local_model, tmp_path, 
     def interrupt(*args, **kwargs):
         saved = json.loads(output.with_suffix(".timing.json").read_text())
         assert saved["status"] == "timing_complete" and "profile" not in saved
-        assert len(saved["timing"]["samples"]) == 16
+        assert len(saved["timing"]["samples"]) == 20
         assert saved["correctness"]["summary"]["exact_match_rate"] == 1
         for sample in saved["timing"]["samples"]:
             assert sample["output_hash"] == saved["correctness"]["outputs"][sample["prompt_index"]]["output_hash"]
@@ -94,3 +95,30 @@ def test_existing_timing_file_is_preserved_before_loading(local_model, tmp_path)
         cli.main(["bench", "--model", str(directory), "--out", str(output)])
     assert error.value.code == 2 and not built and not output.exists()
     assert saved.read_text() == "keep previous timings"
+
+
+def test_command_can_skip_profiles_without_skipping_timings(local_model, tmp_path, monkeypatch, capsys):
+    directory, _ = local_model
+    monkeypatch.setattr("dart.data.pilot.build_pilot", lambda seed: records())
+    monkeypatch.setattr("benchmarks.corpus_bench.profile_methods", lambda *a, **k: pytest.fail("unexpected profile"))
+    output = tmp_path / "timings.json"
+    assert cli.main(["bench", "--model", str(directory), "--warmup", "1", "--repeats", "2",
+                     "--skip-profile", "--out", str(output)]) == 0
+    report = json.loads(output.read_text())
+    assert report["profile"] is None and report["profiling_requested"] is False
+    assert len(report["timing"]["samples"]) == 20
+    assert "profiling was skipped" in capsys.readouterr().err
+
+
+def test_native_norm_benchmark_uses_the_same_target_for_every_method(local_model, tmp_path, monkeypatch):
+    directory, built = local_model
+    monkeypatch.setattr("dart.data.pilot.build_pilot", lambda seed: records())
+    output = tmp_path / "native.json"
+    assert cli.main(["bench", "--model", str(directory), "--native-rms-norm", "--skip-profile",
+                     "--warmup", "1", "--repeats", "2", "--out", str(output)]) == 0
+    report = json.loads(output.read_text())
+    assert report["target"]["native_rms_norms"] == 5 and len(built) == 1
+    assert {row["method"] for row in report["timing"]["samples"]} == {
+        "hf_greedy", "hf_prompt_lookup", "target_greedy", "target_only", "dart",
+    }
+    assert len(report["timing"]["samples"]) == 20 and report["correctness"]["summary"]["exact_match_rate"] == 1

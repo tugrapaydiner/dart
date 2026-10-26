@@ -13,8 +13,12 @@ from benchmarks.run_bench import (
 )
 from benchmarks.timing import measure_methods, summarize_samples
 from dart.data.corpus import Prompt, encode_prompt
+from dart.drafters.ngram import NGramDrafter
 from dart.runtime.engine import DartEngine
 from dart.runtime.types import DecodeConfig
+
+COMPARISON_BASELINES = (*BASELINES, "hf_prompt_lookup")
+NORM_CONTROL = "dart_model_norm"
 
 
 def select_records(records: list[Prompt], per_workload: int) -> list[Prompt]:
@@ -33,30 +37,60 @@ def select_records(records: list[Prompt], per_workload: int) -> list[Prompt]:
 
 def _summarize(samples: list[dict], seed: int) -> dict:
     timing = summarize_samples(samples, "hf_greedy", seed)
-    fastest = min(BASELINES, key=lambda name: timing[name]["mean_ms"])
+    baselines = [*COMPARISON_BASELINES, *([NORM_CONTROL] if NORM_CONTROL in timing else [])]
+    fastest = min(baselines, key=lambda name: timing[name]["mean_ms"])
     comparison = summarize_samples(samples, fastest, seed)
-    return {
+    result = {
         "timing": timing, "fastest_baseline": fastest,
         "vs_fastest": {name: {key: row[key] for key in ("speedup", "ci95_speedup")}
                        for name, row in comparison.items()},
     }
+    if NORM_CONTROL in timing:
+        ablation = summarize_samples(samples, NORM_CONTROL, seed)["dart"]
+        result["norm_ablation"] = {key: ablation[key] for key in ("speedup", "ci95_speedup")}
+    return result
 
 
 def benchmark_corpus(
     engine: DartEngine, records: list[Prompt], config: DecodeConfig | None = None, *,
     warmup: int = 2, repeats: int = 10, seed: int = 17, progress=None,
     on_timing: Callable[[dict], None] | None = None,
+    lookup_tokens: int | None = None, lookup_max_ngram: int = 4,
+    profile: bool = True,
+    norm_control: DartEngine | None = None,
 ) -> dict:
-    """Repeated comparisons with separate correctness and phase diagnostics."""
+    """Repeated comparisons with full output checks and optional phase diagnostics."""
     if type(warmup) is not int or type(repeats) is not int or warmup < 1 or repeats < 2:
         raise ValueError("use warmup >= 1 and repeats >= 2")
     if type(seed) is not int or seed < 0:
         raise ValueError("seed must be a nonnegative integer")
+    if type(profile) is not bool:
+        raise ValueError("profile must be a boolean")
     if engine.verifier_name != "block":
-        raise ValueError("benchmark phase profiling requires the block verifier")
+        raise ValueError("corpus benchmarking requires the block verifier")
     target = engine.target
     config = config or engine.default_decode_config or DecodeConfig()
-    checks = evaluate_corpus(engine, records, config)
+    config.validate()
+    if norm_control is not None:
+        if profile:
+            raise ValueError("norm controls require profile=False; capture separate decode traces")
+        if (
+            norm_control.verifier_name != "block" or engine.scheduler is not None or norm_control.scheduler is not None
+            or type(engine.drafter) is not NGramDrafter or type(norm_control.drafter) is not NGramDrafter
+            or vars(engine.drafter) != vars(norm_control.drafter)
+            or target.record_hidden != norm_control.target.record_hidden
+        ):
+            raise ValueError("norm controls require matching fixed ngram engines and hidden-state settings")
+    lookup_settings = {
+        "prompt_lookup_num_tokens": config.draft_len if lookup_tokens is None else lookup_tokens,
+        "max_matching_ngram_size": lookup_max_ngram,
+    }
+    lookup = {budget: build_hf_method(target, budget, record_hidden=False, **lookup_settings)
+              for budget in {row.max_new_tokens for row in records}}
+    if norm_control is not None:
+        checks = evaluate_corpus(engine, records, config, reference_target=norm_control.target)
+    else:
+        checks = evaluate_corpus(engine, records, config)
     if progress:
         progress("Correctness checks passed; starting warm-up and repeated timing")
     prompts = [encode_prompt(row, target.tokenizer, target.model.config.max_position_embeddings) for row in records]
@@ -68,13 +102,22 @@ def benchmark_corpus(
     with DartEngine(target) as baseline:
         methods = {
             "hf_greedy": lambda prompt: hf[tuple(prompt)](prompt),
+            "hf_prompt_lookup": lambda prompt: lookup[configs[tuple(prompt)].max_new_tokens](prompt),
             "target_greedy": lambda prompt: direct[tuple(prompt)](prompt),
             "target_only": lambda prompt: baseline.generate(prompt, configs[tuple(prompt)]),
             "dart": lambda prompt: engine.generate(prompt, configs[tuple(prompt)]),
         }
-        methods = {name: with_hidden_recording(target, target.record_hidden if name == "dart" else False, method)
-                   for name, method in methods.items()}
-        timing = measure_methods(methods, prompts, target.device, warmup=warmup, repeats=repeats, seed=seed)
+        if norm_control is not None:
+            methods[NORM_CONTROL] = lambda prompt: norm_control.generate(prompt, configs[tuple(prompt)])
+        hidden_settings = {name: target.record_hidden if name in ("dart", NORM_CONTROL) else False for name in methods}
+        methods = {
+            name: with_hidden_recording(
+                norm_control.target if name == NORM_CONTROL else target, hidden_settings[name], method,
+            ) for name, method in methods.items()
+        }
+        timing = measure_methods(
+            methods, prompts, target.device, warmup=warmup, repeats=repeats, seed=seed, progress=progress,
+        )
         for sample in timing["samples"]:
             if sample["output_hash"] != checks["outputs"][sample["prompt_index"]]["output_hash"]:
                 raise ValueError("reference output changed between correctness and timing")
@@ -83,23 +126,35 @@ def benchmark_corpus(
                 "schema": "dart-corpus-timing-v1", "status": "timing_complete",
                 "split": checks["split"], "selected_corpus_hash": checks["selected_corpus_hash"],
                 "seed": seed, "correctness": checks, "timing": timing,
-                "record_hidden_by_method": {name: target.record_hidden if name == "dart" else False for name in methods},
+                "hf_prompt_lookup": lookup_settings,
+                "profiling_requested": profile,
+                "record_hidden_by_method": hidden_settings,
+                "normalization_control": NORM_CONTROL if norm_control is not None else None,
             })
-        if progress:
-            progress("Repeated timing passed; starting separate phase profiling")
-        profile = profile_methods(methods, prompts, target, {"target_only": baseline, "dart": engine})
-    for sample in [*timing["samples"], *profile["samples"]]:
+        profile_report = None
+        if profile:
+            if progress:
+                progress("Repeated timing passed; starting separate phase profiling")
+            profile_report = profile_methods(methods, prompts, target, {"target_only": baseline, "dart": engine})
+    profile_samples = profile_report["samples"] if profile_report is not None else []
+    for sample in [*timing["samples"], *profile_samples]:
         if sample["output_hash"] != checks["outputs"][sample["prompt_index"]]["output_hash"]:
             raise ValueError("reference output changed between correctness, timing and profiling")
     return {
         "schema": "dart-corpus-benchmark-v1", "split": checks["split"],
         "selected_corpus_hash": checks["selected_corpus_hash"], "seed": seed,
-        "correctness": checks, "timing": timing, "profile": profile,
+        "correctness": checks, "timing": timing, "profile": profile_report,
+        "profiling_requested": profile,
+        "hf_prompt_lookup": lookup_settings,
+        "baseline_methods": [*COMPARISON_BASELINES, *([NORM_CONTROL] if norm_control is not None else [])],
+        "normalization_control": NORM_CONTROL if norm_control is not None else None,
+        "lookup_scope": "native HF lookup; prompt must not end in EOS; reserve draft length minus one extra context positions",
         "timing_scope": "token ids through generation and output decoding; loading, tokenization, correctness and warm-up excluded",
         "acceptance_scope": "one separate full-output correctness pass",
-        "memory_scope": "allocator peak with one shared target and both engine instances resident",
+        "memory_scope": ("allocator peak with two target models resident for the normalization comparison" if norm_control is not None
+                         else "allocator peak with one shared target and both engine instances resident"),
         "interval_scope": "paired repeat intervals for fixed prompts; each comparison uses its observed fastest baseline",
-        "record_hidden_by_method": {name: target.record_hidden if name == "dart" else False for name in methods},
+        "record_hidden_by_method": hidden_settings,
         "summary": _summarize(timing["samples"], seed),
         "by_workload": {
             workload: _summarize([sample for sample in timing["samples"]

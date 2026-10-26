@@ -23,7 +23,9 @@ from __future__ import annotations
 
 import time
 import uuid
+from contextlib import closing
 from functools import partial
+from inspect import unwrap
 from typing import Callable, Optional
 
 import torch
@@ -202,6 +204,10 @@ class DartEngine:
             prompt_ids = self.target.tokenizer.encode(prompt_ids)
         config = config or self.default_decode_config or DecodeConfig()
         config.validate()
+        if getattr(self.target, "uses_replay_cache", False) and (
+            config.mode != "exact" or self.verifier_name != "block" or config.full_kv_residency != "gpu"
+        ):
+            raise ValueError("CUDA replay requires exact mode, block verification and resident GPU KV")
         timed_scheduler = getattr(self.scheduler, "requires_round_timing", False)
         if timed_scheduler and (config.mode != "exact" or config.full_kv_residency != "gpu"):
             raise ValueError("time scheduling requires exact mode and resident target KV")
@@ -211,6 +217,9 @@ class DartEngine:
                 "use verifier='block' for sampling/approx"
             )
         sampling = config.mode == "exact_sampling"
+        needs_entropy = (self.scheduler is not None and getattr(self.scheduler, "requires_entropy", True)) or any(
+            getattr(drafter, "requires_entropy", True) for drafter in self._all_drafters()
+        )
         generator = None
         if sampling:
             generator = torch.Generator(device=self.target.device)
@@ -222,6 +231,8 @@ class DartEngine:
             )
         else:
             verify_fn = self.verify
+            if not needs_entropy and unwrap(verify_fn) is verify_block_greedy:
+                verify_fn = partial(verify_fn, compute_entropy=False)
 
         run_id = uuid.uuid4().hex[:12]
         metrics = DecodeMetrics(
@@ -264,153 +275,150 @@ class DartEngine:
         park_kv = config.full_kv_residency == "cpu_pinned"
         # ThreadPrefetcher overlaps the host-offload with the next round's
         # drafting; SyncPrefetcher is the no-overlap reference.
-        prefetcher = ThreadPrefetcher() if park_kv else SyncPrefetcher()
-        res_stats = ResidencyStats()
-        pending_park = None  # in-flight offload of the verifier KV to host
-        # Running predictive-entropy EWMA from verify rounds; gates draft
-        # length in the scheduler (docs/design.md §10).  Seeded
-        # from the prompt's last-token distribution.
-        ent_ewma = 0.0
-        if sampling:
+        with closing(ThreadPrefetcher() if park_kv else SyncPrefetcher()) as prefetcher:
+            res_stats = ResidencyStats()
+            pending_park = None  # in-flight offload of the verifier KV to host
+            # Running predictive-entropy EWMA from verify rounds; gates draft
+            # length in the scheduler (docs/design.md §10).  Seeded
+            # from the prompt's last-token distribution.
             ent_ewma = 0.0
-        else:
-            d0 = torch.softmax(logits.float(), dim=-1)
-            ent_ewma = float(-(d0 * d0.clamp_min(1e-12).log()).sum())
+            if needs_entropy and not sampling:
+                d0 = torch.softmax(logits.float(), dim=-1)
+                ent_ewma = float(-(d0 * d0.clamp_min(1e-12).log()).sum())
 
-        if timed_scheduler:
-            self._synchronize_round()
-        while not finished and len(generated) < config.max_new_tokens:
-            round_start = time.perf_counter() if timed_scheduler else 0.0
-            committed_seq = prompt + generated
-            drafter, draft_len = self._pick_lane(
-                config, len(prompt), len(generated), entropy_ewma=ent_ewma
-            )
+            if timed_scheduler:
+                self._synchronize_round()
+            while not finished and len(generated) < config.max_new_tokens:
+                round_start = time.perf_counter() if timed_scheduler else 0.0
+                committed_seq = prompt + generated
+                drafter, draft_len = self._pick_lane(
+                    config, len(prompt), len(generated), entropy_ewma=ent_ewma
+                )
 
-            t0 = time.perf_counter()
-            budget = config.max_new_tokens - len(generated)
-            per_round = min(draft_len, budget - 1)  # Leave room for the verifier's token.
-            if self.verifier_name == "tree":
-                # Tree-capable drafters propose several candidate branches;
-                # plain drafters degrade to a chain, for which tree and
-                # block verification coincide decision-for-decision.
-                if per_round <= 0:
-                    drafts = DraftTree.chain([])
-                elif hasattr(drafter, "propose_tree"):
-                    drafts = drafter.propose_tree(committed_seq, per_round)
+                t0 = time.perf_counter()
+                budget = config.max_new_tokens - len(generated)
+                per_round = min(draft_len, budget - 1)  # Leave room for the verifier's token.
+                if self.verifier_name == "tree":
+                    # Tree-capable drafters propose several candidate branches;
+                    # plain drafters degrade to a chain, for which tree and
+                    # block verification coincide decision-for-decision.
+                    if per_round <= 0:
+                        drafts = DraftTree.chain([])
+                    elif hasattr(drafter, "propose_tree"):
+                        drafts = drafter.propose_tree(committed_seq, per_round)
+                    else:
+                        linear = list(drafter.propose(committed_seq, per_round))
+                        drafts = DraftTree.chain(linear[:per_round])
+                    if not isinstance(drafts, DraftTree):
+                        drafts = DraftTree.chain(list(drafts))
+                    drafts = drafts.truncate(per_round)
+                    draft_probs = None
                 else:
-                    linear = list(drafter.propose(committed_seq, per_round))
-                    drafts = DraftTree.chain(linear[:per_round])
-                if not isinstance(drafts, DraftTree):
-                    drafts = DraftTree.chain(list(drafts))
-                drafts = drafts.truncate(per_round)
-                draft_probs = None
-            else:
-                drafts, draft_probs = self._propose(
-                    drafter, committed_seq, per_round, sampling
-                )
-                # Clamp to the round budget even if a drafter over-returns:
-                # tokens past the budget would be verified (wasted target
-                # compute) only to be truncated at the end.
-                drafts = drafts[:per_round] if per_round > 0 else []
-            t1 = time.perf_counter()
+                    drafts, draft_probs = self._propose(
+                        drafter, committed_seq, per_round, sampling
+                    )
+                    # Clamp to the round budget even if a drafter over-returns:
+                    # tokens past the budget would be verified (wasted target
+                    # compute) only to be truncated at the end.
+                    drafts = drafts[:per_round] if per_round > 0 else []
+                t1 = time.perf_counter()
 
-            skip_verify = (
-                config.mode == "approx"
-                and config.verify_every > 1
-                and (round_idx % config.verify_every) != 0
-                and len(drafts) > 0
-            )
-
-            if skip_verify:
-                # Commit drafts WITHOUT any target forward.  They join the
-                # pending block and get audited at the next verify round.
-                kept: list[int] = []
-                for tok in drafts:
-                    kept.append(int(tok))
-                    if tok in self.target.eos_token_ids:
-                        finished = True
-                        break
-                generated.extend(kept)
-                pending_block.extend(kept)
-                unverified_tokens += len(kept)
-                rec = RoundRecord(
-                    round_idx=round_idx, lane=drafter.name,
-                    n_draft_proposed=0, n_draft_accepted=0,
-                    n_committed=len(kept),
-                    draft_ms=(t1 - t0) * 1000.0, verify_ms=0.0,
+                skip_verify = (
+                    config.mode == "approx"
+                    and config.verify_every > 1
+                    and (round_idx % config.verify_every) != 0
+                    and len(drafts) > 0
                 )
-            else:
-                if park_kv:
-                    # Wait for the previous round's offload (overlapped with
-                    # this round's drafting), then stage the KV back on-device.
-                    if pending_park is not None:
-                        parked = pending_park.wait()
-                        res_stats.moved_tensors += parked.moved_tensors
-                        res_stats.moved_bytes += parked.moved_bytes
-                        pending_park = None
-                    staged = move_cache(state.cache, self.target.device)
-                    res_stats.moved_tensors += staged.moved_tensors
-                    res_stats.moved_bytes += staged.moved_bytes
-                if sampling:
-                    result = verify_fn(
-                        self.target, state, pending_block, drafts,
-                        draft_probs=draft_probs,
+
+                if skip_verify:
+                    # Commit drafts WITHOUT any target forward.  They join the
+                    # pending block and get audited at the next verify round.
+                    kept: list[int] = []
+                    for tok in drafts:
+                        kept.append(int(tok))
+                        if tok in self.target.eos_token_ids:
+                            finished = True
+                            break
+                    generated.extend(kept)
+                    pending_block.extend(kept)
+                    unverified_tokens += len(kept)
+                    rec = RoundRecord(
+                        round_idx=round_idx, lane=drafter.name,
+                        n_draft_proposed=0, n_draft_accepted=0,
+                        n_committed=len(kept),
+                        draft_ms=(t1 - t0) * 1000.0, verify_ms=0.0,
                     )
                 else:
-                    result = verify_fn(self.target, state, pending_block, drafts)
-                t2 = time.perf_counter()
+                    if park_kv:
+                        # Wait for the previous round's offload (overlapped with
+                        # this round's drafting), then stage the KV back on-device.
+                        if pending_park is not None:
+                            parked = pending_park.wait()
+                            res_stats.moved_tensors += parked.moved_tensors
+                            res_stats.moved_bytes += parked.moved_bytes
+                            pending_park = None
+                        staged = move_cache(state.cache, self.target.device)
+                        res_stats.moved_tensors += staged.moved_tensors
+                        res_stats.moved_bytes += staged.moved_bytes
+                    if sampling:
+                        result = verify_fn(
+                            self.target, state, pending_block, drafts,
+                            draft_probs=draft_probs,
+                        )
+                    else:
+                        result = verify_fn(self.target, state, pending_block, drafts)
+                    t2 = time.perf_counter()
 
-                drafter.observe(result)
-                for other in self._all_drafters():
-                    if other is not drafter and hasattr(other, "after_verify"):
-                        other.after_verify(result)
-                if self.scheduler is not None and not timed_scheduler:
-                    self.scheduler.observe(
-                        drafter.name, result,
+                    drafter.observe(result)
+                    for other in self._all_drafters():
+                        if other is not drafter and hasattr(other, "after_verify"):
+                            other.after_verify(result)
+                    if self.scheduler is not None and not timed_scheduler:
+                        self.scheduler.observe(
+                            drafter.name, result,
+                            draft_ms=(t1 - t0) * 1000.0,
+                            verify_ms=(t2 - t1) * 1000.0,
+                            kv_gb=self._drafter_kv_gb(drafter),
+                        )
+                    generated.extend(result.committed)
+                    pending_block = [result.committed[-1]]
+                    divergence_total += result.pending_divergence
+                    ent_ewma = 0.7 * ent_ewma + 0.3 * result.entropy
+                    finished = result.finished
+                    rec = RoundRecord(
+                        round_idx=round_idx, lane=drafter.name,
+                        n_draft_proposed=result.n_draft_proposed,
+                        n_draft_accepted=result.n_draft_accepted,
+                        n_committed=len(result.committed),
                         draft_ms=(t1 - t0) * 1000.0,
                         verify_ms=(t2 - t1) * 1000.0,
-                        kv_gb=self._drafter_kv_gb(drafter),
                     )
-                generated.extend(result.committed)
-                pending_block = [result.committed[-1]]
-                divergence_total += result.pending_divergence
-                ent_ewma = 0.7 * ent_ewma + 0.3 * result.entropy
-                finished = result.finished
-                rec = RoundRecord(
-                    round_idx=round_idx, lane=drafter.name,
-                    n_draft_proposed=result.n_draft_proposed,
-                    n_draft_accepted=result.n_draft_accepted,
-                    n_committed=len(result.committed),
-                    draft_ms=(t1 - t0) * 1000.0,
-                    verify_ms=(t2 - t1) * 1000.0,
-                )
-                self.trace.log_round(run_id, rec, result.committed)
-                if park_kv:
-                    # Offload the verifier KV to host, overlapped with the next
-                    # round's drafting.  Capture the cache object now so a later
-                    # forward rebinding state.cache can't race the worker.
-                    cache_ref = state.cache
-                    pending_park = prefetcher.prefetch(
-                        lambda c=cache_ref: move_cache(c, "cpu", pin=True)
-                    )
+                    self.trace.log_round(run_id, rec, result.committed)
+                    if park_kv:
+                        # Offload the verifier KV to host, overlapped with the next
+                        # round's drafting.  Capture the cache object now so a later
+                        # forward rebinding state.cache can't race the worker.
+                        cache_ref = state.cache
+                        pending_park = prefetcher.prefetch(
+                            lambda c=cache_ref: move_cache(c, "cpu", pin=True)
+                        )
 
-            rounds.append(rec)
-            metrics.record_round(rec)
-            round_idx += 1
-            if timed_scheduler:
-                kv_gb = self._drafter_kv_gb(drafter)
-                self._synchronize_round()
-                self.scheduler.observe(
-                    drafter.name, result,
-                    draft_ms=rec.draft_ms, verify_ms=rec.verify_ms, kv_gb=kv_gb,
-                    round_ms=(time.perf_counter() - round_start) * 1000.0,
-                )  # Includes loop work; the feedback update itself is outside the timer.
+                rounds.append(rec)
+                metrics.record_round(rec)
+                round_idx += 1
+                if timed_scheduler:
+                    kv_gb = self._drafter_kv_gb(drafter)
+                    self._synchronize_round()
+                    self.scheduler.observe(
+                        drafter.name, result,
+                        draft_ms=rec.draft_ms, verify_ms=rec.verify_ms, kv_gb=kv_gb,
+                        round_ms=(time.perf_counter() - round_start) * 1000.0,
+                    )  # Includes loop work; the feedback update itself is outside the timer.
 
-        if pending_park is not None:  # drain the final in-flight offload
-            parked = pending_park.wait()
-            res_stats.moved_tensors += parked.moved_tensors
-            res_stats.moved_bytes += parked.moved_bytes
-        prefetcher.close()
+            if pending_park is not None:  # drain the final in-flight offload
+                parked = pending_park.wait()
+                res_stats.moved_tensors += parked.moved_tensors
+                res_stats.moved_bytes += parked.moved_bytes
 
         generated = generated[: config.max_new_tokens]
 

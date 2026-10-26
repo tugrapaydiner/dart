@@ -40,6 +40,19 @@ from dart.runtime.time_scheduler import TimeScheduler
 
 
 def build_target(spec: dict) -> TargetModel:
+    execution = spec.get("execution", "eager")
+    if execution not in ("eager", "static", "cuda_graph"):
+        raise ValueError("target execution must be eager, static or cuda_graph")
+    target = _build_target(spec)
+    if execution == "eager":
+        return target
+    from dart.models.replay import CudaGraphTarget
+
+    return CudaGraphTarget(target, max_block_tokens=spec.get("max_block_tokens", 5),
+                           capacity=spec.get("cache_capacity"), replay=execution == "cuda_graph")
+
+
+def _build_target(spec: dict) -> TargetModel:
     name = spec["model"]
     device = spec.get("device", "cpu")
     if name.startswith("tiny:"):
@@ -57,6 +70,7 @@ def build_target(spec: dict) -> TargetModel:
         record_hidden=bool(spec.get("record_hidden", False)),
         attn_implementation=spec.get("attn_implementation", "eager"),
         local_files_only=bool(spec.get("local_files_only", False)),
+        native_rms_norm=spec.get("native_rms_norm", False),
     )
 
 
@@ -87,6 +101,7 @@ def build_tiny_target(seed: int, spec: Optional[dict] = None) -> TargetModel:
             spec.get("precision", "fp32"), torch.float32
         ),
         record_hidden=bool(spec.get("record_hidden", False)),
+        native_rms_norm=spec.get("native_rms_norm", False),
     )
 
 

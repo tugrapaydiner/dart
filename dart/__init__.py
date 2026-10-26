@@ -8,7 +8,7 @@ equivalence for the chosen device, precision and attention backend.
 
 from dart.runtime.types import DecodeConfig, GenerationOutput, VerifyResult
 
-__version__ = "0.2.0"
+__version__ = "0.3.0"
 
 __all__ = [
     "DecodeConfig",

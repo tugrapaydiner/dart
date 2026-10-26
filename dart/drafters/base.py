@@ -30,7 +30,11 @@ class Drafter(Protocol):
         ...
 
     def observe(self, result: VerifyResult) -> None:
-        """Feedback hook called after each verify round (optional)."""
+        """Feedback hook called after each verify round (optional).
+
+        Set requires_entropy=False only when feedback does not use entropy.
+        Drafters without this flag keep receiving the signal.
+        """
         ...
 
 
@@ -38,6 +42,7 @@ class NullDrafter:
     """Proposes nothing: engine degenerates to plain incremental greedy."""
 
     name = "target_only"
+    requires_entropy = False
 
     def propose(self, committed: list[int], max_tokens: int) -> list[int]:
         return []

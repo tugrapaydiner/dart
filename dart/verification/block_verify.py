@@ -31,7 +31,10 @@ def verify_block_greedy(
     state: TargetState,
     pending: int | list[int],
     draft_tokens: list[int],
+    *,
+    compute_entropy: bool = True,
 ) -> VerifyResult:
+    """Set compute_entropy=False when no consumer needs the entropy signal."""
     pending_block = [pending] if isinstance(pending, int) else list(pending)
     if not pending_block:
         raise ValueError("pending block must contain at least one token")
@@ -69,7 +72,7 @@ def verify_block_greedy(
     # Predictive entropy at the decided (on-trajectory) position - drives the
     # scheduler's entropy gate.  Row off+m produced the correction/bonus token;
     # rows after it are off-trajectory (conditioned on a rejected draft).
-    if accepted_eos:
+    if accepted_eos or not compute_entropy:
         entropy = 0.0
     else:
         dist = torch.softmax(logits[off + m].float(), dim=-1)

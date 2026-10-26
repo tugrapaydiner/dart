@@ -53,6 +53,30 @@ def test_gpu_timing_waits_for_pending_work(monkeypatch):
     assert report["summary"]["hf_greedy"]["peak_gpu_bytes"] == 123
 
 
+def test_progress_overhead_is_excluded_from_timing(monkeypatch):
+    clock, messages, calls = [0.0], [], []
+    monkeypatch.setattr(timing.time, "perf_counter", lambda: clock[0])
+
+    def run(prompt):
+        calls.append(tuple(prompt))
+        clock[0] += 0.01
+        return [7, 8]
+
+    def progress(message):
+        messages.append(message)
+        clock[0] += 5.0
+
+    report = timing.measure_methods(
+        {"hf_greedy": run, "dart": run}, [[1], [2]], "cpu", warmup=1, repeats=2, progress=progress,
+    )
+    assert len(calls) == 18
+    assert messages[:2] == ["Reference outputs: 1/2 prompts", "Reference outputs: 2/2 prompts"]
+    assert messages[3] == "Preflight checks: 2/2 prompts"
+    assert messages[5] == "Warm-up 1/1: 2/2 prompts"
+    assert messages[-1] == "Timed 8/8 samples"
+    assert all(sample["latency_ms"] == pytest.approx(10) for sample in report["samples"])
+
+
 @pytest.mark.parametrize("wrong", [[7], [7, 9]])
 def test_mismatched_outputs_fail_before_timing(wrong):
     with pytest.raises(ValueError, match="complete token mismatch"):

@@ -58,6 +58,15 @@ def test_preset_calls_do_not_share_mutable_configuration(tmp_path):
     assert second["lanes"]["ngram"]["max_ngram"] == 4
 
 
+def test_native_norm_is_explicit_and_does_not_change_the_default(tmp_path):
+    (tmp_path / "config.json").write_text("{}", encoding="utf-8")
+    selected = supra_config(tmp_path, native_rms_norm=True)
+    assert selected["target"]["native_rms_norm"] is True
+    assert "native_rms_norm" not in supra_config(tmp_path)["target"]
+    with pytest.raises(ValueError, match="boolean"):
+        supra_config(tmp_path, native_rms_norm="true")
+
+
 @pytest.mark.parametrize("kind", ["missing", "file", "no_config"])
 def test_presets_reject_missing_local_models(tmp_path, kind):
     path = tmp_path / "checkpoint"

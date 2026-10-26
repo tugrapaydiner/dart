@@ -6,6 +6,9 @@ from statistics import mean
 
 from benchmarks.run_bench import build_hf_method
 from dart.data.corpus import Prompt, corpus_hash, encode_prompt, validate_records
+from dart.data.storage import tokenizer_hash
+from dart.data.teacher import target_fingerprint
+from dart.models.target import TargetModel
 from dart.runtime.engine import DartEngine
 from dart.runtime.metrics import output_hash
 from dart.runtime.types import DecodeConfig
@@ -42,7 +45,7 @@ def _summarize(rows: list[dict]) -> dict:
 
 def evaluate_corpus(
     engine: DartEngine, records: list[Prompt], config: DecodeConfig | None = None,
-    progress=None,
+    progress=None, *, reference_target: TargetModel | None = None,
 ) -> dict:
     """Full-output correctness and acceptance checks, with no latency claims."""
     validate_records(records)
@@ -53,10 +56,23 @@ def evaluate_corpus(
     target = engine.target
     if target.tokenizer is None:
         raise ValueError("corpus evaluation requires a tokenizer")
+    reference_info = None
+    if reference_target is not None:
+        if not target.native_rms_norm_count or reference_target.native_rms_norm_count:
+            raise ValueError("norm comparison requires a native target and an original-norm reference")
+        selected_info = target_fingerprint(target)
+        selected_info.pop("native_rms_norms")
+        reference_info = target_fingerprint(reference_target)
+        if selected_info != reference_info:
+            raise ValueError("reference weights and decode settings must match except for normalization")
+        if (target.tokenizer is not reference_target.tokenizer
+                and tokenizer_hash(target.tokenizer) != tokenizer_hash(reference_target.tokenizer)):
+            raise ValueError("reference tokenizers must match")
     prompts = [encode_prompt(row, target.tokenizer, target.model.config.max_position_embeddings) for row in records]
     if len({tuple(ids) for ids in prompts}) != len(prompts):
         raise ValueError("corpus contains duplicate tokenized prompts")
-    references = {budget: build_hf_method(target, budget) for budget in {row.max_new_tokens for row in records}}
+    references = {budget: build_hf_method(reference_target or target, budget)
+                  for budget in {row.max_new_tokens for row in records}}
     results = []
     for index, (record, prompt) in enumerate(zip(records, prompts)):
         expected = references[record.max_new_tokens](prompt)
@@ -77,7 +93,9 @@ def evaluate_corpus(
             progress(index + 1, len(records))
     return {
         "split": records[0].split, "selected_corpus_hash": corpus_hash(records),
-        "reference": "plain HF greedy", "decode_config": asdict(config),
+        "reference": "plain HF greedy (original RMSNorm)" if reference_target is not None else "plain HF greedy",
+        "decode_config": asdict(config),
+        **({"reference_target": reference_info} if reference_info is not None else {}),
         "budget_scope": "each prompt's max_new_tokens overrides the decode default",
         "prompt_kind_scope": "code and structured workloads map to code/json; instruction and repetition map to chat",
         "repetition_scope": "fraction of repeated overlapping four-token windows in generated output",

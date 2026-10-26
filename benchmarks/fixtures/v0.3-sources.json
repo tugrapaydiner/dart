@@ -1,0 +1,53 @@
+{
+  "version": "dart-workloads-v0.3",
+  "selection_seed": 303,
+  "corpus_hash": "0d91404ef9cd6b0f4565689ef28ce2b4f2a3f77aa2d8e18f44cb0e3c0960697e",
+  "tokenizer_hash": "05f724bd53dff6b881473d597441548e92fc71d833f410e9e2f1aed2e9063952",
+  "model": "SupraLabs/Supra-50M-Instruct",
+  "sources": {
+    "mbpp": {
+      "title": "Mostly Basic Python Problems, hand-verified subset",
+      "authors": "Jacob Austin and colleagues, Google Research (2021)",
+      "url": "https://github.com/google-research/google-research/blob/f82046ba5aabbbb427dbfd38a254d26bff08b533/mbpp/sanitized-mbpp.json",
+      "license": "CC-BY-4.0",
+      "license_url": "https://creativecommons.org/licenses/by/4.0/",
+      "license_source": "https://huggingface.co/datasets/google-research-datasets/mbpp",
+      "normalized_sha256": "ca95deaa9a01ef0a6f439f88bcf0dd3db3563d22f22aad6cae04ebb9a8d8c8e9",
+      "source_id": "mbpp:<original task_id>",
+      "changes": "Prompt and test examples inserted into the Supra instruction format; solutions are not used. Original MBPP split ranges are retained."
+    },
+    "dolly": {
+      "title": "databricks-dolly-15k, pinned April 2023 snapshot",
+      "authors": "Databricks and its employee contributors (2023)",
+      "url": "https://github.com/databrickslabs/dolly/blob/2305eb7f2f4b3beb2379f34c6addf335b46c4b43/data/databricks-dolly-15k.jsonl",
+      "license": "CC-BY-SA-3.0",
+      "license_url": "https://creativecommons.org/licenses/by-sa/3.0/",
+      "license_source": "https://huggingface.co/datasets/databricks/databricks-dolly-15k",
+      "normalized_sha256": "e442d96b320010510c67a6cc0a86ea988a2a6f71c7570d1afbdf4fa631896e58",
+      "source_id": "dolly:<zero-based line in the pinned snapshot>",
+      "changes": "Instruction and context inserted into the Supra instruction format; responses are not used. Selected Dolly prompt adaptations remain under CC-BY-SA-3.0."
+    },
+    "generated": {
+      "title": "DART procedural workload generator",
+      "module": "dart.data.pilot",
+      "seed": 303,
+      "license": "Apache-2.0",
+      "changes": "Selected existing split-separated template families; output budgets set to 16, 32, or 64."
+    }
+  },
+  "protocol": {
+    "splits": {
+      "train": 8,
+      "validation": 24,
+      "test": 24
+    },
+    "train_purpose": "Small timing and profiling pilot only; no model training.",
+    "composition": "Each validation/test split has 4 MBPP, 8 Dolly, and 12 procedural prompts; each workload has six cases.",
+    "selection": "SHA-256 ordering with seed 303. Dolly family hashes assign 20% pilot, 20% validation, and 60% test before selection. Classification requests must contain classify, categorize, or identify. Other candidate admission uses input length and duplication only, never generated outputs or timings.",
+    "deduplication": "One selected real prompt per normalized context/instruction family; no shared sources or families across splits. Cross-split pairs with identical normalized text or word four-gram Jaccard similarity >= 0.5 are rejected.",
+    "lengths": "At most 896 prompt tokens. The first instruction and structured case in each split has at least 384 prompt tokens. Seven extra context positions are reserved for lookup drafts up to eight tokens.",
+    "budgets": "Pilot budgets are 16 and 32; validation/test budgets cycle 16, 32, 64 within each workload. Natural EOS may finish earlier.",
+    "licensing": "The dataset licenses above apply to their respective prompt records; the project code remains Apache-2.0.",
+    "limits": "Small fixed decoding workloads, not an answer-quality benchmark or a representative production sample. Held out from DART tuning, not guaranteed absent from Supra pretraining. Lexical deduplication does not prove semantic independence. Source factual claims and example solutions are not evaluated."
+  }
+}

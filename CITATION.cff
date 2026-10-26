@@ -7,7 +7,7 @@ authors:
     given-names: "Tugrap"
 repository-code: "https://github.com/tugrapaydiner/dart"
 license: Apache-2.0
-version: 0.2.0
+version: 0.3.0
 keywords:
   - speculative decoding
   - diffusion language models

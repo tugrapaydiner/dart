@@ -2,6 +2,9 @@ global-exclude *
 include MANIFEST.in LICENSE pyproject.toml constraints-tested.txt
 recursive-include dart *.py py.typed
 recursive-include benchmarks *.py
+include benchmarks/fixtures/v0.3-prompts.jsonl benchmarks/fixtures/v0.3-sources.json
+include benchmarks/fixtures/verification-prompts.jsonl benchmarks/fixtures/verification-sources.json
+include benchmarks/fixtures/feedback-prompts.jsonl benchmarks/fixtures/feedback-sources.json
 recursive-include scripts *.py
 recursive-include tests *.py
 recursive-include configs *.yaml

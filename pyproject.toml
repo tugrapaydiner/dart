@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "dart-serving"
-version = "0.2.0"
+version = "0.3.0"
 description = "DART: verified drafting and reproducible local model evaluation"
 readme = {text = "DART provides verified drafting and local model evaluation. The Supra-50M presets use float32 with SDPA on CPU and eager attention on CUDA. Use dart check to compare complete outputs with HF before benchmarking. Supply model files locally.", content-type = "text/plain"}
 requires-python = ">=3.10"
@@ -25,6 +25,7 @@ dart = "dart.cli:main"
 
 [project.optional-dependencies]
 dev = ["pytest>=7.0", "pytest-timeout", "ruff>=0.4"]
+figures = ["matplotlib>=3.8", "fonttools>=4.47"]
 
 [tool.setuptools]
 include-package-data = false
@@ -34,6 +35,7 @@ include = ["dart*", "benchmarks*"]
 
 [tool.setuptools.package-data]
 dart = ["py.typed"]
+benchmarks = ["fixtures/v0.3-prompts.jsonl", "fixtures/v0.3-sources.json", "fixtures/verification-prompts.jsonl", "fixtures/verification-sources.json", "fixtures/feedback-prompts.jsonl", "fixtures/feedback-sources.json"]
 
 [tool.ruff]
 line-length = 88

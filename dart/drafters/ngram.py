@@ -20,6 +20,7 @@ from dart.verification.tree_verify import DraftTree
 
 class NGramDrafter:
     name = "ngram"
+    requires_entropy = False
 
     def __init__(
         self,
@@ -52,10 +53,19 @@ class NGramDrafter:
         longest n-gram first, most recent occurrence first within an n."""
         seq_len = len(committed)
         scan_from = 0 if self.max_scan is None else max(0, seq_len - self.max_scan)
+        candidates = committed[scan_from:seq_len - 1]
+        candidates.reverse()
         found: list[list[int]] = []
         for n in range(min(self.max_ngram, seq_len - 1), self.min_ngram - 1, -1):
             pattern = committed[seq_len - n :]
-            for start in range(seq_len - n - 1, scan_from - 1, -1):
+            cursor, stop = 0, len(candidates) - n + 1
+            while cursor < stop:
+                try:
+                    offset = candidates.index(pattern[-1], cursor, stop)  # Skip impossible suffix endings.
+                except ValueError:
+                    break
+                start = seq_len - n - 1 - offset
+                cursor = offset + 1
                 if committed[start : start + n] == pattern:
                     cont = committed[start + n : start + n + max_tokens]
                     if cont and cont not in found:
