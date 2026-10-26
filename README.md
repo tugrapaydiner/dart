@@ -39,7 +39,7 @@ EOS can stop a request early.
 For prefix $`x`$ and draft $`d`$, the target checks every position in one causal pass:
 
 $$
-y_i = \arg\max_v P_\theta\!\left(v \mid x, d_{1:i-1}\right).
+y_i = \arg\max_v P_\theta\left(v \mid x, d_{1:i-1}\right).
 $$
 
 Keep the longest draft prefix matching these greedy choices. Emit the first
