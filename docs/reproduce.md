@@ -31,7 +31,7 @@ dart --version
 The dependency pins describe this measured environment, not every platform.
 The original feedback confirmation reused system dependencies. A later
 [clean validation](../benchmarks/results/v0.3-feedback/reproduction.json) installed
-the current public wheel and all runtime/plotting dependencies in a **new venv
+the public wheel from revision `de28a986` and all runtime/plotting dependencies in a **new venv
 without system or user packages**, entirely from cached wheels. Every installed
 distribution and project import was verified inside that environment.
 Public commands ran outside the checkout: **352 complete outputs matched on
@@ -108,7 +108,8 @@ original-norm HF greedy references. Five unique cases reached EOS. Reference
 outputs also match across processes. No case or timing was removed.
 
 Measured code: `3d651482538e15d427fd8533340e98a53b7eec8b`.
-Chart tooling: `be81f207f89e81c3ce5c1a52e510a3de06e1cb2a`.
+Original chart tooling: `be81f207f89e81c3ce5c1a52e510a3de06e1cb2a`.
+Current chart layout: `e4bb0d91240cee68c3c928e8f759ff698b3b23b0`.
 The [protocol](../benchmarks/results/v0.3-feedback/protocol.json) fingerprints
 source, weights, tokenizer and core packages. To execute that exact archived
 protocol, use its measured code revision in a separate checkout. A newer
