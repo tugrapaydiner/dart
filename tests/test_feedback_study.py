@@ -1,4 +1,7 @@
 import copy
+import hashlib
+import json
+import xml.etree.ElementTree as ET
 from contextlib import ExitStack
 from types import SimpleNamespace
 
@@ -7,6 +10,7 @@ import pytest
 from benchmarks import execution_protocol as execution
 from benchmarks import feedback_analysis as analysis
 from benchmarks import feedback_bench as bench
+from benchmarks import feedback_figures as figures
 from benchmarks import feedback_protocol as protocol
 from dart.runtime.engine import DartEngine
 
@@ -156,3 +160,55 @@ def test_methods_share_the_target_and_keep_budget_and_feedback_settings(monkeypa
             assert calls["replay_hf_lookup"]([7]) == (budget, {"prompt_lookup_num_tokens": 4})
             assert calls["time_scheduler"]([7])[-1].requires_round_timing
             assert not calls["time_scheduler"]([7])[-1].requires_entropy
+
+
+def write_study(path, value):
+    path.mkdir()
+    plan, status, reports = value
+    for name, data in [("protocol", plan), ("status", status), *[(f"session-{i}", row) for i, row in enumerate(reports)]]:
+        (path / (name + ".json")).write_text(json.dumps(data), encoding="utf-8")
+
+
+def test_figures_recompute_raw_results_and_retain_every_loss(feedback_study, tmp_path):
+    value = feedback_study(candidate=(70, 80, 90))
+    for report in value[2]:
+        for row in report["samples"]:
+            if row["method"] == "entropy_off4" and "instruction" in row["case"]:
+                row["latency_ms"] *= 2
+    source, output, previews = [tmp_path / name for name in ("raw", "figures", "png")]
+    write_study(source, value)
+    (source / "analysis.json").write_text('{"confirmation_passed": true, "speedup": 999}')
+    figures.main(["--run", str(source), "--out", str(output), "--previews", str(previews)])
+    audit = json.loads((output / "figure-data.json").read_text())
+    data = audit["data"]
+    assert data["aggregate"]["mean_latency_ms"]["entropy_off4"] == 100
+    assert len(data["cases"]) == 48 and len(data["nonrepetitive"]["cases"]) == 36
+    assert len(data["slower_than_greedy"]) == 12 and not data["confirmation_passed"]
+    assert set(audit["figures_sha256"]) == set(figures.NAMES)
+    for name, digest in audit["figures_sha256"].items():
+        raw = (output / (name + ".svg")).read_bytes()
+        assert hashlib.sha256(raw).hexdigest() == digest
+        assert ET.fromstring(raw).attrib["width"] == "982"
+        assert (previews / (name + ".png")).read_bytes().startswith(b"\x89PNG")
+    assert b"#ebcece" in (output / "cases.svg").read_bytes()
+    assert data["artifact_hashes"]["session-0.json"] == hashlib.sha256((source / "session-0.json").read_bytes()).hexdigest()
+    before = {path.name: path.read_bytes() for path in output.iterdir()}
+    with pytest.raises(SystemExit):
+        figures.main(["--run", str(source), "--out", str(output)])
+    assert before == {path.name: path.read_bytes() for path in output.iterdir()}
+
+
+@pytest.mark.parametrize("kind", ["pilot", "missing", "extra", "mismatch"])
+def test_figures_reject_invalid_or_single_session_evidence(feedback_study, tmp_path, kind):
+    value = feedback_study("validation" if kind == "pilot" else "test")
+    if kind == "missing":
+        value[2][0]["samples"].pop()
+    elif kind == "mismatch":
+        value[2][0]["samples"][0]["token_ids"] = [7, 2]
+    source, output = tmp_path / "raw", tmp_path / "figures"
+    write_study(source, value)
+    if kind == "extra":
+        (source / "session-3.json").write_text("{}")
+    with pytest.raises(SystemExit):
+        figures.main(["--run", str(source), "--out", str(output)])
+    assert not output.exists()
