@@ -43,13 +43,19 @@ def build_target(spec: dict) -> TargetModel:
     execution = spec.get("execution", "eager")
     if execution not in ("eager", "static", "cuda_graph"):
         raise ValueError("target execution must be eager, static or cuda_graph")
+    capture_predictions = spec.get("capture_predictions", False)
+    if type(capture_predictions) is not bool:
+        raise ValueError("capture_predictions must be a boolean")
+    if capture_predictions and execution == "eager":
+        raise ValueError("captured predictions require static or cuda_graph execution")
     target = _build_target(spec)
     if execution == "eager":
         return target
     from dart.models.replay import CudaGraphTarget
 
     return CudaGraphTarget(target, max_block_tokens=spec.get("max_block_tokens", 5),
-                           capacity=spec.get("cache_capacity"), replay=execution == "cuda_graph")
+                           capacity=spec.get("cache_capacity"), replay=execution == "cuda_graph",
+                           capture_predictions=capture_predictions)
 
 
 def _build_target(spec: dict) -> TargetModel:

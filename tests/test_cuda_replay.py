@@ -387,12 +387,21 @@ def test_unsupported_cache_and_tree_are_explicit(replay_target):
 @cuda
 @supported_replay
 @pytest.mark.parametrize("execution", ["static", "cuda_graph"])
-def test_factory_replay_and_close(execution):
+@pytest.mark.parametrize("capture_predictions", [False, True])
+def test_factory_replay_and_close(execution, capture_predictions):
     target = build_target({"model": "tiny:72", "device": "cuda", "precision": "fp32", "execution": execution,
-                           "cache_capacity": 16, "max_block_tokens": 1})
+                           "cache_capacity": 16, "max_block_tokens": 1, "capture_predictions": capture_predictions})
     assert isinstance(target, CudaGraphTarget) and target.execution_backend == execution
+    assert target.capture_predictions is capture_predictions
     state, _ = target.prefill([5, 6])
     assert target.forward_block(state, [7]).shape == (1, 211)
+    if capture_predictions:
+        expected = target.forward_block(state, [8]).argmax(-1).tolist()
+        target.crop(state, 3)
+        assert target.forward_predictions(state, [8]) == expected
+    else:
+        with pytest.raises(ValueError, match="capture_predictions=True"):
+            target.forward_predictions(state, [8])
     assert target.setup_ms > 0
     target.close()
     target.close()
