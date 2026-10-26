@@ -202,6 +202,10 @@ class DartEngine:
             prompt_ids = self.target.tokenizer.encode(prompt_ids)
         config = config or self.default_decode_config or DecodeConfig()
         config.validate()
+        if getattr(self.target, "uses_replay_cache", False) and (
+            config.mode != "exact" or self.verifier_name != "block" or config.full_kv_residency != "gpu"
+        ):
+            raise ValueError("CUDA replay requires exact mode, block verification and resident GPU KV")
         timed_scheduler = getattr(self.scheduler, "requires_round_timing", False)
         if timed_scheduler and (config.mode != "exact" or config.full_kv_residency != "gpu"):
             raise ValueError("time scheduling requires exact mode and resident target KV")
