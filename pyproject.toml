@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "dart-serving"
-version = "0.2.0"
+version = "0.3.0"
 description = "DART: verified drafting and reproducible local model evaluation"
 readme = {text = "DART provides verified drafting and local model evaluation. The Supra-50M presets use float32 with SDPA on CPU and eager attention on CUDA. Use dart check to compare complete outputs with HF before benchmarking. Supply model files locally.", content-type = "text/plain"}
 requires-python = ">=3.10"
