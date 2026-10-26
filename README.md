@@ -92,7 +92,7 @@ each round; rejected cache entries are cropped.
 | Timing | 3,024 timed requests; rotated ordering; 9.6 minutes total |
 | Inputs | 48 fresh MBPP, Dolly and procedural cases; all timed |
 | Correctness | 144 checks + 1,008 warm-ups + 3,024 timed outputs matched HF |
-| Reproduction | Public wheel commands; 352 validation matches; identical rebuilt SVGs |
+| Reproduction | Fresh isolated install; 352 validation matches; identical rebuilt SVGs |
 | Resources | Zero added parameters; 1,024-token context; 0.589 GiB peak allocation |
 
 Preparation is excluded from warm timings. Memory includes two model copies

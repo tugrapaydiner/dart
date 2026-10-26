@@ -29,12 +29,19 @@ dart --version
 ```
 
 The dependency pins describe this measured environment, not every platform.
-The feedback study used a public wheel outside the checkout in a new venv
-**reusing existing system dependencies**. It does not establish a new fresh
-dependency install or independent reproduction. The earlier execution study
-records a separate [fresh-dependency validation](../benchmarks/results/v0.3-execution/reproduction.json).
+The original feedback confirmation reused system dependencies. A later
+[clean validation](../benchmarks/results/v0.3-feedback/reproduction.json) installed
+the current public wheel and all runtime/plotting dependencies in a **new venv
+without system or user packages**, entirely from cached wheels. Every installed
+distribution and project import was verified inside that environment.
+Public commands ran outside the checkout: **352 complete outputs matched on
+16 development cases**, and all four final-study SVGs reproduced byte for byte.
+This is same-host installation validation, not independent performance reproduction.
+
 CPU CI separately builds and installs the current wheel with fresh dependencies
-on Python 3.10/3.12. Local CUDA and Supra output checks complement its skips.
+and test extras on Python 3.10/3.12. Local CUDA and Supra output checks complement
+its skips. The earlier execution study keeps its separate
+[fresh-dependency record](../benchmarks/results/v0.3-execution/reproduction.json).
 
 ## Inspect the published records
 
