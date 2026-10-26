@@ -6,6 +6,7 @@ import argparse
 import json
 import os
 import platform
+import sys
 import time
 from contextlib import ExitStack
 from datetime import datetime, timezone
@@ -16,6 +17,7 @@ from types import MethodType, SimpleNamespace
 from benchmarks.execution_analysis import summarize_group
 from benchmarks.execution_bench import (
     measure_session,
+    run_process,
     run_study,
     validate_session,
     write_json,
@@ -31,6 +33,8 @@ from dart.drafters.ngram import NGramDrafter
 
 METHODS = ("prior_dart", "guard_only", "current_dart", "direct_greedy", "hf_greedy", "hf_lookup")
 CONTROL_COMMIT = "feaad1ce9d5541831adaec40a0dbc6777c987151"
+GATES = {"maximum_peak_allocated_bytes": 6 * 1024**3, "minimum_mean_latency_reduction": 0.05,
+         "each_session_improves": True, "maximum_workload_regression": 0.05}
 
 
 def prior_signature(target):
@@ -84,8 +88,7 @@ def make_protocol(reference_plan, reference_session, model):
             "scope": "Development validation on previously exposed inputs; not fresh held-out confirmation or independent reproduction",
             "reference_scope": "Cached original-norm HF token IDs; reference latency records are retrieval overhead, not model latency",
             "memory_scope": "One model copy, replay workspace and request caches; not comparable to the earlier two-model harness",
-            "gates": {"maximum_peak_allocated_bytes": 6 * 1024**3, "minimum_mean_latency_reduction": 0.05,
-                      "each_session_improves": True, "maximum_workload_regression": 0.05}}
+            "gates": dict(GATES)}
     return {**plan, "protocol_hash": digest(plan)}
 
 
@@ -96,7 +99,7 @@ def read_protocol(path, *, check_source=True):
         raise ValueError("overhead protocol fingerprint changed")
     fixed = {"split": "validation", "sessions": 3, "warmups": 1, "repeats": 2, "timeout_seconds": 120,
              "methods": list(METHODS), "candidate": "current_dart", "control": "prior_dart",
-             "control_commit": CONTROL_COMMIT}
+             "control_commit": CONTROL_COMMIT, "gates": GATES}
     if any(plan.get(key) != value for key, value in fixed.items()):
         raise ValueError("overhead execution settings changed")
     if check_source and plan["source_hashes"] != source_hashes():
@@ -192,13 +195,68 @@ def run_session(plan, model, output, session):
         write_json(path, report)
 
 
+def retryable_attempt(output, plan):
+    status = json.loads((output / "status.json").read_text(encoding="utf-8"))
+    partial = json.loads((output / "session-2.json").read_text(encoding="utf-8"))
+    if (status["status"] != "timeout" or status["protocol_hash"] != plan["protocol_hash"]
+            or len(status["processes"]) != 3 or not status["processes"][2]["timed_out"]
+            or any(p["returncode"] or p["timed_out"] for p in status["processes"][:2])
+            or partial["protocol_hash"] != plan["protocol_hash"] or partial["status"] == "complete"
+            or partial.get("samples")):
+        raise ValueError("retry requires two completed processes and no timed samples from the third")
+    for row in partial.get("checks", []) + partial.get("warmups", []):
+        if row.get("match") is not True or row["token_ids"] != plan["cached_outputs"][row["case"]]:
+            raise ValueError("partial attempt contains an output mismatch")
+    return status, partial
+
+
+def resume_study(model, output):
+    plan = read_protocol(output / "protocol.json")
+    retryable_attempt(output, plan)
+    folder = output / "resume"
+    folder.mkdir(exist_ok=False)
+    env = os.environ.copy()
+    env.update(HF_HUB_OFFLINE="1", TRANSFORMERS_OFFLINE="1", PYTHONIOENCODING="utf-8")
+    for key, name in (("CUDA_CACHE_PATH", "cuda-cache"), ("PYTORCH_KERNEL_CACHE_PATH", "torch-kernel-cache"),
+                      ("TEMP", "tmp"), ("TMP", "tmp")):
+        env[key] = str((output / name).resolve())
+    command = [sys.executable, "-m", "benchmarks.overhead_bench", "--model", str(model.resolve()),
+               "--protocol", str((output / "protocol.json").resolve()), "--out", str(folder.resolve()), "--session", "2"]
+    process = run_process(command, folder / "session-2.log", 60, env)
+    process["session"] = 2
+    report_path = folder / "session-2.json"
+    if report_path.exists():
+        process["worker_pid"] = json.loads(report_path.read_text(encoding="utf-8"))["pid"]
+    write_json(output / "extension.json", {"schema": "dart-overhead-extension-v1", "protocol_hash": plan["protocol_hash"],
+                                          "session": 2, "timeout_seconds": 60, "process": process})
+    if process["returncode"] or process["timed_out"]:
+        raise RuntimeError("bounded retry failed; its original and partial records were preserved")
+    write_json(output / "analysis.json", analyze(output))
+
+
 def analyze(output):
     plan = read_protocol(output / "protocol.json", check_source=False)
     status = json.loads((output / "status.json").read_text(encoding="utf-8"))
-    if (status["status"] != "complete" or status["protocol_hash"] != plan["protocol_hash"]
-            or len(status["processes"]) != plan["sessions"] or status["elapsed_seconds"] > plan["timeout_seconds"]):
-        raise ValueError("overhead study is incomplete")
     reports = [json.loads((output / f"session-{s}.json").read_text(encoding="utf-8")) for s in range(plan["sessions"])]
+    elapsed = status["elapsed_seconds"]
+    limit = plan["timeout_seconds"]
+    extension_used, partial_matches = False, 0
+    if (output / "extension.json").exists():
+        status, partial = retryable_attempt(output, plan)
+        extension = json.loads((output / "extension.json").read_text(encoding="utf-8"))
+        if (extension.get("schema") != "dart-overhead-extension-v1" or extension["protocol_hash"] != plan["protocol_hash"]
+                or extension["session"] != 2 or extension["timeout_seconds"] != 60
+                or not 0 < extension["process"]["elapsed_seconds"] <= 60):
+            raise ValueError("overhead retry scope changed")
+        reports[2] = json.loads((output / "resume/session-2.json").read_text(encoding="utf-8"))
+        status = {**status, "status": "complete", "processes": [*status["processes"][:2], extension["process"]]}
+        elapsed += extension["process"]["elapsed_seconds"]
+        limit += 60
+        extension_used = True
+        partial_matches = len(partial.get("checks", [])) + len(partial.get("warmups", []))
+    if (status["status"] != "complete" or status["protocol_hash"] != plan["protocol_hash"]
+            or len(status["processes"]) != plan["sessions"] or not 0 < elapsed <= limit):
+        raise ValueError("overhead study is incomplete")
     for session, (report, process) in enumerate(zip(reports, status["processes"])):
         validate_session(report, plan, session)
         if (process["session"] != session or process["returncode"] != 0 or process["timed_out"]
@@ -221,7 +279,9 @@ def analyze(output):
             "cases": {name: summarize_group(plan, reports, [name]) for name in plan["timed_ids"]},
             "full_output_matches": sum(len(r["checks"]) + len(r["warmups"]) + len(r["samples"]) for r in reports),
             "peak_allocated_bytes": max(r["peak_allocated_bytes"] for r in reports), "memory_scope": plan["memory_scope"],
-            "elapsed_seconds": status["elapsed_seconds"], "gates": gates, "development_passed": all(gates.values()),
+            "elapsed_seconds": elapsed, "original_limit_seconds": plan["timeout_seconds"],
+            "extension_used": extension_used, "total_limit_seconds": limit, "partial_attempt_matches": partial_matches,
+            "gates": gates, "development_passed": all(gates.values()),
             "confirmation_passed": False}
 
 
@@ -233,6 +293,7 @@ def main():
     parser.add_argument("--protocol", type=Path)
     parser.add_argument("--out", required=True, type=Path)
     parser.add_argument("--analyze", action="store_true", help="reanalyze saved records without model inference")
+    parser.add_argument("--resume", action="store_true", help="explicitly retry the untimed third process once, for at most 60 seconds")
     parser.add_argument("--session", type=int, help=argparse.SUPPRESS)
     args = parser.parse_args()
     if args.analyze:
@@ -240,6 +301,9 @@ def main():
         return
     if args.model is None:
         parser.error("--model is required for execution")
+    if args.resume:
+        resume_study(args.model, args.out)
+        return
     if args.protocol is None:
         if args.reference_protocol is None or args.reference_session is None:
             parser.error("provide --protocol or both cached reference files")

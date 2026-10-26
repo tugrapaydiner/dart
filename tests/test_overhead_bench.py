@@ -1,4 +1,5 @@
 import copy
+import json
 from contextlib import ExitStack
 from types import SimpleNamespace
 
@@ -90,8 +91,7 @@ def test_methods_switch_the_guard_and_share_the_same_target(monkeypatch):
             assert calls["direct_greedy"]([7]) == calls["hf_greedy"]([7]) == (budget, ("current",), {})
 
 
-@pytest.mark.parametrize("damage", [None, "missing", "reference", "process", "one_loss"])
-def test_analysis_retains_losses_and_rejects_incomplete_evidence(cached_study, damage):
+def write_current_study(cached_study, damage=None):
     old, template, output = cached_study
     plan = bench.make_protocol(old, template, output)
     bench.write_json(output / "protocol.json", plan)
@@ -116,6 +116,12 @@ def test_analysis_retains_losses_and_rejects_incomplete_evidence(cached_study, d
         processes[0]["returncode"] = 1
     bench.write_json(output / "status.json", {"status": "complete", "protocol_hash": plan["protocol_hash"],
                                             "elapsed_seconds": 90, "processes": processes})
+    return output, plan
+
+
+@pytest.mark.parametrize("damage", [None, "missing", "reference", "process", "one_loss"])
+def test_analysis_retains_losses_and_rejects_incomplete_evidence(cached_study, damage):
+    output, plan = write_current_study(cached_study, damage)
     if damage in {"missing", "reference", "process"}:
         with pytest.raises(ValueError):
             bench.analyze(output)
@@ -124,3 +130,66 @@ def test_analysis_retains_losses_and_rejects_incomplete_evidence(cached_study, d
         assert not result["confirmation_passed"]
         assert result["development_passed"] is (damage is None)
         assert result["full_output_matches"] == len(plan["cases"]) * 3 * (1 + 3 * len(bench.METHODS))
+
+
+def timed_out_study(cached_study):
+    output, plan = write_current_study(cached_study)
+    status = json.loads((output / "status.json").read_text())
+    status.update(status="timeout", elapsed_seconds=120.1)
+    status["processes"][2].update(returncode=1, timed_out=True)
+    complete = json.loads((output / "session-2.json").read_text())
+    partial = {**complete, "status": "running", "samples": [], "warmups": []}
+    bench.write_json(output / "status.json", status)
+    bench.write_json(output / "session-2.json", partial)
+    return output, plan, complete
+
+
+@pytest.mark.parametrize("damage", [None, "budget", "protocol", "timed_samples", "failed_retry"])
+def test_retry_keeps_the_original_attempt_and_checks_its_bounds(cached_study, damage):
+    output, plan, complete = timed_out_study(cached_study)
+    before = (output / "status.json").read_bytes(), (output / "session-2.json").read_bytes()
+    (output / "resume").mkdir()
+    bench.write_json(output / "resume/session-2.json", complete)
+    extension = {"schema": "dart-overhead-extension-v1", "protocol_hash": plan["protocol_hash"],
+                 "session": 2, "timeout_seconds": 60, "process": {"session": 2, "worker_pid": complete["pid"],
+                 "elapsed_seconds": 30, "returncode": 0, "timed_out": False}}
+    if damage == "budget":
+        extension["process"]["elapsed_seconds"] = 61
+    elif damage == "protocol":
+        extension["protocol_hash"] = "0" * 64
+    elif damage == "timed_samples":
+        partial = json.loads((output / "session-2.json").read_text())
+        partial["samples"] = complete["samples"][:1]
+        bench.write_json(output / "session-2.json", partial)
+    elif damage == "failed_retry":
+        extension["process"]["returncode"] = 1
+    bench.write_json(output / "extension.json", extension)
+    if damage:
+        with pytest.raises(ValueError):
+            bench.analyze(output)
+    else:
+        result = bench.analyze(output)
+        assert result["extension_used"] and result["development_passed"]
+        assert result["elapsed_seconds"] == 150.1 and result["total_limit_seconds"] == 180
+        assert result["partial_attempt_matches"] == len(plan["cases"])
+        assert before == ((output / "status.json").read_bytes(), (output / "session-2.json").read_bytes())
+
+
+def test_explicit_resume_launches_only_the_remaining_process_once(cached_study, monkeypatch):
+    output, plan, complete = timed_out_study(cached_study)
+    calls = []
+
+    def launch(command, log, timeout, env):
+        calls.append(command)
+        assert timeout == 60 and command[-2:] == ["--session", "2"]
+        assert env["HF_HUB_OFFLINE"] == "1" and env["CUDA_CACHE_PATH"] == str(output / "cuda-cache")
+        bench.write_json(log.parent / "session-2.json", complete)
+        return {"pid": complete["pid"], "elapsed_seconds": 30, "returncode": 0, "timed_out": False}
+
+    monkeypatch.setattr(bench, "run_process", launch)
+    bench.resume_study(output, output)
+    assert len(calls) == 1
+    assert bench.analyze(output)["full_output_matches"] == len(plan["cases"]) * 3 * (1 + 3 * len(bench.METHODS))
+    with pytest.raises(FileExistsError):
+        bench.resume_study(output, output)
+    assert len(calls) == 1
