@@ -329,6 +329,11 @@ held-out latency study; use the recorded revision when reproducing each result.
 
 ## Earlier execution study
 
+New execution protocols use schema v2: the eager control and replay paths run
+from the same recorded source. They do not claim to execute historical commit
+`6341186`. Archived v1 analysis keeps its original provenance; rerunning that
+study requires its pinned source revision.
+
 [Raw execution records](../benchmarks/results/v0.3-execution) and the
 [original guide](https://github.com/tugrapaydiner/dart/blob/2c9a6a8ad32172b3d92a557af575c4c2a71cac79/docs/reproduce.md)
 preserve the separate static/replay ablation, architecture, development failures

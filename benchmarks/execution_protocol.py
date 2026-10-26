@@ -13,7 +13,8 @@ from dart.data.corpus import corpus_hash, encode_prompt
 from dart.data.storage import tokenizer_hash
 from dart.presets import local_model_path
 
-SCHEMA = "dart-execution-protocol-v1"
+SCHEMA = "dart-execution-protocol-v2"
+LEGACY_SCHEMA = "dart-execution-protocol-v1"
 CONTROL_COMMIT = "63411869e4a8ed832c0cc4c1ecb560801625d84e"
 METHODS = ("current_dart", "static_dart", "replay_dart", "replay_greedy",
            "replay_hf_greedy", "replay_hf_lookup")
@@ -96,14 +97,18 @@ def make_protocol(rows, tokenizer, context_limit: int, model: Path, *, split="va
     return {**protocol, "protocol_hash": digest(protocol)}
 
 
-def protocol_settings(split: str, context_limit: int) -> dict:
+def protocol_settings(split: str, context_limit: int, *, schema=SCHEMA) -> dict:
+    if schema not in (SCHEMA, LEGACY_SCHEMA):
+        raise ValueError("unsupported execution protocol schema")
     _, timed_ids = selected_ids(split)
     final = split == "test"
+    legacy = schema == LEGACY_SCHEMA
     return {
-        "schema": SCHEMA, "split": split, "context_limit": context_limit, "timed_ids": timed_ids,
+        "schema": schema, "split": split, "context_limit": context_limit, "timed_ids": timed_ids,
         "methods": list(METHODS), "baselines": list(BASELINES), "candidate": "replay_dart",
-        "control": "current_dart", "control_commit": CONTROL_COMMIT,
-        "control_scope": "optimized eager DART path retained from the control commit",
+        "control": "current_dart", "control_commit": CONTROL_COMMIT if legacy else None,
+        "control_scope": ("optimized eager DART path retained from the control commit" if legacy else
+                          "optimized eager DART from source_hashes; all methods use the same recorded source, not a historical checkout"),
         "sessions": 3 if final else 1, "repeats": 3 if final else 2, "warmups": 1,
         "timeout_seconds": 3600 if final else 300, "seed": 307,
         "settings": {"device": "cuda", "dtype": "float32", "attention": "eager",

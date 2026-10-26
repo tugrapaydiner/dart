@@ -45,7 +45,8 @@ def validate_archive_protocol(plan: dict, *, settings=None, rows=None, check_ids
     if plan.get("protocol_hash") != digest(body):
         raise ValueError("protocol fingerprint changed")
     context = number(plan["context_limit"], "context limit", minimum=1, integer=True)
-    fixed = (settings or protocol_settings)(plan["split"], context)
+    fixed = (settings(plan["split"], context) if settings is not None else
+             protocol_settings(plan["split"], context, schema=plan.get("schema")))
     fields = set(fixed) | {"cases", "corpus_hash", "tokenizer_hash", "model_hashes", "source_hashes", "packages", "protocol_hash"}
     if set(plan) != fields or digest({key: plan.get(key) for key in fixed}) != digest(fixed):
         raise ValueError("protocol settings or acceptance gates changed")
@@ -212,9 +213,12 @@ def analyze(plan: dict, status: dict, reports: list[dict]) -> dict:
         "complete_outputs": True, "complete_protocol": True,
     }
     final = plan["split"] == "test"
+    provenance = {key: plan[key] for key in ("control_commit", "corpus_hash", "tokenizer_hash", "model_hashes", "source_hashes", "packages", "settings")}
+    if plan["schema"] != "dart-execution-protocol-v1":
+        provenance.update(protocol_schema=plan["schema"], control_scope=plan["control_scope"])
     return {
         "schema": "dart-execution-analysis-v1", "protocol_hash": plan["protocol_hash"], "split": plan["split"],
-        "provenance": {key: plan[key] for key in ("control_commit", "corpus_hash", "tokenizer_hash", "model_hashes", "source_hashes", "packages", "settings")},
+        "provenance": provenance,
         "uncertainty": plan["uncertainty"],
         "uncertainty_limits": "Approximate log-normal session ratios; only three sessions, fixed cases on one host. Case/workload intervals are descriptive, without multiplicity correction. No population or independent reproduction claim.",
         "archive_validation": "Recorded fingerprints, fixed corpus metadata, complete outputs and matrices checked; archived model files and tokenization are not re-executed.",
