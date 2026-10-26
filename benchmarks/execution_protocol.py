@@ -72,7 +72,7 @@ def selected_ids(split: str) -> tuple[list[str], list[str]]:
 
 
 def make_protocol(rows, tokenizer, context_limit: int, model: Path, *, split="validation") -> dict:
-    check_ids, timed_ids = selected_ids(split)
+    check_ids, _ = selected_ids(split)
     records = {row.id: row for row in rows}
     if len(records) != len(rows) or any(name not in records for name in check_ids):
         raise ValueError("verification corpus has missing or duplicate cases")
@@ -87,12 +87,20 @@ def make_protocol(rows, tokenizer, context_limit: int, model: Path, *, split="va
         cases.append({"id": name, "source": row.source, "family": row.family,
                       "workload": row.workload, "max_new_tokens": row.max_new_tokens,
                       "prompt_ids": tokens, "prompt_hash": digest(tokens)})
-    final = split == "test"
     protocol = {
-        "schema": SCHEMA, "split": split, "corpus_hash": corpus_hash(rows),
+        **protocol_settings(split, context_limit), "corpus_hash": corpus_hash(rows),
         "tokenizer_hash": tokenizer_hash(tokenizer), "model_hashes": model_hashes(model),
         "source_hashes": source_hashes(), "packages": {name: version(name) for name in PACKAGES},
-        "context_limit": context_limit, "cases": cases, "timed_ids": timed_ids,
+        "cases": cases,
+    }
+    return {**protocol, "protocol_hash": digest(protocol)}
+
+
+def protocol_settings(split: str, context_limit: int) -> dict:
+    _, timed_ids = selected_ids(split)
+    final = split == "test"
+    return {
+        "schema": SCHEMA, "split": split, "context_limit": context_limit, "timed_ids": timed_ids,
         "methods": list(METHODS), "baselines": list(BASELINES), "candidate": "replay_dart",
         "control": "current_dart", "control_commit": CONTROL_COMMIT,
         "control_scope": "optimized eager DART path retained from the control commit",
@@ -114,7 +122,6 @@ def make_protocol(rows, tokenizer, context_limit: int, model: Path, *, split="va
                   "maximum_workload_regression": 0.05, "maximum_peak_allocated_bytes": 6 * 1024**3,
                   "maximum_extra_learned_parameters": 5_000_000},
     }
-    return {**protocol, "protocol_hash": digest(protocol)}
 
 
 def validate_protocol(protocol: dict, rows, tokenizer, context_limit: int, model: Path) -> None:
