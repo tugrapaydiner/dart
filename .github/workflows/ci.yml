@@ -70,5 +70,51 @@ jobs:
           PY
           dart --help
           python -I -m dart --version
+      - name: Test installed package
+        working-directory: ${{ runner.temp }}
+        env:
+          OMP_NUM_THREADS: "1"
+          MKL_NUM_THREADS: "1"
+          CUDA_VISIBLE_DEVICES: "-1"
+          HF_HUB_OFFLINE: "1"
+          TRANSFORMERS_OFFLINE: "1"
+        run: |
+          python -I - <<'PY'
+          import os
+          import shutil
+          import sys
+          import sysconfig
+          from pathlib import Path
+
+          import benchmarks
+          import dart
+          import pytest
+
+          packages = Path(sysconfig.get_paths()["purelib"]).resolve()
+
+          def check_origins():
+              for name, module in tuple(sys.modules.items()):
+                  if name in ("dart", "benchmarks") or name.startswith(("dart.", "benchmarks.")):
+                      assert Path(module.__file__).resolve().is_relative_to(packages), name
+
+          check_origins()
+          source = Path(os.environ["GITHUB_WORKSPACE"]) / "tests"
+          suite = Path("wheel-tests").resolve()
+          (suite / "tests").mkdir(parents=True)
+          (suite / "tests/__init__.py").write_text("", encoding="utf-8")
+          names = (
+              "conftest.py", "test_exactness.py", "test_tree_verify.py",
+              "test_generation_budget.py", "test_request_cleanup.py", "test_ngram_lookup.py",
+              "test_replay_ids.py", "test_config_api.py", "test_feedback_workloads.py",
+          )
+          for name in names:
+              shutil.copyfile(source / name, suite / "tests" / name)
+          (suite / "pytest.ini").write_text("[pytest]\n", encoding="utf-8")
+          os.chdir(suite)
+          sys.path.insert(0, str(suite))
+          result = pytest.main(["-c", "pytest.ini", "--confcutdir=tests", "--import-mode=importlib", "-ra", "tests"])
+          check_origins()
+          raise SystemExit(result)
+          PY
       - name: Run test suite
         run: pytest -ra
