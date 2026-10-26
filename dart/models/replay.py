@@ -174,8 +174,17 @@ class CudaGraphTarget(TargetModel):
         self.setup_ms = (time.perf_counter() - started) * 1000
 
     def _signature(self):
+        pending, seen, tensors = [self.model], set(), []
+        while pending:
+            module = pending.pop()
+            if module is None or module in seen:
+                continue
+            seen.add(module)
+            pending.extend(module._modules.values())
+            tensors.extend(tensor for tensor in (*module._parameters.values(), *module._buffers.values())
+                           if tensor is not None)  # Check live registrations without building parameter names.
         return tuple((tensor.data_ptr(), tensor.device, tensor.dtype, tuple(tensor.shape), tensor.stride())
-                     for tensor in (*self.model.parameters(), *self.model.buffers()))
+                     for tensor in tensors)
 
     def _check_ready(self):
         if self._closed:

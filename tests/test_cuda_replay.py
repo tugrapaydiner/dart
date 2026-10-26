@@ -88,6 +88,76 @@ def test_unknown_execution_fails_before_loading_model():
         build_target({"execution": "unknown"})
 
 
+@pytest.fixture
+def cpu_replay_guard(monkeypatch):
+    model = torch.nn.Sequential(torch.nn.Linear(4, 4), torch.nn.Sequential(torch.nn.Linear(4, 4)))
+    model.register_buffer("scale", torch.ones(4))
+    model[1][0].register_buffer("offset", torch.zeros(4))
+    model.register_buffer("optional_buffer", None)
+    model.register_parameter("optional_parameter", None)
+    model.add_module("optional_module", None)
+    model.config = SimpleNamespace(_attn_implementation="eager")
+    model.eval()
+    target = object.__new__(CudaGraphTarget)
+    target.model, target.record_hidden, target._closed = model, False, False
+    target._stream = SimpleNamespace(device="cuda")
+    target._model_signature = target._signature()
+    target._model_tensors = tuple((*model.parameters(), *model.buffers()))
+    monkeypatch.setattr(torch.cuda, "current_stream", lambda device: target._stream)
+    target._check_ready()
+    return target
+
+
+@pytest.mark.parametrize("change", [
+    "parameter", "buffer", "nested_buffer", "module", "new_parameter", "new_buffer",
+    "removed_parameter", "removed_buffer", "data", "shape", "stride", "dtype", "device",
+])
+def test_storage_guard_rejects_live_model_changes_on_cpu(cpu_replay_guard, change):
+    target = cpu_replay_guard
+    model, layer = target.model, target.model[1][0]
+    if change == "parameter":
+        layer.weight = torch.nn.Parameter(layer.weight.detach().clone())
+    elif change == "buffer":
+        model.scale = model.scale.clone()
+    elif change == "nested_buffer":
+        layer.offset = layer.offset.clone()
+    elif change == "module":
+        model[1][0] = torch.nn.Linear(4, 4)
+    elif change == "new_parameter":
+        model.optional_parameter = torch.nn.Parameter(torch.ones(4))
+    elif change == "new_buffer":
+        model.optional_buffer = torch.ones(4)
+    elif change == "removed_parameter":
+        layer.bias = None
+    elif change == "removed_buffer":
+        del layer.offset
+    elif change == "data":
+        layer.weight.data = layer.weight.detach().clone()
+    elif change == "shape":
+        layer.weight.data = layer.weight.detach().view(2, 8)
+    elif change == "stride":
+        layer.weight.data = layer.weight.detach().t()
+    elif change == "dtype":
+        layer.double()
+    else:
+        layer.to("meta")
+    with pytest.raises(ValueError, match="tensor storage changed"):
+        target._check_ready()
+
+
+def test_storage_guard_accepts_shared_modules_and_inplace_values(cpu_replay_guard):
+    target = cpu_replay_guard
+    target.model.alias = target.model[1][0]
+    target._model_signature = target._signature()
+    with torch.no_grad():
+        target.model[1][0].weight.add_(1)
+        target.model.scale.zero_()
+    target._check_ready()
+    target.model.alias = torch.nn.Linear(4, 4)
+    with pytest.raises(ValueError, match="tensor storage changed"):
+        target._check_ready()
+
+
 @pytest.mark.parametrize("release", ["5.0.0", "5.15.0"])
 def test_unsupported_transformers_fails_before_preparation(tiny_target, monkeypatch, release):
     monkeypatch.setattr("dart.models.replay.version", lambda name: release)
