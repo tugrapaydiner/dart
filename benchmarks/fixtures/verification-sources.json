@@ -1,0 +1,68 @@
+{
+  "version": "dart-verification-workloads-v1",
+  "selection_seed": 307,
+  "corpus_hash": "0c26d7b8db1ab88ee6075ddc73a13dbbb5b38d90ca070be0698571039ae10003",
+  "previous_corpus_hash": "0d91404ef9cd6b0f4565689ef28ce2b4f2a3f77aa2d8e18f44cb0e3c0960697e",
+  "tokenizer_hash": "05f724bd53dff6b881473d597441548e92fc71d833f410e9e2f1aed2e9063952",
+  "model": "SupraLabs/Supra-50M-Instruct",
+  "sources": {
+    "mbpp": {
+      "title": "Mostly Basic Python Problems, hand-verified subset",
+      "authors": "Jacob Austin and colleagues, Google Research (2021)",
+      "url": "https://github.com/google-research/google-research/blob/f82046ba5aabbbb427dbfd38a254d26bff08b533/mbpp/sanitized-mbpp.json",
+      "license": "CC-BY-4.0",
+      "license_url": "https://creativecommons.org/licenses/by/4.0/",
+      "license_source": "https://huggingface.co/datasets/google-research-datasets/mbpp",
+      "normalized_sha256": "ca95deaa9a01ef0a6f439f88bcf0dd3db3563d22f22aad6cae04ebb9a8d8c8e9",
+      "source_id": "mbpp:<original task_id>",
+      "changes": "Prompt and test examples inserted into the Supra instruction format; solutions are not used. Original MBPP split ranges are retained."
+    },
+    "dolly": {
+      "title": "databricks-dolly-15k, pinned April 2023 snapshot",
+      "authors": "Databricks and its employee contributors (2023)",
+      "url": "https://github.com/databrickslabs/dolly/blob/2305eb7f2f4b3beb2379f34c6addf335b46c4b43/data/databricks-dolly-15k.jsonl",
+      "license": "CC-BY-SA-3.0",
+      "license_url": "https://creativecommons.org/licenses/by-sa/3.0/",
+      "license_source": "https://huggingface.co/datasets/databricks/databricks-dolly-15k",
+      "normalized_sha256": "e442d96b320010510c67a6cc0a86ea988a2a6f71c7570d1afbdf4fa631896e58",
+      "source_id": "dolly:<zero-based line in the pinned snapshot>",
+      "changes": "Instruction and context inserted into the Supra instruction format; responses are not used. Selected Dolly prompt adaptations remain under CC-BY-SA-3.0."
+    },
+    "generated": {
+      "title": "DART verification workload generator",
+      "module": "benchmarks.verification_workloads",
+      "seed": 307,
+      "license": "Apache-2.0",
+      "changes": "New split-separated dialogue, shell transcript, INI stanza and HTML badge templates."
+    }
+  },
+  "protocol": {
+    "splits": {
+      "test": 48,
+      "train": 8,
+      "validation": 16
+    },
+    "selection": "Input-only SHA-256 ordering with seed 307; no candidate outputs or timings used. MBPP split ranges and Dolly family split assignment from the earlier protocol are retained.",
+    "composition": "Per workload: 2 train, 4 validation and 12 test records. Code uses MBPP; instruction and structured alternate their two Dolly categories; repetition uses new generated template families.",
+    "deduplication": "No source or family shared with the earlier v0.3 corpus; unique real source families; no shared sources or families across new splits. Reject identical normalized text and word-four-gram Jaccard >= 0.5 against earlier inputs and across new splits. Lexical checks do not prove semantic independence; within-split generated families can repeat.",
+    "lengths": "Indices 0 and 6 in each non-code workload have 384-896 prompt tokens; other cases have 1-383. Code cases are short. Reserve seven lookahead positions within context 1024.",
+    "budgets": "Within each workload cycle 16, 32, 64 tokens. Natural EOS may finish early.",
+    "timed_cases": [
+      "v03-execution-test-code-00",
+      "v03-execution-test-code-01",
+      "v03-execution-test-code-02",
+      "v03-execution-test-instruction-00",
+      "v03-execution-test-instruction-01",
+      "v03-execution-test-instruction-02",
+      "v03-execution-test-repetition-00",
+      "v03-execution-test-repetition-01",
+      "v03-execution-test-repetition-02",
+      "v03-execution-test-structured-00",
+      "v03-execution-test-structured-01",
+      "v03-execution-test-structured-02"
+    ],
+    "timing_selection": "First three test cases per workload, chosen before outputs: 12 cases, four workloads and all three output budgets. Timing repetitions and configurations are frozen separately after development pilots.",
+    "train_purpose": "Execution diagnosis only; no model training.",
+    "limits": "Small decoding benchmark, not answer quality or a representative production sample. Held out from DART tuning, not guaranteed absent from Supra pretraining. Prior v0.3 corpus remains historical evidence."
+  }
+}
