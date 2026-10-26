@@ -221,6 +221,90 @@ the local model for optional real-model tests. Regressions cover full IDs,
 length/EOS, context budgets, rejection rollback, graph-input lifetime, stale
 logits, interleaved requests, scheduler consumers and incomplete evidence.
 
+## Overhead validation
+
+The later [bounded comparison](../benchmarks/results/v0.3-efficiency/study.json)
+uses 16 existing development cases, six methods and three completed fresh
+processes. It is separate from the 48-case confirmation and README charts.
+The earlier results are unchanged; these exposed inputs are not fresh held-out
+confirmation or independent reproduction.
+
+The replay guard now visits live modules once instead of recursively collecting
+named parameters and buffers separately. It still checks storage, device,
+dtype, shape and stride before every forward. N-gram lookup uses native list
+search to skip impossible suffix endings, preserving match order and scan bounds.
+Neither change adds learned parameters or persistent proposal state.
+
+| Matched path | Mean request latency |
+|---|---:|
+| Prior guard and lookup | 66.34 ms |
+| New guard only | 62.24 ms |
+| Both changes | **61.67 ms** |
+| Direct greedy | 80.76 ms |
+| HF greedy | 90.54 ms |
+| HF prompt lookup | 129.90 ms |
+
+The prior control reinstates the old guard and lookup in the same executor;
+it does not run a separate old checkout. Applicable baselines receive the
+new guard. All use the same weights, FP32, replay workspace and warm request
+boundaries. Each case has one warm-up and two timed repeats per method/process.
+
+The combined change saves **7.0%** against the prior control. Its geometric
+process ratio is **1.075 [1.011, 1.143]**, using the descriptive interval above.
+All three process means and all four workload means improve. The separate
+lookup increment averages **0.9%**, with interval **1.009 [0.974, 1.045]**;
+an additional full-request benefit from lookup alone is not established.
+
+Three case means lose to the prior control: **code 03 by 0.6%, repetition 03
+by 11.8%, and structured 03 by 5.5%**. Against direct greedy, code 03,
+instruction 01 and repetition 01 lose by 0.2%, 6.4% and 0.5%. These case
+intervals cross parity. [Every timing and interval](../benchmarks/results/v0.3-efficiency/analysis.json)
+is retained, including lookup-only losses.
+
+All **912 complete outputs** match cached original-norm HF references, including
+IDs, lengths and EOS; one unique case reaches EOS. Cached references are accepted
+only with matching model/tokenizer/config hashes and core package versions.
+Their retrieval times are not model inference measurements. The harness keeps
+one resident target instead of recomputing a second reference model. Peak
+allocation is **400,130,560 bytes**, including replay workspace and request caches;
+this is not comparable with the earlier two-model allocation.
+
+The original **120-second cap timed out** during the third process, after
+16 matching checks and before any warm-up or timed samples. The archive retains
+that attempt and its timeout. A separate **60-second bounded retry** completed
+in **44.1 seconds**, reusing the first two completed processes and kernel caches.
+Total measured launcher wall time was **164.2 seconds**, including the failed
+attempt and setup, not GPU kernel time. No timed samples were discarded.
+The 16 partial-attempt matches are reported separately from the 912 completed-run
+matches. `development_passed` is true; `confirmation_passed` remains false.
+
+Reanalyze the archived records without a model or GPU:
+
+```sh
+python -m benchmarks.overhead_bench --out benchmarks/results/v0.3-efficiency --analyze
+```
+
+To freeze and run a new comparison using the published validation references:
+
+```sh
+python -m benchmarks.overhead_bench --model "MODEL_DIR" --reference-protocol benchmarks/results/v0.3-feedback/validation/protocol.json --reference-session benchmarks/results/v0.3-feedback/validation/session-0.json --out runs/overhead
+```
+
+An explicit retry is available only when the first two processes completed and
+the third timed out before producing any timed samples. It runs that process
+once, for at most 60 seconds, retaining the original files:
+
+```sh
+python -m benchmarks.overhead_bench --model "MODEL_DIR" --out runs/overhead --resume
+```
+
+Measured code: `f7a32f74082e9d31b3bb1a42a8a1fda51543ef4e`.
+Archived analysis and public retry support: `58a9ef420f142982b6c2bf3b31423dd62989fd96`.
+Runtime code is unchanged between them. New runs fingerprint the current source;
+do not edit an archived protocol to bypass its source checks. Analysis accepts
+archived fingerprints. The package command was checked outside the checkout,
+without model inference or dependency downloads.
+
 ## Earlier execution study
 
 [Raw execution records](../benchmarks/results/v0.3-execution) and the

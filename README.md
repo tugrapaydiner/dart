@@ -7,6 +7,10 @@ an opt-in CUDA replay executor. **No extra learned weights.**
 
 ## Results
 
+**[Overhead update: 7.0% lower latency](docs/reproduce.md#overhead-validation)**
+against the matched prior implementation on 16 development cases. Three case
+means were slower. The charts below retain the separate, frozen 48-case study.
+
 **22.7% lower mean latency than direct greedy, excluding synthetic repetition.**
 
 Supra-50M · RTX 5060 Laptop · FP32 · batch one · warm requests.
