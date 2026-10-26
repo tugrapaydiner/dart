@@ -35,7 +35,7 @@ the current public wheel and all runtime/plotting dependencies in a **new venv
 without system or user packages**, entirely from cached wheels. Every installed
 distribution and project import was verified inside that environment.
 Public commands ran outside the checkout: **352 complete outputs matched on
-16 development cases**, and all four final-study SVGs reproduced byte for byte.
+16 development cases**, and the four original final-study SVGs reproduced byte for byte.
 This is same-host installation validation, not independent performance reproduction.
 
 CPU CI separately builds and installs the current wheel with fresh dependencies
@@ -65,7 +65,14 @@ Default typography is DejaVu Sans. Add `--font-file Inter-variable.ttf` for Inte
 its SHA256 is `29160a80ff49ddcab2c97711247e08b1fab27a484a329ce8b813d820dc559031`
 (weights 400/500/600, optical size 18). No font is downloaded by the command.
 [Figure data](figures/v0.3-feedback/figure-data.json) records raw evidence and
-SVG hashes. The packaged command reproduced all four SVGs byte for byte.
+SVG hashes. The current five-chart presentation was rebuilt from the same raw
+records, then reproduced byte for byte from the rebuilt wheel. No model run was
+repeated. The original four-chart installation record remains historical evidence;
+the new hashes are recorded under `presentation_revision` in
+[reproduction.json](../benchmarks/results/v0.3-feedback/reproduction.json).
+Bar whiskers show the range of three process means. The case matrix shows mean
+latency reductions; its 95% intervals remain in the raw analysis. Budget lines
+connect different cases at each budget, not a controlled output-length sweep.
 On a restricted host, set `MPLCONFIGDIR` to a writable scratch directory.
 
 ## Start with validation

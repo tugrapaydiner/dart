@@ -38,7 +38,7 @@ This descriptive 95% interval covers three process means on these fixed inputs.
 
 ## Remove unused work
 
-![Each process gets faster when unused entropy is disabled: 8.9%, 7.5% and 6.0% lower latency.](docs/figures/v0.3-feedback/feedback.svg)
+![Paired entropy-on and entropy-off latency in three processes: 92.0 to 83.9, 78.9 to 73.0 and 70.0 to 65.8 ms.](docs/figures/v0.3-feedback/feedback.svg)
 
 Fixed drafting was calculating entropy that nobody consumed. DART now skips
 that distribution calculation and host conversion when neither drafter nor
@@ -50,13 +50,13 @@ with the same optimization. Fixed4 was selected on development inputs.
 
 ## Where drafting helps
 
-![Speed ratios against direct greedy: all cases 1.47, without repetition 1.29, code 1.32, instruction 1.21, structured 1.37 and repetition 2.37.](docs/figures/v0.3-feedback/workloads.svg)
+![DART and direct greedy mean latency across code, instruction, structured and repetition workloads, with process ranges.](docs/figures/v0.3-feedback/workloads.svg)
 
 All four workload means improve. The full-set latency reduction is **31.9%**;
 repetition contributes **47.6% of saved time**. The headline excludes that workload.
 This does not imply generated text is free of repetition.
 
-![All 48 case intervals, including the two instruction cases slower than direct greedy.](docs/figures/v0.3-feedback/cases.svg)
+![Mean latency reduction for all 48 cases. Instruction cases 06 and 09 are slower by 3.7% and 11.8%.](docs/figures/v0.3-feedback/cases.svg)
 
 **46/48 case means win.** Instruction cases 06 and 09 take **3.7% and 11.8%
 longer**. Both case intervals cross parity. Five cases stop naturally at EOS.
