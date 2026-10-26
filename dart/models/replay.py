@@ -121,7 +121,7 @@ class _ReplayBlock:
 
 
 class CudaGraphTarget(TargetModel):
-    """Opt-in FP32 Llama replay, prepared before serving requests.
+    """Opt-in FP32 Llama replay for transformers >= 5.16.1.
 
     Construction includes warmup and capture; prepare with no other CUDA work
     running in the process. Calls use the preparation stream and serialize
@@ -137,8 +137,8 @@ class CudaGraphTarget(TargetModel):
             raise ValueError("replay must be a boolean")
         if torch.device(target.device).type != "cuda" or target.dtype != torch.float32:
             raise ValueError("CUDA replay requires a float32 CUDA target")
-        if not isinstance(target.model, LlamaForCausalLM) or Version(version("transformers")) < Version("5.0"):
-            raise ValueError("CUDA replay requires LlamaForCausalLM and transformers >= 5.0")
+        if not isinstance(target.model, LlamaForCausalLM) or Version(version("transformers")) < Version("5.16.1"):
+            raise ValueError("CUDA replay requires LlamaForCausalLM and transformers >= 5.16.1")
         config = target.model.config
         rope = getattr(config, "rope_parameters", None) or getattr(config, "rope_scaling", None) or {}
         if target.record_hidden or config._attn_implementation != "eager" or rope.get("rope_type", "default") != "default":

@@ -15,7 +15,8 @@ from dart.runtime.types import DecodeConfig
 from dart.verification.block_verify import verify_block_greedy
 from dart.verification.greedy import verify_greedy_reference
 
-modern_cache = pytest.mark.skipif(Version(version("transformers")) < Version("5.0"), reason="replay requires transformers 5")
+modern_cache = pytest.mark.skipif(Version(version("transformers")) < Version("5.0"), reason="snapshot tests need transformers 5")
+supported_replay = pytest.mark.skipif(Version(version("transformers")) < Version("5.16.1"), reason="replay requires transformers >= 5.16.1")
 cuda = pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA replay needs a GPU")
 
 
@@ -87,6 +88,14 @@ def test_unknown_execution_fails_before_loading_model():
         build_target({"execution": "unknown"})
 
 
+@pytest.mark.parametrize("release", ["5.0.0", "5.15.0"])
+def test_unsupported_transformers_fails_before_preparation(tiny_target, monkeypatch, release):
+    monkeypatch.setattr("dart.models.replay.version", lambda name: release)
+    target = SimpleNamespace(model=tiny_target.model, device="cuda", dtype=torch.float32, record_hidden=False)
+    with pytest.raises(ValueError, match=r"transformers >= 5\.16\.1"):
+        CudaGraphTarget(target)
+
+
 @pytest.mark.parametrize("verifier,options", [
     ("block", {"mode": "exact_sampling"}), ("block", {"mode": "approx"}),
     ("block", {"full_kv_residency": "cpu_pinned"}), ("reference", {}), ("tree", {}),
@@ -100,8 +109,8 @@ def test_engine_rejects_unsupported_replay_modes_before_prefill(verifier, option
 
 @pytest.fixture(scope="module")
 def replay_targets():
-    if not torch.cuda.is_available() or Version(version("transformers")) < Version("5.0"):
-        pytest.skip("CUDA replay requires a GPU and transformers 5")
+    if not torch.cuda.is_available() or Version(version("transformers")) < Version("5.16.1"):
+        pytest.skip("CUDA replay requires a GPU and transformers >= 5.16.1")
     original = build_tiny_target(1234, {"device": "cuda", "precision": "fp32"})
     graph = CudaGraphTarget(original, max_block_tokens=5, capacity=64)
     static = CudaGraphTarget(original, max_block_tokens=5, capacity=64, replay=False)
@@ -306,7 +315,7 @@ def test_unsupported_cache_and_tree_are_explicit(replay_target):
 
 
 @cuda
-@modern_cache
+@supported_replay
 @pytest.mark.parametrize("execution", ["static", "cuda_graph"])
 def test_factory_replay_and_close(execution):
     target = build_target({"model": "tiny:72", "device": "cuda", "precision": "fp32", "execution": execution,
