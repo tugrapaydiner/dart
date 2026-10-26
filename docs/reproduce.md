@@ -307,6 +307,25 @@ do not edit an archived protocol to bypass its source checks. Analysis accepts
 archived fingerprints. The package command was checked outside the checkout,
 without model inference or dependency downloads.
 
+## Later runtime changes
+
+The charts retain the measured revision linked in the README. The separate
+[overhead validation](#overhead-validation) measures the later 7.0% development
+improvement; it does not update or compound the 22.7% frozen-study result.
+
+Two subsequent changes improve the request path:
+
+- [Worker cleanup](https://github.com/tugrapaydiner/dart/commit/b7ab87a2bee52436d5abdb1bccc7e49d43fafef4)
+  closes and drains request workers on failure or interruption. Six regressions
+  reproduced the missing cleanup before the fix.
+- [Token validation](https://github.com/tugrapaydiner/dart/commit/ca1b597c6faf09af4907cb6a9e1d36417917d18d)
+  checks short Python integer blocks before allocation, avoiding tensor
+  reductions. Tensor inputs and longer prompts retain their existing path.
+  All 170 replay, adapter and input checks passed, including CUDA execution.
+
+Neither change adds model parameters. These maintenance changes are not a new
+held-out latency study; use the recorded revision when reproducing each result.
+
 ## Earlier execution study
 
 [Raw execution records](../benchmarks/results/v0.3-execution) and the
