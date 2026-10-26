@@ -119,7 +119,7 @@ def make_protocol(rows, tokenizer, context_limit: int, model: Path, *, split="va
 
 def validate_protocol(protocol: dict, rows, tokenizer, context_limit: int, model: Path) -> None:
     expected = make_protocol(rows, tokenizer, context_limit, model, split=protocol.get("split"))
-    if protocol != expected:
+    if digest(protocol) != digest(expected):
         raise ValueError("protocol, inputs, model, packages or source changed; freeze a new protocol before measuring")
 
 

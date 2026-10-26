@@ -60,6 +60,21 @@ def test_changed_settings_are_rejected_even_with_a_new_digest(inputs, field, val
         protocol.validate_protocol(plan, *inputs)
 
 
+@pytest.mark.parametrize("field,value", [("sessions", True), ("sessions", 1.0), ("repeats", 2.0)])
+def test_numeric_type_changes_do_not_pass_with_the_original_fingerprint(inputs, field, value):
+    plan = protocol.make_protocol(*inputs)
+    plan[field] = value
+    with pytest.raises(ValueError, match="changed"):
+        protocol.validate_protocol(plan, *inputs)
+
+
+def test_nested_numeric_type_changes_do_not_pass_with_the_original_fingerprint(inputs):
+    plan = protocol.make_protocol(*inputs)
+    plan["settings"]["threads"] = True
+    with pytest.raises(ValueError, match="changed"):
+        protocol.validate_protocol(plan, *inputs)
+
+
 @pytest.mark.parametrize("kind", ["case", "order", "model", "source", "packages", "tokenizer", "tokens"])
 def test_protocol_rejects_drift_before_any_generation(inputs, monkeypatch, kind):
     plan = protocol.make_protocol(*inputs)
