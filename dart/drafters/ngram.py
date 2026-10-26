@@ -20,6 +20,7 @@ from dart.verification.tree_verify import DraftTree
 
 class NGramDrafter:
     name = "ngram"
+    requires_entropy = False
 
     def __init__(
         self,

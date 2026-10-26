@@ -24,6 +24,7 @@ from __future__ import annotations
 import time
 import uuid
 from functools import partial
+from inspect import unwrap
 from typing import Callable, Optional
 
 import torch
@@ -215,6 +216,9 @@ class DartEngine:
                 "use verifier='block' for sampling/approx"
             )
         sampling = config.mode == "exact_sampling"
+        needs_entropy = self.scheduler is not None or any(
+            getattr(drafter, "requires_entropy", True) for drafter in self._all_drafters()
+        )
         generator = None
         if sampling:
             generator = torch.Generator(device=self.target.device)
@@ -226,6 +230,8 @@ class DartEngine:
             )
         else:
             verify_fn = self.verify
+            if not needs_entropy and unwrap(verify_fn) is verify_block_greedy:
+                verify_fn = partial(verify_fn, compute_entropy=False)
 
         run_id = uuid.uuid4().hex[:12]
         metrics = DecodeMetrics(
@@ -275,9 +281,7 @@ class DartEngine:
         # length in the scheduler (docs/design.md §10).  Seeded
         # from the prompt's last-token distribution.
         ent_ewma = 0.0
-        if sampling:
-            ent_ewma = 0.0
-        else:
+        if needs_entropy and not sampling:
             d0 = torch.softmax(logits.float(), dim=-1)
             ent_ewma = float(-(d0 * d0.clamp_min(1e-12).log()).sum())
 
