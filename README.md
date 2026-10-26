@@ -1,113 +1,115 @@
 <h1 align="center">DART v0.3</h1>
 
 <p align="center">
-  <strong>Draft several tokens. Verify them together.</strong><br>
-  Measured greedy decoding on a 51.8M-parameter model. No extra learned weights.
+  <strong>Draft several tokens. Verify them together. Replay the work.</strong><br>
+  A measured decoding study on Supra-50M. No extra learned weights.
 </p>
 
 <p align="center">
-  <a href="#decoding-speed">Results</a> ·
-  <a href="#verified-drafting">Method</a> ·
+  <a href="#matched-baselines">Results</a> ·
+  <a href="#replaying-verification">Implementation</a> ·
   <a href="docs/reproduce.md">Run &amp; reproduce</a> ·
   <a href="#evidence">Evidence</a>
 </p>
 
-| vs HF prompt lookup | Normalization change | Full-output agreement |
+| vs direct greedy | vs eager DART | Full DART outputs |
 |:---:|:---:|:---:|
-| **1.36×** | **15.7% less latency** | **24 / 24** |
-| Mean request speedup | Same DART, original vs native norm | Held-out greedy checks |
+| **12.8% less latency** | **88.1% less latency** | **48 / 48 match** |
+| Strongest matched baseline | Same fixed drafting policy | Original HF greedy reference |
 
-Supra-50M · RTX 5060 Laptop · FP32 · batch one. Timing uses 12 fixed cases,
-six repeats and six methods. These results describe one model and machine.
+51.8M parameters · RTX 5060 Laptop · FP32 · batch one · **warm requests**.
+Twelve timed cases, six methods, three fresh processes. One model and machine.
 
-## Decoding speed
+## Matched baselines
 
-![Six methods sorted by mean latency. Native DART takes 2.17 seconds, original-norm DART 2.57 seconds and HF prompt lookup 2.95 seconds.](docs/figures/v0.3/methods.svg)
+![DART takes 285 ms, direct greedy 327 ms, HF greedy 470 ms and HF prompt lookup 680 ms. All four use CUDA graph replay.](docs/figures/v0.3-execution/methods.svg)
 
-**2.17 seconds per request; 17.21 tokens/s.** DART uses four-token n-gram
-drafts. HF prompt lookup gets the same draft budget and native normalization.
-Weights, tokenizer, precision, attention backend and output limits match.
+**285 ms per request.** Every applicable control receives the same replay
+executor, weights and normalization. HF keeps its own generation loop;
+both lookup methods use a four-token draft budget and maximum n-gram four.
 
 $$
-S = \frac{\overline{T}_{\mathrm{HF\ lookup}}}{\overline{T}_{\mathrm{DART}}}
-= 1.358 \quad [1.279,\ 1.439]
+1-\frac{\overline{T}_{\mathrm{DART}}}{\overline{T}_{\mathrm{greedy}}}
+=1-\frac{285.26}{327.24}=12.8\%
 $$
 
-The 95% interval measures repeat variation on these fixed cases.
-Original-norm DART is the strongest aggregate control: **1.19×** against it.
+The paired session speed ratio is **1.147× [1.113, 1.182]**. This is a
+geometric estimate with a 95% interval; the latency reduction above uses
+arithmetic means. All three process means improve against direct greedy.
 
-## One measured change
+## Replaying verification
 
-![Native RMSNorm improves mean DART latency in all four workloads. The aggregate ratio is 1.19 with a paired interval of 1.15 to 1.23.](docs/figures/v0.3/normalization.svg)
+![Eager DART takes 2392 ms, static buffers without replay 2458 ms, and CUDA graph replay 285 ms.](docs/figures/v0.3-execution/ablation.svg)
 
-**Profiling pointed to repeated RMSNorm work.** An opt-in path uses
-[PyTorch RMSNorm](https://docs.pytorch.org/docs/2.11/generated/torch.nn.functional.rms_norm.html)
-with the original weights and epsilon. Paired held-out requests show
-**15.7% lower latency**; no custom kernel or learned drafter was added.
+Small verification calls repeatedly dispatch the model. DART prepares a
+[CUDA graph](https://docs.pytorch.org/docs/2.11/notes/cuda.html#cuda-graphs)
+for each block length, then replays it through fixed buffers.
+**Static buffers alone do not explain the gain.**
 
-This path supports FP32 Llama norms. Floating-point results can differ;
-full-output checks cover the tested inputs. GPU kernel tracing was unavailable,
-so the speed claim comes from synchronized request timing.
+The [implementation](dart/models/replay.py) adds request-owned KV snapshots,
+valid-prefix masking, rollback after rejected drafts, and retained graph
+inputs. Returned logits survive later calls. The eager path remains the default.
+CUDA graphs are an established technique; DART adapts them to block verification.
 
-## Across workloads
+**Preparation costs 19.8–24.4 seconds**, outside these warm timings.
+Peak allocation is **0.597 GiB**, including two model copies and both
+workspaces. These are shared-harness measurements, not per-method cold-start
+or memory savings. GPU kernel tracing was unavailable.
 
-![HF prompt lookup and DART latency for code, instruction, repetition and structured inputs. DART has lower mean latency in all four groups.](docs/figures/v0.3/workloads.svg)
+## Where drafting helps
 
-**Lower mean latency in all four groups.** The frozen timing set contains
-nine MBPP/Dolly inputs and three procedural inputs, with 16/32/64-token budgets.
-Selection preceded validation and test outputs.
+![Paired speed ratios against replay direct greedy: aggregate 1.15, code 1.08, instruction 1.07, repetition 1.73, structured 0.91.](docs/figures/v0.3-execution/workloads.svg)
+
+Repetition provides the largest measured benefit. **Structured requests take
+9.7% longer than direct greedy**; the code-workload interval crosses parity.
+All four workload means improve against eager DART.
 
 ## Every timed case
 
-![DART against each case's fastest control. Eleven of twelve case means improve; the 16-token structured case is slower than direct target greedy at 0.88 times.](docs/figures/v0.3/cases.svg)
+![All twelve case comparisons, including four means slower than replay direct greedy.](docs/figures/v0.3-execution/cases.svg)
 
-**11/12 case means beat every control.** The short structured case takes
-**13.9% longer than direct greedy**. All 12 means beat HF prompt lookup, but
-three case intervals include 1×. The fastest-control intervals above are
-conditional on the observed winner.
+**8/12 case means beat direct greedy.** Three structured cases and the
+64-token instruction case lose. The 32-token structured case stops naturally
+after 13 tokens; it stays in the results. No final cases or timings were removed.
 
 ## Verified drafting
 
 **Copy a draft → verify → keep the matching prefix → correct or continue.**
 
-For prefix $p$ and drafts $d_1,\ldots,d_K$, a causal target pass computes
-
 $$
-t_i = \underset{v}{\arg\max}\;P_\theta(v\mid p,d_{<i}),
+t_i=\arg\max_v P_\theta(v\mid p,d_{<i}),
 \qquad \mathrm{commit}=(d_1,\ldots,d_m,t_{m+1})
 $$
 
-Here $m$ is the matching prefix length. A mismatch gives a correction;
-a full match gives a bonus token. Accepted EOS stops immediately, without
-a bonus. Rejected cache entries are cropped; the final emitted token stays
-pending for the next pass. Output and context limits bound every round.
+Here $m$ is the matching draft prefix. A full match adds a bonus token;
+accepted EOS stops immediately. Rejected KV entries are cropped, and the
+last emitted token stays pending. Context and output budgets bound each round.
 
 ## Evidence
 
 | Check | Recorded scope |
 |:---|:---|
-| Correctness | 24 complete outputs vs original HF greedy; one natural early EOS |
-| Timing | 432 verified requests; one warm-up; six repeats; rotating method order |
-| Memory | 0.513 GiB peak PyTorch allocation, with both target copies resident |
-| Data | Frozen pilot / validation / test splits; source and family deduplication |
-| Reproduction | Public commands, raw timings, model hashes and figure inputs |
+| Outputs | 48 unique DART cases; 936 checks, warm-ups and timed outputs matched |
+| Timing | 648 timed requests; three processes; rotating order; 26.7 minutes total |
+| Fresh inputs | MBPP, Dolly and procedural cases; source/family and lexical checks |
+| Reproduction | Fresh dependency install; 76 validation matches; identical rebuilt SVGs |
+| Resources | Existing 51.8M target; zero learned parameters added; 1,024-token context |
 
-No answer-quality, CPU speed or larger-model claim. Native normalization is
-optional; agreement on these cases does not prove universal numerical
-equivalence. Independent reproduction is still pending. Earlier v0.2 results
-use different workloads and baselines, so they are not a direct version comparison.
+Intervals describe three processes on a shared laptop and fixed inputs,
+not population uncertainty. Subgroup intervals are descriptive. Numerical
+agreement on these cases is not a proof for every input. No answer-quality,
+larger-model, compiled-model or independent-reproduction claim.
 
-[Protocol](benchmarks/results/v0.3/protocol.json) ·
-[Raw timings](benchmarks/results/v0.3/benchmark.json) ·
-[Full outputs](benchmarks/results/v0.3/correctness.json) ·
-[Profiles](benchmarks/results/v0.3/profiles.json) ·
-[Pilots & failures](benchmarks/results/v0.3/validation.json)
+[Protocol & raw sessions](benchmarks/results/v0.3-execution) ·
+[Analysis](benchmarks/results/v0.3-execution/analysis.json) ·
+[Development & failures](benchmarks/results/v0.3-execution/development.json) ·
+[Reproduction record](benchmarks/results/v0.3-execution/reproduction.json)
 
 **[Run the checks, benchmark and chart commands →](docs/reproduce.md)**
 
-Built on [speculative decoding](https://arxiv.org/abs/2211.17192), with
-[HF prompt lookup](https://huggingface.co/docs/transformers/assisted_decoding)
-as the closest measured baseline.
+[Earlier normalization study](https://github.com/tugrapaydiner/dart/blob/63411869e4a8ed832c0cc4c1ecb560801625d84e/README.md)
+and [v0.2 experiments](https://github.com/tugrapaydiner/dart/tree/v0.2) use
+different protocols. They are preserved, not a direct version-speed comparison.
 
-[Apache-2.0 code](LICENSE) · [Dataset attribution](benchmarks/fixtures/v0.3-sources.json) ·
-[Cite DART](CITATION.cff) · [v0.2 experiments](https://github.com/tugrapaydiner/dart/tree/v0.2)
+[Apache-2.0 code](LICENSE) · [Dataset attribution](benchmarks/fixtures/verification-sources.json) ·
+[Cite DART](CITATION.cff)

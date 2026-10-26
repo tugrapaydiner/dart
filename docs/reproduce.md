@@ -1,200 +1,223 @@
-# Reproduce DART v0.3
+# Reproduce the execution study
 
-[Results](../README.md) · [Protocol](../benchmarks/results/v0.3/protocol.json)
+[Results](../README.md) · [Raw evidence](../benchmarks/results/v0.3-execution) ·
+[Recorded environment](../benchmarks/results/v0.3-execution/reproduction.json)
 
-Run from the repository root. Replace `MODEL_DIR` with an existing
-**HF-format Supra-50M-Instruct** directory containing weights, config and
-tokenizer. GGUF is unsupported. Model loading is local-only; the commands
-do not fetch weights. Use new report and figure paths for each run.
+Use an existing **HF-format Supra-50M-Instruct** directory as `MODEL_DIR`.
+The public commands load local files only; GGUF is unsupported. Run from the
+repository root and use new output paths. The execution benchmark requires
+CUDA, batch one, FP32 Llama with default RoPE, and Transformers ≥5.16.1.
 
 ## Install
 
-Create a fresh environment with Python 3.13 for the measured dependency set:
+The measured environment used Python 3.13.14, Windows 11 and an RTX 5060
+Laptop GPU. Create a venv without system packages:
 
 ```sh
 python -m venv .venv
 ```
 
 Activate with `.venv\Scripts\Activate.ps1` in PowerShell or
-`source .venv/bin/activate` in a POSIX shell. Install the CUDA 12.8 build used
-for the published GPU run, then the project and its test/plot dependencies:
+`source .venv/bin/activate` in a POSIX shell. Install the measured CUDA build
+first, then the recorded runtime and plotting dependencies:
 
 ```sh
 python -m pip install torch==2.11.0 --index-url https://download.pytorch.org/whl/cu128
-python -m pip install -c constraints-tested.txt ".[dev,figures]"
+python -m pip install -c constraints-tested.txt -r benchmarks/results/v0.3-execution/requirements.txt ".[dev]"
 python -m pip check
 dart --version
 ```
 
-The constraints describe the measured environment, not every supported Python
-combination. Fresh CPU CI separately builds and installs the wheel on Python
-3.10/3.12 with current dependencies. CPU checks can use `--device cpu`, but
-the v0.3 latency result is GPU-only. Native RMSNorm requires a PyTorch build
-providing `torch.nn.functional.rms_norm` and FP32 Llama norm layers.
+These dependency pins describe the measured environment, not every supported
+Python/platform combination. Fresh CPU CI separately builds and installs the
+wheel on Python 3.10/3.12 with current dependencies.
 
-## Frozen inputs
+The recorded local reproduction installed fresh distributions from cached
+wheels, with system and user packages disabled. It ran the public commands
+below from the installed wheel outside the checkout. This verified installation
+and four validation cases on the same host, not independent performance.
 
-```sh
-python -m benchmarks.workloads --model "MODEL_DIR" --out runs/v03/corpus
-```
+## Inspect the published result
 
-This loads the checked-in, licensed prompt fixture and the local tokenizer.
-It creates **8 pilot / 24 validation / 24 test** cases. The `train` split is
-used only for pilots; no model training is needed.
-
-The corpus hash must be
-`0d91404ef9cd6b0f4565689ef28ce2b4f2a3f77aa2d8e18f44cb0e3c0960697e`.
-The manifest records tokenizer hash, formatting, token counts and split hashes.
-Prompt, output and verification lookahead stay within 1,024 positions.
-
-Each validation/test split has four MBPP, eight Dolly and twelve procedural
-cases. Selection uses input-only rules, normalized family hashes and lexical
-deduplication. It does not establish semantic independence or absence from
-Supra pretraining. No test result was used for tuning or case removal.
-
-[Source revisions and licenses](../benchmarks/fixtures/v0.3-sources.json):
-MBPP by Jacob Austin and colleagues, Google Research (CC-BY-4.0); Dolly by
-Databricks and its contributors (CC-BY-SA-3.0). Dolly prompt adaptations retain
-that license. To rebuild selection from the pinned source files, add
-`--mbpp SOURCE.json --dolly SOURCE.jsonl`; their normalized hashes are checked.
-
-## Check, then time
-
-Begin with the small production validation run: four cases, one warm-up,
-two repeats, six methods. It took about 3.6 minutes on the tested machine.
+No model is needed to validate the saved records or regenerate charts:
 
 ```sh
-dart bench --model "MODEL_DIR" --device cuda --corpus runs/v03/corpus --split validation --seed 303 --per-workload 1 --warmup 1 --repeats 2 --native-rms-norm --norm-control --skip-profile --out runs/v03/smoke.json
+python -m benchmarks.execution_analysis --run benchmarks/results/v0.3-execution --out runs/execution-analysis.json
+python -m benchmarks.execution_figures --run benchmarks/results/v0.3-execution --out runs/execution-figures --previews runs/execution-previews
 ```
 
-Inspect full-output checks, timing and memory before expanding. Then run
-the frozen correctness set and timing selection without changing the policy:
+Analysis rejects missing sessions, incomplete timing matrices, changed settings,
+output mismatches and inconsistent process records. It checks archived hashes
+and outputs; it does not re-tokenize prompts or rerun archived weights. Its
+`evaluation_passed` field covers quantitative gates only. `release_complete`
+stays false because a timing analyzer cannot establish a release review.
 
-```sh
-dart check --model "MODEL_DIR" --device cuda --corpus runs/v03/corpus --split test --seed 303 --native-rms-norm --norm-control --out runs/v03/check.json
-dart bench --model "MODEL_DIR" --device cuda --corpus runs/v03/corpus --split test --seed 303 --per-workload 3 --warmup 1 --repeats 6 --native-rms-norm --norm-control --skip-profile --out runs/v03/benchmark.json
-```
-
-Correctness took **4.3 minutes**, timing **35.3 minutes** on this machine.
-The evaluation used a 55-minute timing cap. This cap is an experiment limit,
-not a CLI timeout; stop an unexpectedly long run and retain its log.
-
-`--norm-control` loads a second target with original RMSNorm. The 24-case
-check compares native DART with **original HF greedy**, including complete
-token IDs, lengths and EOS. On the 12 timing cases, every method must match
-native HF greedy before timing, during warm-up and on every measured request.
-The published timing hashes also match the separate original-reference check.
-
-| Method | Implementation |
-|---|---|
-| `hf_greedy` | Transformers `generate`, greedy |
-| `hf_prompt_lookup` | Transformers prompt lookup; four draft tokens, maximum n-gram four |
-| `target_greedy` | Direct cached target loop |
-| `target_only` | DART with drafting disabled |
-| `dart` | Four-token n-gram drafting and block verification, native RMSNorm |
-| `dart_model_norm` | Same DART policy with original model RMSNorm |
-
-All methods except the explicit original-norm control receive native RMSNorm.
-They share weights, tokenizer, FP32/eager attention, one CPU thread, EOS and
-output budgets. Hidden-state recording and scheduling are disabled.
-
-Timing selects the first three sorted IDs per workload: **9 real-source and
-3 procedural cases**, with 16/32/64-token budgets. Six methods × six repeats
-× twelve cases give **432 samples**. Method order rotates; prompt order uses
-seed 303. CUDA synchronizes before and after each measured call.
-
-The timer covers generation from token IDs through output decoding. Loading,
-input tokenization, reference checks, warm-up and progress printing are outside
-it. `.timing.json` is saved separately; `--skip-profile` keeps diagnostic
-instrumentation out of this run.
-
-Intervals use 2,000 paired bootstrap resamples of repeat means, seed 303.
-Speedup is the ratio of mean latencies, not the mean of per-case ratios.
-Intervals describe these fixed cases in one run. Fastest-control intervals
-condition on the observed winner; six repeats do not measure machine-to-machine
-or population uncertainty.
-
-## Profile the change
-
-```sh
-python -m benchmarks.profile_decode --model "MODEL_DIR" --device cuda --case v03-train-code-00 --max-new 8 --out runs/v03/profile-original.json
-python -m benchmarks.profile_decode --model "MODEL_DIR" --device cuda --case v03-train-code-00 --max-new 8 --native-rms-norm --out runs/v03/profile-native.json
-```
-
-The bounded profiler uses a pilot input, separate phase timings, a warmed
-operator trace and a separate Python profile. All outputs are checked.
-Host profiling found repeated RMSNorm work; entropy and list conversion were
-small on this input. The intervention replaces 25 known norm modules with
-PyTorch RMSNorm, preserving parameter objects, values and epsilon.
-
-The original profile recorded 200 norm calls and 205.70 ms cumulative host
-time; the native profile recorded 200 and 51.76 ms. These are **different
-instrumented sessions**, not the end-to-end speedup. CUPTI reported
-`CUPTI_ERROR_INVALID_DEVICE`, so no GPU kernel timeline was captured. Zero
-device-event values mean missing data. Raw traces may contain local paths.
-
-The release ablation is the paired `dart_model_norm` / `dart` comparison:
-**1.186× [1.146, 1.232]**, or **15.7% lower mean latency**.
-[Profiles](../benchmarks/results/v0.3/profiles.json) and
-[validation / failed pilots](../benchmarks/results/v0.3/validation.json)
-retain the evidence. No adaptive policy or learned training was added.
-
-## Rebuild the charts
-
-No model is needed for this step. Statistics are recomputed from the complete
-raw timing matrix; missing samples and mismatched output hashes are rejected.
-
-```sh
-python -m benchmarks.figures --report benchmarks/results/v0.3/benchmark.json --out runs/v03/figures --previews runs/v03/figure-previews
-```
-
-This writes four SVGs, optional PNG previews and `figure-data.json` with
-numeric values and source/figure hashes. Default typography is DejaVu Sans.
-Published figures used Matplotlib 3.11.1 and fontTools 4.63.0. To match their
-typography, add `--font-file Inter-variable.ttf` using
-[Inter](https://github.com/google/fonts/blob/main/ofl/inter/Inter%5Bopsz%2Cwght%5D.ttf)
+Default typography is DejaVu Sans. Published SVGs used Matplotlib 3.11.1,
+fontTools 4.63.0 and [Inter](https://github.com/google/fonts/blob/main/ofl/inter/Inter%5Bopsz%2Cwght%5D.ttf)
 under the [SIL Open Font License](https://github.com/google/fonts/blob/main/ofl/inter/OFL.txt).
-The file used has SHA-256
+Add `--font-file Inter-variable.ttf` to match the typography. The file hash is
 `29160a80ff49ddcab2c97711247e08b1fab27a484a329ce8b813d820dc559031`;
-weights 400/500/600, optical size 18. Fonts are not downloaded by the command.
-[Published figure data](figures/v0.3/figure-data.json) records the exact inputs.
+weights 400/500/600, optical size 18. The command does not download fonts.
+[Figure data](figures/v0.3-execution/figure-data.json) records every value and hash.
+The isolated reproduction produced byte-identical SVGs with this font.
 
-## Environment and limits
+## Run a small validation first
 
-| Item | Measured environment |
+```sh
+python -m benchmarks.execution_protocol --model "MODEL_DIR" --split validation --out runs/execution-validation-protocol.json
+python -m benchmarks.execution_bench --model "MODEL_DIR" --protocol runs/execution-validation-protocol.json --out runs/execution-validation
+python -m benchmarks.execution_analysis --run runs/execution-validation --out runs/execution-validation-analysis.json
+```
+
+This freezes four development inputs, six methods, one warm-up and two timed
+repeats in one fresh process. The run has a **300-second cap**. The fresh-install
+check completed in **145.9 seconds**: four DART checks, 24 warm-ups and 48 timed
+outputs all matched original-norm HF greedy. No final verdict or multi-session
+interval is computed for a pilot. Inspect correctness, setup and memory before
+expanding; keep logs and partial results if a run fails.
+
+## Freeze and run the final protocol
+
+```sh
+python -m benchmarks.execution_protocol --model "MODEL_DIR" --split test --out runs/execution-test-protocol.json
+python -m benchmarks.execution_bench --model "MODEL_DIR" --protocol runs/execution-test-protocol.json --out runs/execution-test
+python -m benchmarks.execution_analysis --run runs/execution-test --out runs/execution-test-analysis.json
+python -m benchmarks.execution_figures --run runs/execution-test --out runs/execution-test-figures
+```
+
+The runner launches **three fresh processes** under one **3,600-second cap**.
+The published run took **1,602.3 seconds**. It checks all 48 final cases in the
+first process and the 12 timing cases in each later process: 72 candidate checks,
+216 warm-ups and 648 timed outputs. Every generated sequence must match the full
+original-norm HF reference, including length and EOS. References must also agree
+across processes. Five unique cases ended naturally at EOS.
+
+Measured execution commit: `d7f33ee53c6a83d4b405e454ac0505cf637a3fe6`.
+Chart command commit: `4b6b3c819e26c8ed31d6d32f2819ef3c17899b01`.
+The [protocol](../benchmarks/results/v0.3-execution/protocol.json) records every
+source, model, tokenizer and core-package fingerprint. To rerun that exact
+archived protocol, use the measured execution revision in a separate checkout.
+For a newer checkout, freeze a new protocol with the commands above. The added
+chart module changes the source inventory; do not edit hashes to make an old
+protocol pass. Archived analysis and plotting accept recorded source fingerprints.
+
+## Inputs and fair controls
+
+The frozen fixture contains **8 development / 16 validation / 48 final** inputs.
+The benchmark uses the first three fixed IDs per workload for timing, with
+16/32/64-token budgets. Final prompts contain 39–588 tokens. The full corpus hash is
+`0c26d7b8db1ab88ee6075ddc73a13dbbb5b38d90ca070be0698571039ae10003`.
+
+[Attribution and source revisions](../benchmarks/fixtures/verification-sources.json)
+cover MBPP by Jacob Austin and colleagues, Google Research (CC-BY-4.0), Dolly by
+Databricks and contributors (CC-BY-SA-3.0), and procedural families. Dolly
+adaptations retain that license. Selection used input-only source/family and
+lexical deduplication against the earlier corpus. This does not establish semantic
+independence or absence from pretraining. No final output selected a policy or
+removed a case. The optional `benchmarks.verification_workloads` command can export
+the fixture or rebuild selection from the pinned MBPP/Dolly source files.
+
+| Recorded method | Execution |
 |---|---|
-| Target | Supra-50M-Instruct; 51,786,240 parameters; no added learned parameters |
-| OS / GPU | Windows 11 / RTX 5060 Laptop, 8 GiB |
-| Python / PyTorch | 3.13.14 / 2.11.0+cu128 |
-| Transformers / NumPy | 5.16.1 / 2.5.2 |
-| PyYAML / safetensors | 6.0.3 / 0.8.0 |
-| Mode | Batch one, FP32, CUDA eager, one CPU thread |
-| Memory | 550,306,816 bytes peak allocator use; two target models resident |
-| Correctness inputs | 24 cases, 46–758 prompt tokens; one natural early EOS |
+| `current_dart` | Optimized eager DART path retained from `6341186` |
+| `static_dart` | Same fixed buffers and KV copies as replay, graph disabled |
+| `replay_dart` | DART block verification with CUDA graph replay |
+| `replay_greedy` | Direct greedy loop with the same replay executor |
+| `replay_hf_greedy` | HF generation loop with the same replay executor |
+| `replay_hf_lookup` | HF prompt lookup with the same replay executor |
 
-The [protocol](../benchmarks/results/v0.3/protocol.json) records weight, config
-and tokenizer hashes. Check these before treating a new run as a reproduction.
-Measurements used commit `73ce9efb751051c9a9e22ac4f5be04229b099459`, before
-the package version changed from 0.2.0 to 0.3.0; exported metadata retains that
-original version. Export removes local model paths and decoded text, preserving
-token IDs, hashes and measurements.
+The eager control is the retained path, not an old checkout executed separately.
+All six methods use the same weights, FP32, eager attention, native RMSNorm and
+one CPU thread. HF retains its own generation loop and last-logit prefill.
+Both lookup implementations use draft length four and maximum n-gram four.
+Hidden-state recording and scheduling are disabled. Context admission reserves
+three lookahead positions for HF; prompts ending in EOS are rejected.
 
-Run `pytest -ra` and `ruff check .` for project checks. Model tests require
-`DART_TEST_MODEL` pointing to the existing local model. CPU CI skips CUDA,
-optional Triton and unavailable local-model cases; local focused CUDA and
-actual Supra checks complement it. Fresh CI tested Torch 2.14.1+cpu and
-Transformers 5.20.2; that is compatibility evidence, not GPU performance data.
+Timing covers token IDs through generation and text decoding, with CUDA
+synchronization around each request. Loading, tokenization, reference checks,
+warm-up and file writes are outside the timer. Order rotates within each session.
+Graph preparation is separate: 19.81/24.45/21.14 seconds for lengths one through
+five. Standalone greedy could prepare only length one, so this is not its
+cold-start comparison. Peak allocation is 641,507,328 bytes with two model copies,
+static/replay workspaces and request caches; it is not total VRAM or per-method memory.
 
-The cache covers committed tokens except the pending last token. Rejection
-crops speculative KV entries; accepted EOS emits no bonus. Tests cover
-rollback, length/EOS, context admission and request-state reuse. The greedy
-invariant assumes compatible numerical decisions: native norm outputs can
-differ by floating-point rounding, so the 24 matches are not a proof for every
-input. Sampling distribution tests are separate from these greedy results.
+## Why this change
 
-The 16-token structured case is **0.878× versus direct greedy**. Three intervals
-against HF prompt lookup include 1×. Memory is allocated tensor memory, not
-total VRAM or a claimed saving. This is a small decoding study, not an
-answer-quality benchmark, larger-model result or independent reproduction.
-The [archived v0.2 guide](https://github.com/tugrapaydiner/dart/blob/v0.2/docs/reproduce.md)
-covers its separate learned-drafter experiments.
+The bounded diagnostic verified CUDA placement, FP32 and warm baselines. Fixed
+verification blocks replayed much faster than eager calls with matching probe
+logits. That supported investigating dispatch overhead; it did not attribute
+individual kernels or establish an end-to-end gain.
+
+$$
+T_{request}=T_{prefill}+\sum_r(T_{draft,r}+T_{copy,r}+T_{verify,r}+T_{commit,r}),
+\qquad R\approx\frac{G}{a+1}
+$$
+
+Here $G$ is the output length and $a$ the mean accepted draft prefix. EOS and
+budget boundaries limit the approximation. Replay reduces repeated dispatch;
+copies, drafting and host decisions remain. Long contexts add copy/attention
+work, while longer outputs amortize preparation. These predictions preceded
+final outputs. Repetition's measured gain is consistent with this model, not
+a causal isolation of acceptance from all other costs.
+
+[CUDA graphs](https://docs.pytorch.org/docs/2.11/notes/cuda.html#cuda-graphs) are
+an existing PyTorch technique. DART adds fixed per-block execution, request-owned
+KV snapshots, valid-prefix masking and rejection rollback. Graph inputs stay
+alive; returned logits are cloned. Owner, device, stream and model-storage guards
+reject incompatible reuse. Factory setting `execution` selects `eager` (default),
+`static`, or `cuda_graph`. Replay supports the tested greedy path; sampling,
+tree verification, CPU offload and other dtypes are outside its scope.
+
+The static/replay ablation holds buffers and copying fixed. Static takes 2,458 ms
+versus replay's 285 ms, supporting replay as the main measured intervention.
+The remaining 12.8% aggregate benefit over replay greedy is much smaller than the
+88.1% reduction against eager DART. Neither number establishes a larger-model gain.
+
+[Development evidence](../benchmarks/results/v0.3-execution/development.json)
+retains the negative six-case prototype, rejected decision capture, its tensor
+lifetime failure, and all fixed-draft calibration results. Draft four won the
+16-case calibration by a small point estimate; other workload means lost.
+The SDPA/HF StaticCache audit timed out during its second pass, so it supplies
+no confirmed ranking. A last-logit prefill option was not selected. A tiny Inductor
+probe failed with `TritonMissing`; no compiled-model performance was measured.
+
+## Uncertainty, losses and checks
+
+Latency reductions use arithmetic means over equally weighted fixed cases.
+For each process $s$, compute $r_s=\log(\bar T_{control,s}/\bar T_{DART,s})$:
+
+$$
+S_g=e^{\bar r},\qquad
+\mathrm{CI}_{95}=\exp\left(\bar r\pm4.30265\frac{s_r}{\sqrt3}\right).
+$$
+
+This paired Student-t interval has two degrees of freedom and assumes roughly
+normal session log ratios. Three processes, not 648 requests, are the uncertainty
+units. The direct-greedy geometric ratio is 1.1468 [1.1127, 1.1820]; the arithmetic
+ratio is 1.1472. Per-case/workload intervals are descriptive, without multiplicity
+correction or population coverage. Bar whiskers show the range of session means,
+not confidence intervals.
+
+Four case means lose to replay greedy: instruction-02 and structured-00/01/02.
+Structured mean latency is 9.7% worse; the code-workload interval includes parity.
+The 32-token structured case produces 13 tokens before EOS and remains included.
+All workloads improve against eager DART. The predeclared quantitative thresholds
+passed; they are project decision rules, not a universal quality standard.
+
+Run `pytest -ra` and `ruff check .` for project checks. `DART_TEST_MODEL` can point
+to the existing local model for optional real-model checks. CI skips CUDA and
+unconfigured model cases; focused local CUDA tests and Supra checks complement it.
+Regression tests cover full IDs/length/EOS, rejection rollback, empty crop,
+context/budget boundaries, interleaved requests, stale logits, allocator reuse,
+state reset, unsupported settings and process timeouts.
+
+This was a shared laptop, not a quiet dedicated host. Read-only cache inspection
+overlapped the end of the first final session; all timings remain included.
+`CUPTI_ERROR_INVALID_DEVICE` prevented a GPU kernel timeline. Native normalization
+and graph execution can change floating-point rounding: observed full-output
+agreement is not universal numerical equivalence. There is no independent
+reproduction, answer-quality, serving-throughput or larger-model result.
+
+[Earlier normalization study and commands](https://github.com/tugrapaydiner/dart/blob/63411869e4a8ed832c0cc4c1ecb560801625d84e/docs/reproduce.md)
+and [v0.2](https://github.com/tugrapaydiner/dart/tree/v0.2) remain separate experiments.
+Their different inputs and methods are not a direct version-speed comparison.
