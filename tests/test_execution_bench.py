@@ -134,7 +134,8 @@ def test_incomplete_or_corrupt_sessions_cannot_be_accepted(clock, change):
         bench.validate_session(report, plan, 0)
 
 
-def test_supervisor_launches_each_session_separately(clock, monkeypatch, tmp_path):
+@pytest.mark.parametrize("custom_protocol", [False, True])
+def test_supervisor_launches_each_session_separately(clock, monkeypatch, tmp_path, custom_protocol):
     plan, launched = small_plan(), []
     monkeypatch.setattr(bench, "read_protocol", lambda path: copy.deepcopy(plan))
 
@@ -147,11 +148,13 @@ def test_supervisor_launches_each_session_separately(clock, monkeypatch, tmp_pat
         return {"pid": report["pid"], "returncode": 0, "timed_out": False, "elapsed_seconds": 1}
 
     monkeypatch.setattr(bench, "run_process", process)
-    result = bench.run_study(tmp_path / "plan.json", tmp_path / "model", tmp_path / "out")
+    options = {"protocol_reader": lambda path: copy.deepcopy(plan), "worker_module": "benchmarks.feedback_bench"} if custom_protocol else {}
+    result = bench.run_study(tmp_path / "plan.json", tmp_path / "model", tmp_path / "out", **options)
     assert result["status"] == "complete"
     assert [row[0] for row in launched] == [0, 1, 2]
     assert launched[0][1] > launched[1][1] > launched[2][1]
-    assert all(row[2] == [sys.executable, "-m", "benchmarks.execution_bench"] and row[3] == "1" for row in launched)
+    module = "benchmarks.feedback_bench" if custom_protocol else "benchmarks.execution_bench"
+    assert all(row[2] == [sys.executable, "-m", module] and row[3] == "1" for row in launched)
     assert len({item["pid"] for item in result["processes"]}) == 3
     with pytest.raises(FileExistsError):
         bench.run_study(tmp_path / "plan.json", tmp_path / "model", tmp_path / "out")

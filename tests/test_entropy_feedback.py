@@ -9,6 +9,7 @@ from dart.drafters.base import NullDrafter
 from dart.drafters.ngram import NGramDrafter
 from dart.runtime.engine import DartEngine
 from dart.runtime.scheduler import HeuristicScheduler, SchedulerConfig
+from dart.runtime.time_scheduler import TimeScheduler
 from dart.runtime.types import DecodeConfig
 from dart.verification.block_verify import verify_block_greedy
 from tests.conftest import build_tiny_target, random_prompt
@@ -120,6 +121,34 @@ def test_scheduler_receives_prefill_entropy_and_live_feedback():
             assert scheduler.states[0] == pytest.approx(entropy)
             assert all(value > 0 for value in scheduler.entropies)
             assert scheduler.states[1] == pytest.approx(0.7 * entropy + 0.3 * scheduler.entropies[0])
+
+
+def test_time_scheduler_only_requests_entropy_for_an_active_gate():
+    target = build_tiny_target()
+    target.eos_token_ids = frozenset()
+    prompt = random_prompt(415, 10)
+    expected = target.greedy_generate(prompt, 8)
+    config = SchedulerConfig(available_lanes=["ngram", "target_only"])
+    scheduler = TimeScheduler(config)
+    with DartEngine(target, lanes={"ngram": NGramDrafter(), "target_only": NullDrafter()}, scheduler=scheduler) as engine:
+        for threshold in (float("inf"), 0.0, float("inf")):
+            config.entropy_gate_threshold = threshold
+            with patch.object(torch, "softmax", wraps=torch.softmax) as entropy:
+                actual = engine.generate(prompt, DecodeConfig(max_new_tokens=8))
+            assert actual.token_ids == expected
+            assert (entropy.call_count > 0) == (threshold == 0)
+
+
+def test_entropy_consumer_still_gets_feedback_with_a_time_scheduler():
+    target = build_tiny_target()
+    target.eos_token_ids = frozenset()
+    drafter = RecordingDrafter()
+    scheduler = TimeScheduler(SchedulerConfig(available_lanes=[drafter.name]))
+    prompt = random_prompt(416, 10)
+    with DartEngine(target, lanes={drafter.name: drafter}, scheduler=scheduler) as engine:
+        actual = engine.generate(prompt, DecodeConfig(max_new_tokens=8))
+    assert actual.token_ids == target.greedy_generate(prompt, 8)
+    assert drafter.entropies and all(value > 0 for value in drafter.entropies)
 
 
 @pytest.mark.parametrize("wrapped", [False, True])

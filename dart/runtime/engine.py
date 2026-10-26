@@ -216,7 +216,7 @@ class DartEngine:
                 "use verifier='block' for sampling/approx"
             )
         sampling = config.mode == "exact_sampling"
-        needs_entropy = self.scheduler is not None or any(
+        needs_entropy = (self.scheduler is not None and getattr(self.scheduler, "requires_entropy", True)) or any(
             getattr(drafter, "requires_entropy", True) for drafter in self._all_drafters()
         )
         generator = None

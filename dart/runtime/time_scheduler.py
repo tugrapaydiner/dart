@@ -11,6 +11,10 @@ class TimeScheduler(HeuristicScheduler):
 
     requires_round_timing = True
 
+    @property
+    def requires_entropy(self) -> bool:
+        return self.config.entropy_gate_threshold != float("inf")
+
     def __init__(self, config: SchedulerConfig, *, retry_interval: int = 16,
                  warmup_rounds: int = 2, min_time_saving: float = 0.05) -> None:
         for name, value in (("retry_interval", retry_interval), ("warmup_rounds", warmup_rounds)):

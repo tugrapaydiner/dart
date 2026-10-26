@@ -248,9 +248,11 @@ def run_process(command: list[str], log: Path, timeout: float, env: dict) -> dic
             "elapsed_seconds": time.perf_counter() - started}
 
 
-def run_study(plan_path: Path, model: Path, output: Path) -> dict:
+def run_study(plan_path: Path, model: Path, output: Path, *, protocol_reader=None,
+              worker_module="benchmarks.execution_bench") -> dict:
     started = time.perf_counter()
-    plan = read_protocol(plan_path)
+    protocol_reader = protocol_reader or read_protocol
+    plan = protocol_reader(plan_path)
     model = model.resolve()
     output = output.resolve()
     output.mkdir(parents=True, exist_ok=False)
@@ -270,7 +272,7 @@ def run_study(plan_path: Path, model: Path, output: Path) -> dict:
             if remaining <= 0:
                 raise TimeoutError("execution study reached its total time limit")
             print(f"Session {session + 1}/{plan['sessions']}; {remaining:.0f}s left", flush=True)
-            command = [sys.executable, "-m", "benchmarks.execution_bench", "--model", str(model),
+            command = [sys.executable, "-m", worker_module, "--model", str(model),
                        "--protocol", str(output / "protocol.json"), "--out", str(output), "--session", str(session)]
             process = run_process(command, output / f"session-{session}.log", remaining, env)
             result["processes"].append({"session": session, **process})
@@ -293,7 +295,7 @@ def run_study(plan_path: Path, model: Path, output: Path) -> dict:
                 frozen_references = references
             elif any(tokens != frozen_references[name] for name, tokens in references.items()):
                 raise ValueError("reference outputs changed between processes")
-        read_protocol(output / "protocol.json")
+        protocol_reader(output / "protocol.json")
         if time.perf_counter() - started > plan["timeout_seconds"]:
             raise TimeoutError("execution study reached its total time limit")
         result["status"] = "complete"

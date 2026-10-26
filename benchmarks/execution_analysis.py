@@ -11,7 +11,6 @@ from statistics import fmean, stdev
 
 from benchmarks.execution_bench import validate_session
 from benchmarks.execution_protocol import (
-    BASELINES,
     METHODS,
     MODEL_FILES,
     PACKAGES,
@@ -39,20 +38,20 @@ def hash_string(value) -> bool:
     return isinstance(value, str) and len(value) == 64 and all(letter in "0123456789abcdef" for letter in value)
 
 
-def validate_archive_protocol(plan: dict) -> None:
+def validate_archive_protocol(plan: dict, *, settings=None, rows=None, check_ids=None, required_sources=()) -> None:
     if not isinstance(plan, dict):
         raise ValueError("execution protocol must be an object")
     body = {key: value for key, value in plan.items() if key != "protocol_hash"}
     if plan.get("protocol_hash") != digest(body):
         raise ValueError("protocol fingerprint changed")
     context = number(plan["context_limit"], "context limit", minimum=1, integer=True)
-    fixed = protocol_settings(plan["split"], context)
+    fixed = (settings or protocol_settings)(plan["split"], context)
     fields = set(fixed) | {"cases", "corpus_hash", "tokenizer_hash", "model_hashes", "source_hashes", "packages", "protocol_hash"}
     if set(plan) != fields or digest({key: plan.get(key) for key in fixed}) != digest(fixed):
         raise ValueError("protocol settings or acceptance gates changed")
-    rows = read_records(PROMPTS)
+    rows = read_records(PROMPTS) if rows is None else rows
     records = {row.id: row for row in rows}
-    checks, _ = selected_ids(plan["split"])
+    checks = selected_ids(plan["split"])[0] if check_ids is None else check_ids
     if plan["corpus_hash"] != corpus_hash(rows) or [case["id"] for case in plan["cases"]] != checks:
         raise ValueError("protocol corpus or case selection changed")
     for case in plan["cases"]:
@@ -70,7 +69,7 @@ def validate_archive_protocol(plan: dict) -> None:
         raise ValueError("model or tokenizer fingerprints are incomplete")
     sources = plan["source_hashes"]
     required = {"benchmarks/execution_protocol.py", "benchmarks/execution_bench.py", "benchmarks/hf_replay.py",
-                "dart/models/replay.py", "dart/runtime/engine.py"}
+                "dart/models/replay.py", "dart/runtime/engine.py", *required_sources}
     if not isinstance(sources, dict) or not required <= set(sources):
         raise ValueError("execution source fingerprints are incomplete")
     for name, value in sources.items():
@@ -82,8 +81,9 @@ def validate_archive_protocol(plan: dict) -> None:
         raise ValueError("package versions are incomplete")
 
 
-def validate_study(plan: dict, status: dict, reports: list[dict]) -> None:
-    validate_archive_protocol(plan)
+def validate_study(plan: dict, status: dict, reports: list[dict], *, protocol_validator=None,
+                   setup_names=("reference_model", "native_model", "replay", "static")) -> None:
+    (protocol_validator or validate_archive_protocol)(plan)
     if (status.get("schema") != "dart-execution-run-v1" or status.get("status") != "complete"
             or status.get("protocol_hash") != plan["protocol_hash"]
             or digest(status.get("timeout_seconds")) != digest(plan["timeout_seconds"])):
@@ -137,7 +137,7 @@ def validate_study(plan: dict, status: dict, reports: list[dict]) -> None:
                 or report["output_hash_schema"] != "canonical-json-sha256"):
             raise ValueError("session memory or output scope changed")
         setup = report["setup_ms"]
-        if set(setup) != {"reference_model", "native_model", "replay", "static"}:
+        if set(setup) != set(setup_names):
             raise ValueError("backend preparation measurements are incomplete")
         for value in setup.values():
             number(value, "backend preparation time")
@@ -172,15 +172,16 @@ def paired_ratio(control: list[float], candidate: list[float]) -> dict:
 
 
 def summarize_group(plan: dict, reports: list[dict], ids: list[str]) -> dict:
+    methods = plan["methods"]
     sessions = []
     for report in reports:
         samples = [row for row in report["samples"] if row["case"] in ids]
-        sessions.append({method: fmean(row["latency_ms"] for row in samples if row["method"] == method) for method in METHODS})
-    means = {method: fmean(session[method] for session in sessions) for method in METHODS}
+        sessions.append({method: fmean(row["latency_ms"] for row in samples if row["method"] == method) for method in methods})
+    means = {method: fmean(session[method] for session in sessions) for method in methods}
     candidate = plan["candidate"]
     comparisons = {method: paired_ratio([row[method] for row in sessions], [row[candidate] for row in sessions])
-                   for method in METHODS if method != candidate}
-    fastest = min(BASELINES, key=means.__getitem__)
+                   for method in methods if method != candidate}
+    fastest = min(plan["baselines"], key=means.__getitem__)
     return {"cases": ids, "mean_latency_ms": means, "session_mean_latency_ms": sessions,
             "candidate_comparisons": comparisons, "fastest_matched_baseline": fastest,
             "candidate_beats_fastest_baseline": means[candidate] < means[fastest]}
