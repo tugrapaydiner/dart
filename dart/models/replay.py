@@ -202,6 +202,11 @@ class CudaGraphTarget(TargetModel):
             raise ValueError(f"sequence length {length} exceeds replay capacity {self.capacity}")
 
     def _ids(self, tokens):
+        short_block = isinstance(tokens, (list, tuple)) and 0 < len(tokens) <= self.max_block_tokens
+        if short_block and all(type(token) is int for token in tokens):
+            if min(tokens) < 0 or max(tokens) >= self.model.config.vocab_size:
+                raise ValueError("token id is outside the model vocabulary")
+            return torch.tensor([tokens], dtype=torch.long, device=self.device)
         values = tokens.to(dtype=torch.long) if isinstance(tokens, torch.Tensor) else torch.as_tensor(tokens, dtype=torch.long)
         if values.ndim == 1:
             values = values.unsqueeze(0)
