@@ -55,6 +55,10 @@ class ReplayCache(DynamicCache):
         return self.length + query_length, 0
 
     def crop(self, tokens_to_remove):
+        if isinstance(tokens_to_remove, torch.Tensor):
+            if tokens_to_remove.ndim != 0 or tokens_to_remove.dtype not in (torch.int32, torch.int64):
+                raise ValueError("replay crop requires an integer scalar")
+            tokens_to_remove = tokens_to_remove.item()
         if type(tokens_to_remove) is not int or not -self.length <= tokens_to_remove <= 0:
             raise ValueError("replay crop requires a negative removal count within the cache")
         self.length += tokens_to_remove  # Rejected slots stay masked until overwritten.

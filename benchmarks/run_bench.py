@@ -199,6 +199,12 @@ def build_hf_method(
         settings.update(prompt_lookup_num_tokens=prompt_lookup_num_tokens,
                         max_matching_ngram_size=max_matching_ngram_size)
 
+    replay_generate = None
+    if getattr(target, "uses_replay_cache", False):
+        from benchmarks.hf_replay import build_replay_generate
+
+        replay_generate = build_replay_generate(target, settings)
+
     @torch.inference_mode()
     def generate(prompt):
         target.validate_generation(len(prompt), max_new_tokens)
@@ -206,8 +212,11 @@ def build_hf_method(
             raise ValueError("HF prompt lookup requires a prompt that does not end in EOS")
         if prompt_lookup_num_tokens is not None and max_new_tokens > 1:
             target.validate_generation(len(prompt), max_new_tokens + prompt_lookup_num_tokens - 1)  # HF may score past the output budget.
-        ids = torch.tensor([prompt], device=target.device)
-        output = target.model.generate(ids, attention_mask=torch.ones_like(ids), **settings)  # Every prompt token is real input.
+        if replay_generate is not None:
+            output = replay_generate(prompt)
+        else:
+            ids = torch.tensor([prompt], device=target.device)
+            output = target.model.generate(ids, attention_mask=torch.ones_like(ids), **settings)  # Every prompt token is real input.
         token_ids = output[0, len(prompt):].tolist()
         text = target.tokenizer.decode(token_ids, skip_special_tokens=False) if target.tokenizer else None
         return GenerationOutput(token_ids, text, {})
