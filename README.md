@@ -1,164 +1,113 @@
-<h1 align="center">DART v0.2</h1>
+<h1 align="center">DART v0.3</h1>
 
 <p align="center">
   <strong>Draft several tokens. Verify them together.</strong><br>
-  Faster greedy decoding on Supra-50M, with the target deciding what gets emitted.
+  Measured greedy decoding on a 51.8M-parameter model. No extra learned weights.
 </p>
 
 <p align="center">
   <a href="#decoding-speed">Results</a> ·
   <a href="#verified-drafting">Method</a> ·
   <a href="docs/reproduce.md">Run &amp; reproduce</a> ·
-  <a href="#measurement-notes">Evidence</a>
+  <a href="#evidence">Evidence</a>
 </p>
 
-| GPU speedup | CPU speedup | Full-output agreement |
+| vs HF prompt lookup | Normalization change | Full-output agreement |
 |:---:|:---:|:---:|
-| **2.18×** | **1.46×** | **128 / 128** |
-| RTX 5060 Laptop | One CPU thread | Test prompts, per device |
+| **1.36×** | **15.7% less latency** | **24 / 24** |
+| Mean request speedup | Same DART, original vs native norm | Held-out greedy checks |
 
-Speedup is against the fastest of three measured baselines. Agreement compares
-complete greedy token sequences, lengths and EOS with Hugging Face.
-One model, one machine, fixed procedural prompts.
-
----
+Supra-50M · RTX 5060 Laptop · FP32 · batch one. Timing uses 12 fixed cases,
+six repeats and six methods. These results describe one model and machine.
 
 ## Decoding speed
 
-![Throughput of HF generate, direct target greedy, target-only engine and DART n-gram on CPU and GPU.](docs/figures/v0.2/throughput.svg)
+![Six methods sorted by mean latency. Native DART takes 2.17 seconds, original-norm DART 2.57 seconds and HF prompt lookup 2.95 seconds.](docs/figures/v0.3/methods.svg)
 
-**DART reaches 39.6 tokens/s on GPU and 27.4 tokens/s on CPU.** All four
-methods use the same weights, prompts and output limits. The release preset
-copies four-token n-gram drafts from the context; it needs no learned drafter.
-
-$$
-S = \frac{\min_{b\in\mathcal{B}}\overline{T}_b}{\overline{T}_{\mathrm{DART}}}
-$$
-
-Here, $\mathcal{B}$ contains HF generate, the direct target greedy loop and the
-target-only engine. $\overline{T}$ is mean request latency. Paired 95% intervals
-are **2.155–2.212× GPU** and **1.459–1.469× CPU**, conditional on these fixed cases.
-
-## Verified drafting
-
-**Draft → verify → keep the matching prefix → correct or continue.**
-
-For a prefix $p$ and draft tokens $d_1,\ldots,d_K$, one causal target pass
-computes the next-token choices. Let $m$ be the number of consecutive draft
-tokens that match from the start:
+**2.17 seconds per request; 17.21 tokens/s.** DART uses four-token n-gram
+drafts. HF prompt lookup gets the same draft budget and native normalization.
+Weights, tokenizer, precision, attention backend and output limits match.
 
 $$
-t_i = \underset{v}{\arg\max}\;P_\theta(v\mid p,d_{<i})
+S = \frac{\overline{T}_{\mathrm{HF\ lookup}}}{\overline{T}_{\mathrm{DART}}}
+= 1.358 \quad [1.279,\ 1.439]
 $$
 
-$$
-\text{commit} = (d_1,\ldots,d_m,t_{m+1})
-$$
+The 95% interval measures repeat variation on these fixed cases.
+Original-norm DART is the strongest aggregate control: **1.19×** against it.
 
-A mismatch supplies the target's correction. A full match supplies a bonus
-token: with $K=4$, a verification pass can emit up to five tokens. An accepted
-EOS ends the sequence without an extra token; output and context limits also
-bound each round. Rejected cache entries are removed before decoding continues.
+## One measured change
+
+![Native RMSNorm improves mean DART latency in all four workloads. The aggregate ratio is 1.19 with a paired interval of 1.15 to 1.23.](docs/figures/v0.3/normalization.svg)
+
+**Profiling pointed to repeated RMSNorm work.** An opt-in path uses
+[PyTorch RMSNorm](https://docs.pytorch.org/docs/2.11/generated/torch.nn.functional.rms_norm.html)
+with the original weights and epsilon. Paired held-out requests show
+**15.7% lower latency**; no custom kernel or learned drafter was added.
+
+This path supports FP32 Llama norms. Floating-point results can differ;
+full-output checks cover the tested inputs. GPU kernel tracing was unavailable,
+so the speed claim comes from synchronized request timing.
 
 ## Across workloads
 
-![Direct target greedy and DART n-gram latency across code, instruction, repetition and structured workloads on CPU and GPU.](docs/figures/v0.2/workload-comparison.svg)
+![HF prompt lookup and DART latency for code, instruction, repetition and structured inputs. DART has lower mean latency in all four groups.](docs/figures/v0.3/workloads.svg)
 
-**Lower mean latency in all four workload groups.** Each pair compares direct
-target greedy with DART on the same cases. Bars show mean latency; whiskers show
-95% intervals. These are procedural workloads, and repeated output patterns
-favor n-gram copying.
+**Lower mean latency in all four groups.** The frozen timing set contains
+nine MBPP/Dolly inputs and three procedural inputs, with 16/32/64-token budgets.
+Selection preceded validation and test outputs.
 
-## Every test case
+## Every timed case
 
-![DART speedup against each case's fastest measured baseline. GPU has 24 of 24 cases above 1; CPU has 20 of 24.](docs/figures/v0.2/case-speedups.svg)
+![DART against each case's fastest control. Eleven of twelve case means improve; the 16-token structured case is slower than direct target greedy at 0.88 times.](docs/figures/v0.3/cases.svg)
 
-**24/24 GPU cases and 20/24 CPU cases have lower observed mean latency.** Each
-point uses that case's fastest baseline over ten repeats. Four CPU slowdowns
-remain visible. The 1× line means equal latency; these counts do not establish
-statistical significance for individual cases.
+**11/12 case means beat every control.** The short structured case takes
+**13.9% longer than direct greedy**. All 12 means beat HF prompt lookup, but
+three case intervals include 1×. The fastest-control intervals above are
+conditional on the observed winner.
 
-## Output budgets
+## Verified drafting
 
-![HF generate and DART latency at 32, 64 and 128-token output budgets, with matching CPU and GPU scales.](docs/figures/v0.2/latency-by-budget.svg)
+**Copy a draft → verify → keep the matching prefix → correct or continue.**
 
-**The gap grows with the output budget.** This chart compares DART with HF
-generate at 32, 64 and 128 tokens. Against the fastest measured baseline,
-the 32-token CPU result is **1.21×**, below the **1.25×** target.
-Actual output length can be shorter when the model emits EOS.
-
-## GPU memory
-
-![Peak allocated GPU memory: HF generate at 215.8 MiB; direct target greedy, target-only engine and DART each round to 227.8 MiB.](docs/figures/v0.2/gpu-memory.svg)
-
-**DART uses 227.8 MiB; HF generate uses 215.8 MiB.** DART and the other two
-baselines round to the same peak. This measures PyTorch allocations with the
-shared target and both engine instances resident. It excludes total device
-memory use and does not demonstrate a memory saving.
-
-## Where request time goes
-
-![Separate diagnostic request times, split into setup and prefill versus decoding, for all four methods on CPU and GPU.](docs/figures/v0.2/request-profile.svg)
+For prefix $p$ and drafts $d_1,\ldots,d_K$, a causal target pass computes
 
 $$
-T_{\mathrm{request}} = T_{\mathrm{setup}} + T_{\mathrm{prefill}} + T_{\mathrm{decode}}
+t_i = \underset{v}{\arg\max}\;P_\theta(v\mid p,d_{<i}),
+\qquad \mathrm{commit}=(d_1,\ldots,d_m,t_{m+1})
 $$
 
-**The solid bars show decoding; the hatched bars show setup and prefill.**
-Drafting and verification are included within decoding. These are separate
-diagnostic requests with phase synchronization: 24 cases, two repeats.
-They are excluded from the headline speedup calculation.
+Here $m$ is the matching prefix length. A mismatch gives a correction;
+a full match gives a bonus token. Accepted EOS stops immediately, without
+a bonus. Rejected cache entries are cropped; the final emitted token stays
+pending for the next pass. Output and context limits bound every round.
 
-## Learned drafting
+## Evidence
 
-A **2.08M-parameter** compact drafter improved held-out draft acceptance from
-**5.76% to 12.45%** after training with one seed:
-
-$$
-a = \frac{N_{\mathrm{accepted\ draft\ tokens}}}{N_{\mathrm{proposed\ draft\ tokens}}}
-$$
-
-![Nine drafting policies ordered by GPU latency, with aligned CPU and GPU bars. DART n-gram is fastest on both devices.](docs/figures/v0.2/policy-comparison.svg)
-
-**Higher acceptance did not establish a learned-policy speedup.** In this
-separate four-case, 32-token validation pilot, no learned policy beat the
-fastest target-only baseline in the aggregate. N-gram drafting was fastest
-on both devices. Whiskers show 95% intervals; the **10% repair latency target
-was missed**.
-
-## Measurement notes
-
-| Setting | Scope |
+| Check | Recorded scope |
 |:---|:---|
-| Target | Supra-50M-Instruct · 51.8M parameters · local HF format |
-| Execution | One sequence · FP32 · CPU/SDPA or CUDA/eager · one CPU thread |
-| Context | Prompt + output + verification lookahead ≤ 1,024 tokens |
-| Timing | 24 test cases · 2 warm-ups · 10 repeats · rotating method order |
-| Output budgets | 32 / 64 / 128 tokens; timing prompts are 30–101 tokens |
-| Correctness | 128/128 full outputs per device; all 960 timed and 192 profiled outputs also match |
+| Correctness | 24 complete outputs vs original HF greedy; one natural early EOS |
+| Timing | 432 verified requests; one warm-up; six repeats; rotating method order |
+| Memory | 0.513 GiB peak PyTorch allocation, with both target copies resident |
+| Data | Frozen pilot / validation / test splits; source and family deduplication |
+| Reproduction | Public commands, raw timings, model hashes and figure inputs |
 
-CUDA timings are synchronized. Loading, tokenization, correctness checks and
-warm-up are excluded. Only the completed GPU retry contributes latency results;
-the interrupted earlier attempt remains in the run history.
+No answer-quality, CPU speed or larger-model claim. Native normalization is
+optional; agreement on these cases does not prove universal numerical
+equivalence. Independent reproduction is still pending. Earlier v0.2 results
+use different workloads and baselines, so they are not a direct version comparison.
 
-The evidence covers one model and machine, not answer quality or general
-deployment performance. CUDA bfloat16/eager failed a token/EOS comparison and
-is excluded. Learned-policy studies use one training seed; repair and the
-scheduler were slower, and failure-mask training reduced acceptance.
+[Protocol](benchmarks/results/v0.3/protocol.json) ·
+[Raw timings](benchmarks/results/v0.3/benchmark.json) ·
+[Full outputs](benchmarks/results/v0.3/correctness.json) ·
+[Profiles](benchmarks/results/v0.3/profiles.json) ·
+[Pilots & failures](benchmarks/results/v0.3/validation.json)
 
-[Protocol](benchmarks/results/v0.2/protocol.json) ·
-[All results](benchmarks/results/v0.2/summary.json) ·
-[Outputs](benchmarks/results/v0.2/correctness.json) ·
-[Raw timings](benchmarks/results/v0.2/timings.json) ·
-[Pilots & failures](benchmarks/results/v0.2/validation-pilots.json)
+**[Run the checks, benchmark and chart commands →](docs/reproduce.md)**
 
-**[Run locally, train and reproduce the measurements →](docs/reproduce.md)**
+Built on [speculative decoding](https://arxiv.org/abs/2211.17192), with
+[HF prompt lookup](https://huggingface.co/docs/transformers/assisted_decoding)
+as the closest measured baseline.
 
----
-
-Built on [speculative decoding](https://arxiv.org/abs/2211.17192).
-Repair uses token anchors; it does not reproduce
-[ReTrace's hidden-state repair](https://arxiv.org/abs/2608.29748v2).
-
-[Apache-2.0](LICENSE) · [Cite DART](CITATION.cff) · Model weights and trained
-checkpoints are not included in the v0.2 package.
+[Apache-2.0 code](LICENSE) · [Dataset attribution](benchmarks/fixtures/v0.3-sources.json) ·
+[Cite DART](CITATION.cff) · [v0.2 experiments](https://github.com/tugrapaydiner/dart/tree/v0.2)
