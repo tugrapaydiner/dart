@@ -6,6 +6,10 @@ from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 
 
+class InvalidCheckCase(ValueError):
+    """Input cannot be evaluated as a valid comparison case."""
+
+
 @dataclass(frozen=True)
 class GenerationCase:
     name: str
@@ -164,7 +168,7 @@ def hf_decoder(model) -> Decoder:
     def decode(case: GenerationCase) -> list[int]:
         limit = model.config.max_position_embeddings
         if len(case.prompt) + case.max_new_tokens > limit:
-            raise ValueError("case exceeds the model context limit")
+            raise InvalidCheckCase("case exceeds the model context limit")
         if case.max_new_tokens == 0:
             return []
         ids = torch.tensor([case.prompt], device=model.device, dtype=torch.long)

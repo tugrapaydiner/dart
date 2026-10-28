@@ -8,7 +8,12 @@ from dataclasses import dataclass
 import torch
 
 from dart.verification.block_verify import verify_block_greedy
-from dart.verification.differential import CheckFailure, GenerationCase, hf_decoder
+from dart.verification.differential import (
+    CheckFailure,
+    GenerationCase,
+    InvalidCheckCase,
+    hf_decoder,
+)
 from dart.verification.tree_verify import DraftTree, verify_tree_greedy
 
 
@@ -110,18 +115,18 @@ def _round_expectation(target, reference_model, case, verifier):
     if verifier not in {"block", "tree"}:
         raise ValueError("verifier must be block or tree")
     if verifier == "block" and case.parents != tuple(range(-1, len(case.drafts) - 1)):
-        raise ValueError("block verification requires a chain")
+        raise InvalidCheckCase("block verification requires a chain")
     tokens = (*case.prefix, case.pending, *case.drafts)
     vocab = min(target.model.config.vocab_size, reference_model.config.vocab_size)
     if max(tokens) >= vocab:
-        raise ValueError("case contains a token outside the model vocabulary")
+        raise InvalidCheckCase("case contains a token outside the model vocabulary")
     depths = []
     for parent in case.parents:
         depths.append(0 if parent == -1 else depths[parent] + 1)
     lookahead = max(depths, default=-1) + 2
     context = min(target.model.config.max_position_embeddings, reference_model.config.max_position_embeddings)
     if len(case.prefix) + 1 + lookahead > context:
-        raise ValueError("case and reference lookahead exceed the context limit")
+        raise InvalidCheckCase("case and reference lookahead exceed the context limit")
     eos = reference_model.generation_config.eos_token_id
     if eos is None:
         eos = reference_model.config.eos_token_id
@@ -165,7 +170,7 @@ def check_verifier_state(
     Reference errors propagate; candidate exceptions are reported as failures.
     """
     if not case.prefix:
-        raise ValueError("standalone round checks need a nonempty prefill prefix")
+        raise InvalidCheckCase("standalone round checks need a nonempty prefill prefix")
     _validate_tolerances(atol, rtol)
     expected, accepted = _round_expectation(target, reference_model, case, verifier)
     cached_tokens = (*case.prefix, case.pending, *expected[:-1])

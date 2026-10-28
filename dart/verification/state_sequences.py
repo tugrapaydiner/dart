@@ -8,7 +8,7 @@ from dataclasses import dataclass
 import torch
 
 from dart.verification.block_verify import verify_block_greedy
-from dart.verification.differential import CheckFailure
+from dart.verification.differential import CheckFailure, InvalidCheckCase
 from dart.verification.state_checks import (
     RoundCase,
     _cache_failures,
@@ -88,18 +88,18 @@ class StateSequenceCheck:
 
 def _validate_operations(operations):
     if any(not isinstance(operation, StateOperation) for operation in operations):
-        raise ValueError("provide StateOperation values")
+        raise InvalidCheckCase("provide StateOperation values")
     if len({operation.request for operation in operations}) > 8:
-        raise ValueError("at most eight request names are allowed")
+        raise InvalidCheckCase("at most eight request names are allowed")
     live = set()
     for operation in operations:
         if operation.action == "prefill":
             if operation.request in live:
-                raise ValueError("release a request before prefilling it again")
+                raise InvalidCheckCase("release a request before prefilling it again")
             if operation.expect_error is None:
                 live.add(operation.request)
         elif operation.request not in live:
-            raise ValueError("operation uses a request that is not live")
+            raise InvalidCheckCase("operation uses a request that is not live")
         elif operation.action == "release":
             live.remove(operation.request)
 
@@ -115,7 +115,7 @@ def check_state_sequence(target, reference_model, operations: Sequence[StateOper
     request state; it does not call a backend's close method. No files are written.
     """
     if not isinstance(operations, Sequence) or not 1 <= len(operations) <= 64:
-        raise ValueError("provide a sequence of between 1 and 64 operations")
+        raise InvalidCheckCase("provide a sequence of between 1 and 64 operations")
     operations = tuple(operations)
     _validate_operations(operations)
     _validate_tolerances(atol, rtol)
@@ -141,10 +141,10 @@ def check_state_sequence(target, reference_model, operations: Sequence[StateOper
             reference_available = action == "prefill" or request in prefixes
             if operation.expect_error is None and reference_available:
                 if max(operation.tokens, default=0) >= vocab:
-                    raise ValueError("operation contains a token outside the model vocabulary")
+                    raise InvalidCheckCase("operation contains a token outside the model vocabulary")
                 if action == "crop":
                     if not 0 <= operation.length <= len(prefix):
-                        raise ValueError("crop length is outside the reference prefix")
+                        raise InvalidCheckCase("crop length is outside the reference prefix")
                     next_prefix = prefix[:operation.length]
                 elif action in {"prefill", "forward"}:
                     next_prefix = operation.tokens if action == "prefill" else prefix + operation.tokens
@@ -154,7 +154,7 @@ def check_state_sequence(target, reference_model, operations: Sequence[StateOper
                     expected, accepted = _round_expectation(target, reference_model, case, action)
                     next_prefix = (*prefix, operation.tokens[0], *expected[:-1])
                 if len(next_prefix) > context:
-                    raise ValueError("operation exceeds the reference context limit")
+                    raise InvalidCheckCase("operation exceeds the reference context limit")
                 if next_prefix:
                     output = _reference_forward(reference_model, next_prefix)
                     reference_cache = output.past_key_values
