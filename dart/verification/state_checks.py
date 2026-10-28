@@ -23,9 +23,10 @@ class RoundCase:
     def __post_init__(self) -> None:
         for name in ("prefix", "drafts", "parents"):
             object.__setattr__(self, name, tuple(getattr(self, name)))
-        GenerationCase(self.name, self.prefix, 0)
-        if any(type(token) is not int or token < 0 for token in (self.pending, *self.drafts)):
-            raise ValueError("pending and drafts must be nonnegative integer token IDs")
+        if not isinstance(self.name, str) or not self.name:
+            raise ValueError("case name must be nonempty")
+        if any(type(token) is not int or token < 0 for token in (*self.prefix, self.pending, *self.drafts)):
+            raise ValueError("prefix, pending and drafts must be nonnegative integer token IDs")
         if len(self.parents) != len(self.drafts):
             raise ValueError("each draft needs a parent")
         if any(type(parent) is not int or parent < -1 or parent >= index
@@ -95,23 +96,13 @@ def _cache_failures(state, expected, length, *, atol, rtol):
     return failures
 
 
-@torch.inference_mode()
-def check_verifier_state(
-    target,
-    reference_model,
-    case: RoundCase,
-    *,
-    verifier: str = "tree",
-    atol: float = 2e-6,
-    rtol: float = 2e-5,
-) -> RoundCheck:
-    """Check one real round, cache values, and one subsequent target step.
+def _validate_tolerances(atol, rtol):
+    for value in (atol, rtol):
+        if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value) or value < 0:
+            raise ValueError("tolerances must be finite and nonnegative")
 
-    Supply separate eval-mode models with matching weights and EOS settings.
-    This currently supports HF-compatible caches. The reference uses native
-    generation and fresh full-prefix forwards, never target cache operations.
-    Reference errors propagate; candidate exceptions are reported as failures.
-    """
+
+def _round_expectation(target, reference_model, case, verifier):
     if target.model is reference_model:
         raise ValueError("use a separate reference model")
     if target.model.training or reference_model.training:
@@ -120,9 +111,6 @@ def check_verifier_state(
         raise ValueError("verifier must be block or tree")
     if verifier == "block" and case.parents != tuple(range(-1, len(case.drafts) - 1)):
         raise ValueError("block verification requires a chain")
-    for value in (atol, rtol):
-        if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value) or value < 0:
-            raise ValueError("tolerances must be finite and nonnegative")
     tokens = (*case.prefix, case.pending, *case.drafts)
     vocab = min(target.model.config.vocab_size, reference_model.config.vocab_size)
     if max(tokens) >= vocab:
@@ -143,7 +131,43 @@ def check_verifier_state(
     continuation = hf_decoder(reference_model)(
         GenerationCase(case.name, (*case.prefix, case.pending), lookahead)
     )
-    expected, accepted = _expected_path(case, continuation, eos)
+    return _expected_path(case, continuation, eos)
+
+
+def _result_failures(result, expected, accepted, draft_count, eos):
+    failures = []
+    actual = tuple(result.committed)
+    if actual != expected or any(type(token) is not int for token in actual):
+        failures.append(CheckFailure("committed", detail="committed token sequences differ"))
+    if (result.n_draft_accepted != accepted or result.n_draft_proposed != draft_count
+            or result.all_accepted != (accepted == draft_count) or result.pending_divergence != 0):
+        failures.append(CheckFailure("acceptance", detail="verification counts differ"))
+    if result.finished != (expected[-1] in eos):
+        failures.append(CheckFailure("eos", detail="finished flag differs"))
+    return failures
+
+
+@torch.inference_mode()
+def check_verifier_state(
+    target,
+    reference_model,
+    case: RoundCase,
+    *,
+    verifier: str = "tree",
+    atol: float = 2e-6,
+    rtol: float = 2e-5,
+) -> RoundCheck:
+    """Check one real round, cache values, and one subsequent target step.
+
+    Supply separate eval-mode models with matching weights and EOS settings.
+    This currently supports HF-compatible caches. The reference uses native
+    generation and fresh full-prefix forwards, never target cache operations.
+    Reference errors propagate; candidate exceptions are reported as failures.
+    """
+    if not case.prefix:
+        raise ValueError("standalone round checks need a nonempty prefill prefix")
+    _validate_tolerances(atol, rtol)
+    expected, accepted = _round_expectation(target, reference_model, case, verifier)
     cached_tokens = (*case.prefix, case.pending, *expected[:-1])
     reference_cache = _reference_forward(reference_model, cached_tokens).past_key_values
     reference_next = _reference_forward(reference_model, (*cached_tokens, expected[-1]))
@@ -155,13 +179,7 @@ def check_verifier_state(
         else:
             result = verify_block_greedy(target, state, case.pending, list(case.drafts))
         actual, length = tuple(result.committed), int(state.seq_len)
-        if actual != expected or any(type(token) is not int for token in actual):
-            failures.append(CheckFailure("committed", detail="committed token sequences differ"))
-        if (result.n_draft_accepted != accepted or result.n_draft_proposed != len(case.drafts)
-                or result.all_accepted != (accepted == len(case.drafts)) or result.pending_divergence != 0):
-            failures.append(CheckFailure("acceptance", detail="verification counts differ"))
-        if result.finished != (expected[-1] in eos):
-            failures.append(CheckFailure("eos", detail="finished flag differs"))
+        failures.extend(_result_failures(result, expected, accepted, len(case.drafts), target.eos_token_ids))
         failures.extend(_cache_failures(state, reference_cache, len(cached_tokens), atol=atol, rtol=rtol))
         if actual:
             logits = target.forward_block(state, [actual[-1]])[-1]
