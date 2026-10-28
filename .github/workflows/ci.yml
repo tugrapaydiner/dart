@@ -107,7 +107,7 @@ jobs:
               "test_generation_budget.py", "test_request_cleanup.py", "test_ngram_lookup.py",
               "test_replay_ids.py", "test_replay_predictions.py", "test_config_api.py", "test_feedback_workloads.py",
               "test_differential.py", "test_synthetic_check.py", "test_state_checks.py",
-              "test_state_sequences.py", "test_reduction.py",
+              "test_state_sequences.py", "test_reduction.py", "test_cli_synthetic.py",
           )
           for name in names:
               shutil.copyfile(source / name, suite / "tests" / name)

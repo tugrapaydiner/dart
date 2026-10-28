@@ -24,6 +24,16 @@ VOCAB_SIZE = 67
 CONTEXT_LENGTH = 64
 
 
+def synthetic_model_config() -> dict:
+    """Return the fixed tiny model configuration used by the synthetic check."""
+    return {
+        "vocab_size": VOCAB_SIZE, "hidden_size": 32, "intermediate_size": 64,
+        "num_hidden_layers": 2, "num_attention_heads": 4, "num_key_value_heads": 2,
+        "max_position_embeddings": CONTEXT_LENGTH, "bos_token_id": 1,
+        "eos_token_id": 2, "pad_token_id": 0, "attn_implementation": "eager",
+    }
+
+
 class _ProbeDrafter:
     name = "synthetic"
     requires_entropy = False
@@ -66,12 +76,7 @@ def run_synthetic_check(
     cases = synthetic_cases(seed)
     with torch.random.fork_rng(devices=[]), torch.device("cpu"):
         torch.random.default_generator.manual_seed(seed)
-        config = LlamaConfig(
-            vocab_size=VOCAB_SIZE, hidden_size=32, intermediate_size=64,
-            num_hidden_layers=2, num_attention_heads=4, num_key_value_heads=2,
-            max_position_embeddings=CONTEXT_LENGTH, bos_token_id=1,
-            eos_token_id=2, pad_token_id=0, attn_implementation="eager",
-        )
+        config = LlamaConfig(**synthetic_model_config())
         reference = LlamaForCausalLM(config).to(device="cpu", dtype=torch.float32).eval()
     target = TargetModel(copy.deepcopy(reference), device="cpu", dtype=torch.float32)
     if adapter_factory is None:
