@@ -42,7 +42,9 @@ def test_compact_lane_preserves_complete_outputs_budgets_and_eos(device, mode, v
                 calls.clear()
                 result = engine.generate(prompt, DecodeConfig(max_new_tokens=budget, canvas_len=4))
                 assert result.token_ids == expected[:budget]
-                assert len(calls) == 1 + len(result.rounds)
+                assert len(calls) == int(budget > 0) + len(result.rounds)
+                if budget == 0:
+                    assert result.rounds == []
             target.eos_token_ids = frozenset([expected[3]])
             stopped = target.greedy_generate(prompt, 14)
             assert engine.generate(prompt, DecodeConfig(max_new_tokens=14)).token_ids == stopped
