@@ -142,9 +142,11 @@ class DartEngine:
             torch.cuda.synchronize(self.target.device)
 
     @staticmethod
-    def _gpu_free_gb() -> float:
+    def _gpu_free_gb(device: str | torch.device | None = None) -> float:
+        if device is not None and torch.device(device).type != "cuda":
+            return float("inf")
         if torch.cuda.is_available():
-            free, _total = torch.cuda.mem_get_info()
+            free, _total = torch.cuda.mem_get_info(device)
             return free / 1e9
         return float("inf")  # CPU hosts: memory is not the binding constraint
 
@@ -177,7 +179,7 @@ class DartEngine:
         s = DecodeState(
             context_len=prompt_len + generated_len,
             generated_len=generated_len,
-            gpu_free_gb=self._gpu_free_gb(),
+            gpu_free_gb=self._gpu_free_gb(self.target.device),
             batch_size=1,
             prompt_kind=config.prompt_kind,
             exact_required=(config.mode == "exact"),
@@ -210,12 +212,14 @@ class DartEngine:
     def _empty_output(self, config, metrics, run_id, start):
         sampling = config.mode == "exact_sampling"
         metrics.wall_time_ms = (time.perf_counter() - start) * 1000.0
-        metrics.gpu_peak_gb = gpu_memory_gb()
+        metrics.gpu_peak_gb = gpu_memory_gb(self.target.device)
         metadata = metrics.to_metadata(
             run_id=run_id, verifier="sampling" if sampling else self.verifier_name,
             exact_greedy_equivalent=None, greedy_verified=not sampling,
             output_hash=output_hash([]), finished_eos=False, gpu_kv_gb=0.0,
             full_kv_residency=config.full_kv_residency, tokens_verified=0,
+            gpu_memory_scope="process allocations on target device",
+            gpu_memory_device=str(self.target.device) if torch.device(self.target.device).type == "cuda" else None,
         )
         if config.full_kv_residency == "cpu_pinned":
             metadata.update(kv_residency_moves=0, kv_residency_moved_mb=0.0)
@@ -283,7 +287,7 @@ class DartEngine:
             or getattr(self.target.model.config, "name_or_path", "")
             or type(self.target.model).__name__,
         )
-        reset_gpu_memory_stats()  # so gpu_peak_gb reflects only this generation
+        reset_gpu_memory_stats(self.target.device)  # Reset this device's process peak.
         t_start = time.perf_counter()
 
         prompt = list(prompt_ids)
@@ -482,7 +486,7 @@ class DartEngine:
 
         metrics.tokens_generated = len(generated)
         metrics.wall_time_ms = (time.perf_counter() - t_start) * 1000.0
-        metrics.gpu_peak_gb = gpu_memory_gb()
+        metrics.gpu_peak_gb = gpu_memory_gb(self.target.device)
         text = (
             self.target.tokenizer.decode(generated, skip_special_tokens=False)
             if self.target.tokenizer is not None
@@ -499,6 +503,8 @@ class DartEngine:
             gpu_kv_gb=round(kv_gb, 6),
             full_kv_residency=config.full_kv_residency,
             tokens_verified=max(0, len(generated) - unverified_tokens),
+            gpu_memory_scope="process allocations on target device",
+            gpu_memory_device=str(self.target.device) if torch.device(self.target.device).type == "cuda" else None,
         )
         if park_kv:
             metadata["kv_residency_moves"] = res_stats.moved_tensors

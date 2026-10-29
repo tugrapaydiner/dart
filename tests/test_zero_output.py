@@ -38,8 +38,8 @@ def test_engine_zero_output_skips_execution_and_preserves_metadata(models, monke
     monkeypatch.setattr(target.model, "forward", unexpected)
     monkeypatch.setattr(runtime, "SyncPrefetcher", unexpected)
     monkeypatch.setattr(runtime, "ThreadPrefetcher", unexpected)
-    monkeypatch.setattr(runtime, "reset_gpu_memory_stats", lambda: None)
-    monkeypatch.setattr(runtime, "gpu_memory_gb", lambda: 0.125)
+    monkeypatch.setattr(runtime, "reset_gpu_memory_stats", lambda device: None)
+    monkeypatch.setattr(runtime, "gpu_memory_gb", lambda device: 0.125)
     drafter = SimpleNamespace(name="unused", requires_entropy=False, after_prefill=unexpected,
                               propose=unexpected, observe=unexpected)
     with DartEngine(target, drafter, verifier=verifier) as engine:

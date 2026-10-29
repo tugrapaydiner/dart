@@ -39,15 +39,21 @@ def wall_timer() -> Iterator[list[float]]:
         out[0] = (time.perf_counter() - start) * 1000.0
 
 
-def gpu_memory_gb() -> float:
+def gpu_memory_gb(device: str | torch.device | None = None) -> float:
+    """Peak process allocation on one CUDA device; zero for other devices."""
+    if device is not None and torch.device(device).type != "cuda":
+        return 0.0
     if torch.cuda.is_available():
-        return torch.cuda.max_memory_allocated() / 1e9
+        return torch.cuda.max_memory_allocated(device) / 1e9
     return 0.0
 
 
-def reset_gpu_memory_stats() -> None:
+def reset_gpu_memory_stats(device: str | torch.device | None = None) -> None:
+    """Reset one CUDA device's peak; None selects the current CUDA device."""
+    if device is not None and torch.device(device).type != "cuda":
+        return
     if torch.cuda.is_available():
-        torch.cuda.reset_peak_memory_stats()
+        torch.cuda.reset_peak_memory_stats(device)
 
 
 @dataclass
