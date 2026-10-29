@@ -20,6 +20,7 @@ class StateReplay:
     operations: tuple[StateOperation, ...]
     source_sha256: str
     selection: str
+    execution: str = "eager"
 
 
 def load_state_replay(path: str | Path) -> StateReplay:
@@ -34,8 +35,22 @@ def load_state_replay(path: str | Path) -> StateReplay:
         raise ValueError("synthetic replay report exceeds 1 MiB")
     try:
         data = json.loads(raw)
-        if not isinstance(data, dict) or data.get("schema") != "dart-synthetic-state-check-v1":
+        if not isinstance(data, dict) or data.get("schema") not in {
+            "dart-synthetic-state-check-v1", "dart-synthetic-state-check-v2",
+        }:
             raise ValueError("expected a synthetic state report")
+        if data["schema"] == "dart-synthetic-state-check-v1":
+            if "execution" in data:
+                raise ValueError("execution settings require a v2 synthetic report")
+            execution = "eager"
+        else:
+            saved = data["execution"]
+            if not isinstance(saved, dict):
+                raise ValueError("invalid synthetic execution settings")
+            execution = saved.get("backend")
+            expected = synthetic.synthetic_execution_config(execution)
+            if saved != expected or any(type(saved[key]) is not type(value) for key, value in expected.items()):
+                raise ValueError("synthetic replay requires fixed execution settings")
         seed = data["seed"]
         if type(seed) is not int or not 0 <= seed < 2**63:
             raise ValueError("invalid synthetic replay seed")
@@ -66,14 +81,17 @@ def load_state_replay(path: str | Path) -> StateReplay:
         operations = synthetic._bounded_state_operations(tuple(StateOperation(**row) for row in rows))
     except (KeyError, TypeError, RecursionError) as error:
         raise ValueError("invalid synthetic replay report") from error
-    return StateReplay(seed, operations, hashlib.sha256(raw).hexdigest(), selection)
+    return StateReplay(seed, operations, hashlib.sha256(raw).hexdigest(), selection, execution)
 
 
-def reduce_state_check(report: StateSequenceCheck, seed: int, *, max_evaluations: int = 32) -> ReductionResult | None:
-    """Use the report's seed; count it as the first check and replay each trial fresh."""
+def reduce_state_check(
+    report: StateSequenceCheck, seed: int, *, max_evaluations: int = 32, execution: str = "eager",
+) -> ReductionResult | None:
+    """Use the report's seed and execution; count it first and replay each trial fresh."""
     if type(max_evaluations) is not int or not 2 <= max_evaluations <= 32:
         raise ValueError("synthetic reduction needs between 2 and 32 evaluations")
     synthetic._generator(seed)
+    synthetic.synthetic_execution_config(execution)
     operations = synthetic._bounded_state_operations(tuple(step.operation for step in report.steps))
     initial_failure = failure_key(report)
     if initial_failure is None:
@@ -85,6 +103,6 @@ def reduce_state_check(report: StateSequenceCheck, seed: int, *, max_evaluations
         if initial:
             initial = False
             return initial_failure  # The supplied report already checked this case.
-        return failure_key(synthetic.run_synthetic_state_check(seed, operations=candidate))
+        return failure_key(synthetic.run_synthetic_state_check(seed, operations=candidate, execution=execution))
 
     return reduce_failure(operations, evaluate, max_evaluations=max_evaluations)

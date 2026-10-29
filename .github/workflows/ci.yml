@@ -111,7 +111,7 @@ jobs:
               "test_replay_state_checks.py", "test_synthetic_state.py", "test_synthetic_replay.py",
               "test_target_failures.py", "test_zero_output.py", "test_draft_execution.py",
               "test_drafter_cleanup.py", "test_benchmark_rows.py",
-              "test_tree_nodes.py", "test_static_cpu.py", "test_memory_device.py",
+              "test_tree_nodes.py", "test_static_cpu.py", "test_memory_device.py", "test_synthetic_static.py",
               "test_compact_drafter.py", "test_drafter_state.py", "test_lanes_exactness.py", "test_sampling_devices.py",
           )
           for name in names:

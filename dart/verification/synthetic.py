@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import copy
 from collections.abc import Callable, Mapping, Sequence
+from contextlib import ExitStack
+from dataclasses import replace
 
 import torch
 from transformers import LlamaConfig, LlamaForCausalLM
@@ -41,6 +43,27 @@ def synthetic_model_config() -> dict:
     }
 
 
+def synthetic_execution_config(execution: str = "eager") -> dict:
+    """Return the fixed CPU execution settings used by synthetic checks."""
+    if not isinstance(execution, str) or execution not in {"eager", "static"}:
+        raise ValueError("execution must be eager or static")
+    if execution == "static":
+        return {"backend": "static", "capacity": CONTEXT_LENGTH,
+                "max_block_tokens": 5, "capture_predictions": True}
+    return {"backend": "eager"}
+
+
+def _execution_target(target, execution, cleanup):
+    if execution == "static":
+        from dart.models.replay import CudaGraphTarget
+
+        options = synthetic_execution_config(execution)
+        options.pop("backend")
+        target = CudaGraphTarget(target, replay=False, **options)
+        cleanup.callback(target.close)
+    return target
+
+
 class _ProbeDrafter:
     name = "synthetic"
     requires_entropy = False
@@ -73,14 +96,15 @@ def synthetic_cases(seed: int = 17) -> tuple[GenerationCase, ...]:
     return tuple(cases)
 
 
-def synthetic_state_operations(seed: int = 17) -> tuple[StateOperation, ...]:
-    """Bounded eager operations covering interleaving, rollback and context errors."""
+def synthetic_state_operations(seed: int = 17, *, execution: str = "eager") -> tuple[StateOperation, ...]:
+    """Bounded operations covering interleaving, rollback and context errors."""
+    synthetic_execution_config(execution)
     generator = _generator(seed)
 
     def tokens(count):
         return tuple(torch.randint(3, VOCAB_SIZE, (count,), generator=generator).tolist())
 
-    return (
+    operations = (
         StateOperation("a", "prefill", tokens(4)),
         StateOperation("b", "prefill", tokens(7)),
         StateOperation("a", "forward", tokens(3)),
@@ -108,6 +132,16 @@ def synthetic_state_operations(seed: int = 17) -> tuple[StateOperation, ...]:
         StateOperation("a", "forward", tokens(1)),
         StateOperation("a", "release"),
     )
+    if execution == "eager":
+        return operations
+    steps = []
+    for operation in operations:
+        if operation.action == "tree":
+            steps.append(replace(operation, expect_error="ValueError"))  # Static execution rejects trees.
+            steps.append(StateOperation(operation.request, "block", operation.tokens))
+        else:
+            steps.append(operation)
+    return tuple(steps)
 
 
 def _synthetic_models(seed):
@@ -136,37 +170,48 @@ def _bounded_state_operations(operations):
 
 def run_synthetic_state_check(
     seed: int = 17, *, operations: Sequence[StateOperation] | None = None,
+    execution: str = "eager",
 ) -> StateSequenceCheck:
     """Check every live cache against independent HF state, without a checkpoint.
 
-    Release drops request state, not the target. This suite exercises tiny eager
-    CPU paths; it does not validate graph capture or backend close behavior.
+    Release drops request state, not the target. Static execution closes its
+    workspace after the check. Neither CPU mode validates CUDA graph capture.
     """
+    synthetic_execution_config(execution)
     _generator(seed)
-    operations = _bounded_state_operations(synthetic_state_operations(seed) if operations is None else operations)
+    operations = _bounded_state_operations(synthetic_state_operations(seed, execution=execution)
+                                           if operations is None else operations)
     target, reference = _synthetic_models(seed)
-    return check_state_sequence(target, reference, operations)
+    with ExitStack() as cleanup:
+        target = _execution_target(target, execution, cleanup)
+        return check_state_sequence(target, reference, operations)
 
 
 def run_synthetic_check(
     seed: int = 17,
     *,
     adapter_factory: Callable[[TargetModel], Mapping[str, Decoder]] | None = None,
+    execution: str = "eager",
 ) -> CheckReport:
-    """Check tiny eager CPU paths against a separate, unmodified HF model.
+    """Check tiny CPU paths against a separate, unmodified HF model.
 
     A custom factory receives only the candidate target. It can expose another
-    decoder using the same weights. The default exercises greedy, block and
-    tree engines. This is a small output check, not a performance benchmark.
+    eager decoder using the same weights. Eager checks greedy, block and tree;
+    static checks greedy and block. This is not a performance benchmark.
     """
+    synthetic_execution_config(execution)
+    if execution != "eager" and adapter_factory is not None:
+        raise ValueError("adapter_factory requires eager execution")
     cases = synthetic_cases(seed)
     target, reference = _synthetic_models(seed)
-    if adapter_factory is None:
-        candidates = {
-            "greedy": engine_decoder(DartEngine(target)),
-            "block": engine_decoder(DartEngine(target, _ProbeDrafter())),
-            "tree": engine_decoder(DartEngine(target, _ProbeDrafter(), verifier="tree")),
-        }
-    else:
-        candidates = adapter_factory(target)
-    return run_differential(cases, hf_decoder(reference), candidates, eos_token_ids=[2])
+    with ExitStack() as cleanup:
+        target = _execution_target(target, execution, cleanup)
+        if adapter_factory is None:
+            engines = {"greedy": cleanup.enter_context(DartEngine(target)),
+                       "block": cleanup.enter_context(DartEngine(target, _ProbeDrafter()))}
+            if execution == "eager":
+                engines["tree"] = cleanup.enter_context(DartEngine(target, _ProbeDrafter(), verifier="tree"))
+            candidates = {name: engine_decoder(engine) for name, engine in engines.items()}
+        else:
+            candidates = adapter_factory(target)
+        return run_differential(cases, hf_decoder(reference), candidates, eos_token_ids=[2])

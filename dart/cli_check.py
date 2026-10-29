@@ -12,16 +12,18 @@ from pathlib import Path
 from dart import __version__
 
 
-def _output_summary(report, seed):
+def _output_summary(report, seed, execution="eager"):
     total, failed = len(report.results), len(report.failures)
-    print(f"Synthetic CPU check: {total - failed}/{total} comparisons passed (seed {seed}).")
+    label = "CPU static" if execution == "static" else "CPU"
+    print(f"Synthetic {label} check: {total - failed}/{total} comparisons passed (seed {seed}).")
     for row in report.failures[:5]:
         index = "" if row.failure.index is None else f" at token {row.failure.index}"
         print(f"Failed: {row.backend} / {row.case.name}: {row.failure.kind}{index}.")
     if failed > 5:
         print(f"{failed - 5} more failures; use --out to save the full report.")
     return {
-        "schema": "dart-synthetic-check-v1", "scope": "tiny CPU eager output checks",
+        "schema": f"dart-synthetic-check-v{2 if execution == 'static' else 1}",
+        "scope": f"tiny CPU {execution} output checks",
         "reference": "native HF greedy",
         "summary": {"cases": len({row.case.name for row in report.results}),
                     "comparisons": total, "passed": total - failed, "failed": failed},
@@ -29,9 +31,10 @@ def _output_summary(report, seed):
     }
 
 
-def _state_summary(report, seed):
+def _state_summary(report, seed, execution="eager"):
     total, failed = len(report.steps), sum(not step.passed for step in report.steps)
-    print(f"Synthetic CPU state check: {total - failed}/{total} steps passed (seed {seed}).")
+    label = "CPU static" if execution == "static" else "CPU"
+    print(f"Synthetic {label} state check: {total - failed}/{total} steps passed (seed {seed}).")
     failures = [(index, step.operation.request, item) for index, step in enumerate(report.steps, 1)
                 for item in step.failures]
     for index, actor, item in failures[:5]:
@@ -39,7 +42,8 @@ def _state_summary(report, seed):
     if len(failures) > 5:
         print(f"{len(failures) - 5} more failures; use --out to save the full report.")
     return {
-        "schema": "dart-synthetic-state-check-v1", "scope": "tiny CPU eager request-state checks",
+        "schema": f"dart-synthetic-state-check-v{2 if execution == 'static' else 1}",
+        "scope": f"tiny CPU {execution} request-state checks",
         "reference": "native HF forward and greedy",
         "summary": {"steps": total, "passed": total - failed, "failed": failed,
                     "cache_checks": sum(len(step.checked_requests) for step in report.steps)},
@@ -65,24 +69,32 @@ def run_synthetic(args) -> int:
     from dart.verification.synthetic import (
         run_synthetic_check,
         run_synthetic_state_check,
+        synthetic_execution_config,
         synthetic_model_config,
     )
     from dart.verification.synthetic_replay import load_state_replay, reduce_state_check
 
     replay = load_state_replay(args.replay) if args.replay is not None else None
     seed = replay.seed if replay is not None else args.seed
+    execution = replay.execution if replay is not None else (args.execution or "eager")
+    if args.execution is not None and args.execution != execution:
+        raise ValueError("--execution cannot override the saved replay backend")
+    options = {"execution": execution} if execution != "eager" else {}
     threads = torch.get_num_threads()
     try:
         torch.set_num_threads(1)
         if replay is not None:
-            report = run_synthetic_state_check(seed, operations=replay.operations)
+            report = run_synthetic_state_check(seed, operations=replay.operations, **options)
         else:
             check = run_synthetic_state_check if args.state else run_synthetic_check
-            report = check(seed)
-        reduction = reduce_state_check(report, seed, max_evaluations=args.reduce) if args.reduce is not None else None
+            report = check(seed, **options)
+        reduction = (reduce_state_check(report, seed, max_evaluations=args.reduce, **options)
+                     if args.reduce is not None else None)
     finally:
         torch.set_num_threads(threads)
-    summary = _state_summary(report, seed) if args.state else _output_summary(report, seed)
+    summary = _state_summary(report, seed, execution) if args.state else _output_summary(report, seed, execution)
+    if execution != "eager":
+        summary["execution"] = synthetic_execution_config(execution)
     if replay is not None:
         summary["replay"] = {"source_sha256": replay.source_sha256, "selection": replay.selection}
     if reduction is not None:
@@ -102,6 +114,7 @@ def run_synthetic(args) -> int:
             "versions": {"dart": __version__, "python": platform.python_version(),
                          "torch": version("torch"), "transformers": version("transformers")},
             "reproduce": ["dart", "check", "--synthetic", *(["--state"] if args.state else []),
+                          *(["--execution", execution] if execution != "eager" else []),
                           "--seed", str(seed)],
         }
         if replay is not None or reduction is not None:
