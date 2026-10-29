@@ -82,7 +82,7 @@ class ARDrafter:
         for _ in range(max_tokens):
             tok = int(torch.argmax(last_logits).item())
             drafts.append(tok)
-            if tok in self.dm.eos_token_ids:
+            if tok in self.dm.eos_token_ids or len(drafts) == max_tokens:
                 break
             last_logits = self.dm.forward_block(self._state, [tok])[-1]
         self.dm.crop(self._state, len(committed))
@@ -104,7 +104,7 @@ class ARDrafter:
             tok = int(torch.multinomial(q, 1, generator=self.gen).item())
             drafts.append(tok)
             rows.append(q)
-            if tok in self.dm.eos_token_ids:
+            if tok in self.dm.eos_token_ids or len(drafts) == max_tokens:
                 break
             last_logits = self.dm.forward_block(self._state, [tok])[-1]
         self.dm.crop(self._state, len(committed))
