@@ -238,6 +238,11 @@ class CudaGraphTarget(TargetModel):
             raise ValueError("replay prefill creates its own request cache")
         return super().prefill(prompt_ids)
 
+    def validate_prompt(self, prompt_ids):
+        with self._lock:
+            self._check_ready()
+            super().validate_prompt(prompt_ids)
+
     @torch.inference_mode()
     def forward_predictions(self, state, tokens):
         """Return owned next-token IDs from a prepared greedy block."""
@@ -294,6 +299,9 @@ class CudaGraphTarget(TargetModel):
     def greedy_generate(self, prompt_ids, max_new_tokens):
         ids = self._ids(prompt_ids)
         self.validate_generation(ids.shape[1], max_new_tokens)
+        if max_new_tokens == 0:
+            self.validate_prompt(ids)
+            return []
         state = TargetState(DynamicCache())
         logits = self._forward(state, ids, last_logits_only=True)[-1]
         generated = []

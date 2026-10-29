@@ -159,6 +159,14 @@ class TargetModel:
             raise ValueError("max_new_tokens must be an integer >= 0")
         self._check_context_length(prompt_len + max_new_tokens)
 
+    def validate_prompt(self, prompt_ids: list[int] | Tensor) -> None:
+        """Check prompt admission without executing the model."""
+        ids = self._ids(prompt_ids)
+        self.validate_generation(ids.size(1), 0)
+        low, high = torch.aminmax(ids)
+        if low.item() < 0 or high.item() >= self.model.config.vocab_size:
+            raise ValueError("token id is outside the model vocabulary")
+
     def _ids(self, tokens: list[int] | Tensor) -> Tensor:
         if isinstance(tokens, Tensor):
             t = tokens.to(device=self.device, dtype=torch.long)
@@ -356,6 +364,9 @@ class TargetModel:
         """
         input_ids = self._ids(prompt_ids)
         self.validate_generation(input_ids.size(1), max_new_tokens)
+        if max_new_tokens == 0:
+            self.validate_prompt(input_ids)
+            return []
         state, logits = self.prefill(input_ids)
         generated: list[int] = []
         next_token = int(torch.argmax(logits).item())

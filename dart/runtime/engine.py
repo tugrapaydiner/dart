@@ -207,6 +207,26 @@ class DartEngine:
             return list(drafts), probs
         return list(drafter.propose(committed, budget)), None
 
+    def _empty_output(self, config, metrics, run_id, start):
+        sampling = config.mode == "exact_sampling"
+        metrics.wall_time_ms = (time.perf_counter() - start) * 1000.0
+        metrics.gpu_peak_gb = gpu_memory_gb()
+        metadata = metrics.to_metadata(
+            run_id=run_id, verifier="sampling" if sampling else self.verifier_name,
+            exact_greedy_equivalent=None, greedy_verified=not sampling,
+            output_hash=output_hash([]), finished_eos=False, gpu_kv_gb=0.0,
+            full_kv_residency=config.full_kv_residency, tokens_verified=0,
+        )
+        if config.full_kv_residency == "cpu_pinned":
+            metadata.update(kv_residency_moves=0, kv_residency_moved_mb=0.0)
+        if sampling:
+            metadata.update(distribution_exact=True, temperature=config.temperature, seed=config.seed)
+        if config.mode == "approx":
+            metadata.update(verify_skip_policy={"verify_every": config.verify_every}, unverified_tokens=0,
+                            trailing_unverified=0, pending_divergence=0, quality_risk=False)
+        text = self.target.tokenizer.decode([], skip_special_tokens=False) if self.target.tokenizer is not None else None
+        return GenerationOutput(token_ids=[], text=text, metadata=metadata, rounds=[])
+
     @torch.inference_mode()
     def generate(
         self,
@@ -264,6 +284,9 @@ class DartEngine:
 
         prompt = list(prompt_ids)
         self.target.validate_generation(len(prompt), config.max_new_tokens)
+        if config.max_new_tokens == 0:
+            self.target.validate_prompt(prompt)
+            return self._empty_output(config, metrics, run_id, t_start)
         state, logits = self.target.prefill(prompt)
         if self.scheduler is not None and hasattr(self.scheduler, "reset"):
             self.scheduler.reset()
