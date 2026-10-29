@@ -248,6 +248,7 @@ class CudaGraphTarget(TargetModel):
     def _forward(self, state, input_ids, *, last_logits_only=False, return_predictions=False):
         with self._lock:
             self._check_ready()
+            state._check_usable()
             total_len = state.seq_len + input_ids.shape[1]
             self._check_context_length(total_len)
             if not isinstance(state.cache, ReplayCache) and state.seq_len == 0:
