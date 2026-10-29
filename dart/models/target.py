@@ -310,8 +310,14 @@ class TargetModel:
         Valid because a packed node's K/V depend only on tokens its mask
         let it attend to — the prefix and its ancestors — so the surviving
         entries are exactly those of a linear forward over that branch.
+        Cropping a contiguous prefix avoids a copy but retains its backing allocation.
         """
         state._check_usable()
+        if (type(keep_len) is int and isinstance(path, list)
+                and 0 <= keep_len <= state.seq_len - len(path)
+                and all(offset == index for index, offset in enumerate(path))):
+            self.crop(state, keep_len + len(path))
+            return
         idx = torch.tensor(
             list(range(keep_len)) + [keep_len + p for p in path],
             device=self.device,
