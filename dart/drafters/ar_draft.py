@@ -50,6 +50,10 @@ class ARDrafter:
         self._state = None
         self._processed = []
 
+    def finish_request(self) -> None:
+        self.reset()
+        self.dm.last_hidden_block = None
+
     def _make_cache(self):
         """Cache for fresh prefills; subclasses substitute compressed caches."""
         return None  # TargetModel.prefill defaults to a full DynamicCache

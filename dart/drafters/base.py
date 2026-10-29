@@ -17,7 +17,11 @@ from dart.runtime.types import VerifyResult
 
 @runtime_checkable
 class Drafter(Protocol):
-    """Protocol implemented by every draft lane."""
+    """Protocol implemented by every draft lane.
+
+    An optional finish_request() hook releases request data after execution,
+    including errors, without resetting statistics or the sampling generator.
+    """
 
     name: str
 

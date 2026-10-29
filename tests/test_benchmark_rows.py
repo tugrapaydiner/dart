@@ -75,3 +75,27 @@ def test_all_available_rows_keep_greedy_outputs_on_the_tiny_target():
         with DartEngine(target, drafter) as engine:
             result = engine.generate(prompt, DecodeConfig(max_new_tokens=8, draft_len=3, canvas_len=4))
         assert result.token_ids == expected, name
+
+
+def test_benchmark_keeps_cache_statistics_after_request_cleanup(monkeypatch, tmp_path):
+    target = build_tiny_target()
+    target.eos_token_ids = frozenset()
+    drafters = []
+    original = run_bench.CompressedKVDrafter
+
+    def build(*args, **kwargs):
+        drafter = original(*args, **kwargs)
+        drafters.append(drafter)
+        return drafter
+
+    monkeypatch.setattr(run_bench, "build_tiny_target", lambda **kwargs: target)
+    monkeypatch.setattr(run_bench, "CompressedKVDrafter", build)
+    monkeypatch.setattr(sys, "argv", ["run_bench", "--warmup", "1", "--repeats", "2",
+                                    "--prompts", "1", "--max-new", "4", "--lanes", "compressed_kv_int4",
+                                    "--out", str(tmp_path), "--tag", "cleanup"])
+    run_bench.main()
+    report = json.loads((tmp_path / "cleanup.json").read_text(encoding="utf-8"))
+    stats = report["lanes"]["compressed_kv_int4"]["kv_stats"]
+    assert stats["seq_len"] > 0 and stats["logical_compressed_bytes"] > 0
+    assert len(drafters) == 1 and drafters[0]._state is None
+    assert drafters[0].kv_stats() == {} and drafters[0].last_kv_stats == stats

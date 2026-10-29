@@ -23,7 +23,7 @@ from __future__ import annotations
 
 import time
 import uuid
-from contextlib import closing
+from contextlib import ExitStack, closing
 from functools import partial
 from inspect import unwrap
 from typing import Callable, Optional
@@ -233,6 +233,10 @@ class DartEngine:
         prompt_ids: list[int] | str,
         config: Optional[DecodeConfig] = None,
     ) -> GenerationOutput:
+        with ExitStack() as cleanup:
+            return self._generate(prompt_ids, config, cleanup)
+
+    def _generate(self, prompt_ids, config, cleanup: ExitStack) -> GenerationOutput:
         if self._closed:
             raise RuntimeError("engine is closed")
         # Accept a text prompt (docs/design.md §11) when a tokenizer exists.
@@ -287,6 +291,11 @@ class DartEngine:
         if config.max_new_tokens == 0:
             self.target.validate_prompt(prompt)
             return self._empty_output(config, metrics, run_id, t_start)
+        cleanup.callback(setattr, self.target, "last_hidden_block", None)
+        for drafter in {id(d): d for d in self._all_drafters()}.values():
+            finish = getattr(drafter, "finish_request", None)
+            if finish is not None:
+                cleanup.callback(finish)
         state, logits = self.target.prefill(prompt)
         if self.scheduler is not None and hasattr(self.scheduler, "reset"):
             self.scheduler.reset()

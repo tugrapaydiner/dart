@@ -76,3 +76,6 @@ class MTPDrafter:
         """Use the last prompt position's hidden state for round one."""
         block = self.target.last_hidden_block
         self._hidden = block[-1] if block is not None else None
+
+    def finish_request(self) -> None:
+        self._hidden = None

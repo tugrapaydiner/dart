@@ -236,3 +236,6 @@ class DiffusionDrafter:
         self._warm = None
         self._used_warm = False
         self._context = []
+
+    def finish_request(self) -> None:
+        self.reset()
