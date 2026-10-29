@@ -132,10 +132,10 @@ class _ReplayBlock:
 class CudaGraphTarget(TargetModel):
     """Opt-in FP32 Llama replay for transformers >= 5.16.1.
 
-    Construction includes warmup and capture; prepare with no other CUDA work
+    Graph construction includes warmup and capture; prepare with no other CUDA work
     running in the process. Calls use the preparation stream and serialize
     workspace access. Each state and returned logit tensor owns its data.
-    ``replay=False`` runs the same static-cache path without graph capture.
+    ``replay=False`` runs the static-cache path on CPU or CUDA without graph capture.
     ``capture_predictions=True`` also prepares argmax for entropy-free greedy calls.
     """
 
@@ -148,23 +148,26 @@ class CudaGraphTarget(TargetModel):
             raise ValueError("replay must be a boolean")
         if type(capture_predictions) is not bool:
             raise ValueError("capture_predictions must be a boolean")
-        if torch.device(target.device).type != "cuda" or target.dtype != torch.float32:
+        device = torch.device(target.device).type
+        if replay and (device != "cuda" or target.dtype != torch.float32):
             raise ValueError("CUDA replay requires a float32 CUDA target")
+        if device not in {"cpu", "cuda"} or target.dtype != torch.float32:
+            raise ValueError("static execution requires a float32 CPU or CUDA target")
         if not isinstance(target.model, LlamaForCausalLM) or Version(version("transformers")) < Version("5.16.1"):
-            raise ValueError("CUDA replay requires LlamaForCausalLM and transformers >= 5.16.1")
+            raise ValueError("static cache execution requires LlamaForCausalLM and transformers >= 5.16.1")
         config = target.model.config
         rope = getattr(config, "rope_parameters", None) or getattr(config, "rope_scaling", None) or {}
         if target.record_hidden or config._attn_implementation != "eager" or rope.get("rope_type", "default") != "default":
-            raise ValueError("CUDA replay requires eager attention, default RoPE and no hidden-state recording")
+            raise ValueError("static cache execution requires eager attention, default RoPE and no hidden-state recording")
         capacity = config.max_position_embeddings if capacity is None else capacity
         if type(capacity) is not int or not 1 <= capacity <= min(4096, config.max_position_embeddings):
             raise ValueError("replay capacity must be within the model context and at most 4096")
         if type(max_block_tokens) is not int or not 1 <= max_block_tokens <= min(16, capacity):
             raise ValueError("max_block_tokens must be an integer from 1 to min(16, capacity)")
         if len({parameter.device for parameter in target.model.parameters()}) != 1 or any(
-            parameter.dtype != torch.float32 or parameter.device.type != "cuda" for parameter in target.model.parameters()
+            parameter.dtype != torch.float32 or parameter.device.type != device for parameter in target.model.parameters()
         ):
-            raise ValueError("replay model parameters must all use float32 on one CUDA device")
+            raise ValueError(f"replay model parameters must all use float32 on one {device.upper()} device")
         super().__init__(target.model, target.tokenizer, device=target.device, dtype=target.dtype)
         self.eos_token_ids = target.eos_token_ids
         self.capacity = capacity
@@ -174,7 +177,7 @@ class CudaGraphTarget(TargetModel):
         self._owner = object()
         self._lock = threading.RLock()
         self._closed = False
-        self._stream = torch.cuda.current_stream(next(self.model.parameters()).device)
+        self._stream = torch.cuda.current_stream(next(self.model.parameters()).device) if device == "cuda" else None
         self._model_signature = self._signature()
         self._model_tensors = tuple(tensor.detach() for tensor in (*self.model.parameters(), *self.model.buffers()))
         self._workspace = _Workspace(self.model, capacity)
@@ -204,7 +207,7 @@ class CudaGraphTarget(TargetModel):
     def _check_ready(self):
         if self._closed:
             raise RuntimeError("replay target is closed")
-        if torch.cuda.current_stream(self._stream.device) != self._stream:
+        if self._stream is not None and torch.cuda.current_stream(self._stream.device) != self._stream:
             raise ValueError("use the CUDA stream that prepared the replay target")
         if self.record_hidden or self.model.training or self.model.config._attn_implementation != "eager":
             raise ValueError("replay requires unchanged inference settings")
@@ -319,7 +322,8 @@ class CudaGraphTarget(TargetModel):
     def close(self):
         with self._lock:
             if not self._closed:
-                self._stream.synchronize()
+                if self._stream is not None:
+                    self._stream.synchronize()
                 self._blocks.clear()
                 self._workspace = None
                 self._model_tensors = ()

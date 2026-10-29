@@ -1,4 +1,3 @@
-import threading
 from dataclasses import asdict
 from importlib.metadata import version
 from types import SimpleNamespace
@@ -9,7 +8,7 @@ from packaging.version import Version
 from transformers import LlamaConfig, LlamaForCausalLM
 
 from dart.drafters.ngram import NGramDrafter
-from dart.models.replay import CudaGraphTarget, _ReplayBlock, _Workspace
+from dart.models.replay import CudaGraphTarget
 from dart.models.target import TargetModel
 from dart.runtime.engine import DartEngine
 from dart.runtime.factory import build_target
@@ -18,7 +17,7 @@ from dart.verification.block_verify import verify_block_greedy
 
 
 @pytest.fixture(params=["cpu_static", "cuda_graph"])
-def execution(request, monkeypatch):
+def execution(request):
     if Version(version("transformers")) < Version("5.16.1"):
         pytest.skip("static replay requires transformers >= 5.16.1")
     device = "cuda" if request.param == "cuda_graph" else "cpu"
@@ -31,24 +30,8 @@ def execution(request, monkeypatch):
                          eos_token_id=None, pad_token_id=0, attention_dropout=0.0)
     config._attn_implementation = "eager"
     base = TargetModel(LlamaForCausalLM(config), device=device)
-    if device == "cuda":
-        target = CudaGraphTarget(base, capacity=64, max_block_tokens=5, capture_predictions=True)
-    else:
-        target = object.__new__(CudaGraphTarget)
-        TargetModel.__init__(target, base.model)
-        target.capacity, target.max_block_tokens = 64, 5
-        target._capture_predictions = True
-        target._owner, target._lock, target._closed = object(), threading.RLock(), False
-        target._stream = SimpleNamespace(device="cpu", synchronize=lambda: None)
-        monkeypatch.setattr(torch.cuda, "current_stream", lambda device: target._stream)
-        target._model_signature = target._signature()
-        target._model_tensors = tuple((*target.model.parameters(), *target.model.buffers()))
-        target._workspace = _Workspace(target.model, 64)
-        with torch.inference_mode():
-            target._blocks = {
-                n: _ReplayBlock(target.model, target._workspace, n, False, capture_predictions=True)
-                for n in range(1, 6)
-            }
+    target = CudaGraphTarget(base, capacity=64, max_block_tokens=5, capture_predictions=True,
+                             replay=device == "cuda")
     yield base, target
     target.close()
 
