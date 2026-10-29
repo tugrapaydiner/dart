@@ -11,6 +11,7 @@ loudly rather than silently degrading to target-only.
 
 from __future__ import annotations
 
+from contextlib import ExitStack
 from typing import Optional
 
 import torch
@@ -225,14 +226,24 @@ def decode_defaults(cfg: dict):
 
 
 def build_engine(cfg: dict):
-    from dart.runtime.engine import DartEngine
-
     threads = cfg.get("threads")
     if threads is not None:
         if type(threads) is not int or threads < 1:
             raise ValueError("threads must be an integer >= 1")
         torch.set_num_threads(threads)  # Applies to the whole process.
-    target = build_target(cfg["target"])
+    with ExitStack() as cleanup:
+        target = build_target(cfg["target"])
+        close = getattr(target, "close", None)
+        if close is not None:
+            cleanup.callback(close)
+        engine = _engine_for_target(cfg, target)
+        cleanup.pop_all()  # The completed engine takes ownership.
+        return engine
+
+
+def _engine_for_target(cfg, target):
+    from dart.runtime.engine import DartEngine
+
     defaults = decode_defaults(cfg)
     lane_specs: dict = cfg.get("lanes", {})
     if isinstance(lane_specs, list):  # allow simple list form from the doc
@@ -241,7 +252,7 @@ def build_engine(cfg: dict):
     if not lane_specs:
         return DartEngine(
             target, verifier=cfg.get("verifier", "block"),
-            default_decode_config=defaults,
+            default_decode_config=defaults, owns_target=True,
         )
 
     if len(lane_specs) == 1 and not cfg.get("scheduler"):
@@ -249,7 +260,7 @@ def build_engine(cfg: dict):
         return DartEngine(
             target, drafter=build_lane(name, spec or {}, target),
             verifier=cfg.get("verifier", "block"),
-            default_decode_config=defaults,
+            default_decode_config=defaults, owns_target=True,
         )
 
     lanes = {
@@ -290,7 +301,7 @@ def build_engine(cfg: dict):
     )
     return DartEngine(
         target, lanes=lanes, scheduler=scheduler, verifier=cfg.get("verifier", "block"),
-        default_decode_config=defaults,
+        default_decode_config=defaults, owns_target=True,
     )
 
 

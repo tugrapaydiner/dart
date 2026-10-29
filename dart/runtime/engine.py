@@ -81,8 +81,15 @@ class DartEngine:
         lanes: Optional[dict[str, Drafter]] = None,
         scheduler=None,
         default_decode_config: Optional[DecodeConfig] = None,
+        *,
+        owns_target: bool = False,
     ) -> None:
+        if type(owns_target) is not bool:
+            raise ValueError("owns_target must be a boolean")
         self.target = target
+        self._owns_target = owns_target
+        self._closed = False
+        self._target_closed = False
         # Decode defaults captured from a YAML config (mode, residency, draft
         # sizing, ...) so from_config(...).generate(prompt) honors the file.
         self.default_decode_config = default_decode_config
@@ -101,8 +108,17 @@ class DartEngine:
         self.trace = TraceLogger(trace_path)
 
     def close(self) -> None:
-        """Flush and close the trace log (no-op without a trace_path)."""
-        self.trace.close()
+        """Close tracing and an owned target; borrowed targets remain usable."""
+        if self._owns_target:
+            self._closed = True
+        try:
+            self.trace.close()
+        finally:
+            if self._owns_target and not self._target_closed:
+                close = getattr(self.target, "close", None)
+                if close is not None:
+                    close()
+                self._target_closed = True
 
     def __enter__(self) -> "DartEngine":
         return self
@@ -197,6 +213,8 @@ class DartEngine:
         prompt_ids: list[int] | str,
         config: Optional[DecodeConfig] = None,
     ) -> GenerationOutput:
+        if self._closed:
+            raise RuntimeError("engine is closed")
         # Accept a text prompt (docs/design.md §11) when a tokenizer exists.
         if isinstance(prompt_ids, str):
             if self.target.tokenizer is None:
