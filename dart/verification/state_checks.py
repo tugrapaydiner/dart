@@ -7,6 +7,7 @@ from dataclasses import dataclass
 
 import torch
 
+from dart.models.replay import ReplayCache
 from dart.verification.block_verify import verify_block_greedy
 from dart.verification.differential import (
     CheckFailure,
@@ -76,13 +77,22 @@ def _reference_forward(model, tokens):
 
 
 def _cache_pairs(cache):
+    if isinstance(cache, ReplayCache):
+        storage = cache.storage
+        if (not isinstance(storage, torch.Tensor) or storage.ndim != 6
+                or storage.shape[1:3] != (2, 1) or any(size <= 0 for size in storage.shape)):
+            raise ValueError("replay cache has invalid storage shape")
+        length = cache.get_seq_length()
+        if type(length) is not int or not 0 <= length <= storage.shape[-2]:
+            raise ValueError("replay cache has invalid prefix length")
+        return [(layer[0, ..., :length, :], layer[1, ..., :length, :]) for layer in storage]
     if hasattr(cache, "layers"):
         return [(layer.keys, layer.values) for layer in cache.layers]
     if hasattr(cache, "key_cache"):
         return list(zip(cache.key_cache, cache.value_cache))
     if isinstance(cache, (tuple, list)):
         return [(layer[0], layer[1]) for layer in cache]
-    raise TypeError("state checks require an HF-compatible cache")
+    raise TypeError("state checks require an HF-compatible cache or ReplayCache")
 
 
 def _cache_failures(state, expected, length, *, atol, rtol):
@@ -165,7 +175,7 @@ def check_verifier_state(
     """Check one real round, cache values, and one subsequent target step.
 
     Supply separate eval-mode models with matching weights and EOS settings.
-    This currently supports HF-compatible caches. The reference uses native
+    This supports HF-compatible caches and ReplayCache. The reference uses native
     generation and fresh full-prefix forwards, never target cache operations.
     Reference errors propagate; candidate exceptions are reported as failures.
     """
