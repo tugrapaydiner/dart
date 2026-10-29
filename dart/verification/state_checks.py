@@ -1,4 +1,4 @@
-"""Check a verifier round and its surviving cache against native HF."""
+"""Check verifier rounds, packed tree rows and surviving caches against native HF."""
 
 from __future__ import annotations
 
@@ -49,6 +49,7 @@ class RoundCheck:
     expected_cache_length: int
     cache_length: int | None
     failures: tuple[CheckFailure, ...]
+    tree_rows_checked: int = 0
 
     @property
     def passed(self) -> bool:
@@ -117,6 +118,59 @@ def _validate_tolerances(atol, rtol):
             raise ValueError("tolerances must be finite and nonnegative")
 
 
+def _inspect_tree_rows(target, reference_model, case, *, atol, rtol):
+    paths = [(case.pending,)]
+    for token, parent in zip(case.drafts, case.parents):
+        paths.append((*paths[parent + 1], token))
+    packed_length = len(case.prefix) + len(paths)
+    failures, checked = [], 0
+    try:
+        state, _ = target.prefill(list(case.prefix))
+        if case.drafts:
+            logits = target.forward_tree(state, [case.pending], list(case.drafts), list(case.parents))
+        else:
+            logits = target.forward_block(state, [case.pending])
+        if logits.shape != (len(paths), reference_model.config.vocab_size):
+            return [CheckFailure("tree_logits_shape", detail="packed logits shape differs")], 0
+        if state.seq_len != packed_length:
+            return [CheckFailure("tree_cache_length", detail=f"expected {packed_length}, got {state.seq_len}")], 0
+        pairs = _cache_pairs(state.cache)
+    except Exception as error:
+        return [CheckFailure("exception", detail=f"{type(error).__name__}: {error}")], 0
+
+    for row, path in enumerate(paths):
+        reference = _reference_forward(reference_model, (*case.prefix, *path))
+        expected_pairs = _cache_pairs(reference.past_key_values)
+        wanted = reference.logits[0, -1].float()
+        try:
+            actual = logits[row].to(wanted.device)
+            if actual.argmax().item() != wanted.argmax().item():
+                failures.append(CheckFailure("tree_token", row, "packed row argmax differs"))
+            if not torch.allclose(actual, wanted, atol=atol, rtol=rtol):
+                failures.append(CheckFailure("tree_logits", row, "packed row logits differ beyond tolerance"))
+            if len(pairs) != len(expected_pairs):
+                failures.append(CheckFailure("tree_cache_layers", row, "cache layer counts differ"))
+            for layer, (actual_pair, expected_pair) in enumerate(zip(pairs, expected_pairs)):
+                for name, got, want in zip(("keys", "values"), actual_pair, expected_pair):
+                    if got.shape[-2] != packed_length:
+                        failures.append(CheckFailure("tree_cache_values", row, f"layer {layer} {name} packed length differs"))
+                        continue
+                    if row == 0:
+                        got = got[..., :len(case.prefix) + 1, :]  # Check the shared prefix once.
+                    else:
+                        position = len(case.prefix) + row
+                        got, want = got[..., position:position + 1, :], want[..., -1:, :]
+                    if got.shape != want.shape or got.dtype != want.dtype:
+                        failures.append(CheckFailure("tree_cache_values", row, f"layer {layer} {name} shape or dtype differs"))
+                    elif not torch.allclose(got.to(want.device), want, atol=atol, rtol=rtol):
+                        failures.append(CheckFailure("tree_cache_values", row, f"layer {layer} {name} differ"))
+            checked += 1
+        except Exception as error:
+            failures.append(CheckFailure("exception", row, f"{type(error).__name__}: {error}"))
+            break
+    return failures, checked
+
+
 def _round_expectation(target, reference_model, case, verifier):
     if target.model is reference_model:
         raise ValueError("use a separate reference model")
@@ -171,6 +225,7 @@ def check_verifier_state(
     verifier: str = "tree",
     atol: float = 2e-6,
     rtol: float = 2e-5,
+    inspect_tree: bool = False,
 ) -> RoundCheck:
     """Check one real round, cache values, and one subsequent target step.
 
@@ -178,15 +233,24 @@ def check_verifier_state(
     This supports HF-compatible caches and ReplayCache. The reference uses native
     generation and fresh full-prefix forwards, never target cache operations.
     Reference errors propagate; candidate exceptions are reported as failures.
+    inspect_tree checks every packed row in a separate pass, including rejected
+    branches, with at most 32 draft nodes. Each reference branch is run separately.
     """
     if not case.prefix:
         raise InvalidCheckCase("standalone round checks need a nonempty prefill prefix")
     _validate_tolerances(atol, rtol)
+    if type(inspect_tree) is not bool or (inspect_tree and verifier != "tree"):
+        raise ValueError("inspect_tree must be boolean and requires the tree verifier")
+    if inspect_tree and len(case.drafts) > 32:
+        raise InvalidCheckCase("inspect_tree supports at most 32 draft nodes")
     expected, accepted = _round_expectation(target, reference_model, case, verifier)
     cached_tokens = (*case.prefix, case.pending, *expected[:-1])
     reference_cache = _reference_forward(reference_model, cached_tokens).past_key_values
     reference_next = _reference_forward(reference_model, (*cached_tokens, expected[-1]))
-    failures, actual, length = [], None, None
+    failures, checked = [], 0
+    if inspect_tree:
+        failures, checked = _inspect_tree_rows(target, reference_model, case, atol=atol, rtol=rtol)
+    actual, length = None, None
     try:
         state, _ = target.prefill(list(case.prefix))
         if verifier == "tree":
@@ -207,4 +271,4 @@ def check_verifier_state(
                                             atol=atol, rtol=rtol))
     except Exception as error:
         failures.append(CheckFailure("exception", detail=f"{type(error).__name__}: {error}"))
-    return RoundCheck(case, verifier, expected, actual, len(cached_tokens), length, tuple(failures))
+    return RoundCheck(case, verifier, expected, actual, len(cached_tokens), length, tuple(failures), checked)
