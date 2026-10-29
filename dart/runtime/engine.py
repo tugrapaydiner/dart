@@ -444,7 +444,7 @@ class DartEngine:
                         verify_ms=(t2 - t1) * 1000.0,
                     )
                     self.trace.log_round(run_id, rec, result.committed)
-                    if park_kv:
+                    if park_kv and not finished and len(generated) < config.max_new_tokens:
                         # Offload the verifier KV to host, overlapped with the next
                         # round's drafting.  Capture the cache object now so a later
                         # forward rebinding state.cache can't race the worker.
