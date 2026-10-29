@@ -26,6 +26,7 @@ def _parser() -> argparse.ArgumentParser:
     source = check.add_mutually_exclusive_group(required=True)
     source.add_argument("--model", help="existing local Supra-50M model directory")
     source.add_argument("--synthetic", action="store_true", help="check tiny random CPU models; no download or default report")
+    check.add_argument("--state", action="store_true", help="check interleaved request caches; requires --synthetic")
     for command in (check, bench, demo):
         if command is not check:
             command.add_argument("--model", required=True, help="existing local Supra-50M model directory")
@@ -182,6 +183,8 @@ def main(argv: list[str] | None = None) -> int:
     parser = _parser()
     args = parser.parse_args(argv)
     try:
+        if args.command == "check" and args.state and not args.synthetic:
+            raise ValueError("--state requires --synthetic")
         if args.command == "check" and args.synthetic:
             from dart.cli_check import run_synthetic
 

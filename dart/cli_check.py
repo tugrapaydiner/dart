@@ -12,6 +12,41 @@ from pathlib import Path
 from dart import __version__
 
 
+def _output_summary(report, seed):
+    total, failed = len(report.results), len(report.failures)
+    print(f"Synthetic CPU check: {total - failed}/{total} comparisons passed (seed {seed}).")
+    for row in report.failures[:5]:
+        index = "" if row.failure.index is None else f" at token {row.failure.index}"
+        print(f"Failed: {row.backend} / {row.case.name}: {row.failure.kind}{index}.")
+    if failed > 5:
+        print(f"{failed - 5} more failures; use --out to save the full report.")
+    return {
+        "schema": "dart-synthetic-check-v1", "scope": "tiny CPU eager output checks",
+        "reference": "native HF greedy",
+        "summary": {"cases": len({row.case.name for row in report.results}),
+                    "comparisons": total, "passed": total - failed, "failed": failed},
+        "results": [asdict(row) for row in report.results],
+    }
+
+
+def _state_summary(report, seed):
+    total, failed = len(report.steps), sum(not step.passed for step in report.steps)
+    print(f"Synthetic CPU state check: {total - failed}/{total} steps passed (seed {seed}).")
+    failures = [(index, step.operation.request, item) for index, step in enumerate(report.steps, 1)
+                for item in step.failures]
+    for index, actor, item in failures[:5]:
+        print(f"Failed: step {index} / {actor} -> {item.request}: {item.failure.kind}.")
+    if len(failures) > 5:
+        print(f"{len(failures) - 5} more failures; use --out to save the full report.")
+    return {
+        "schema": "dart-synthetic-state-check-v1", "scope": "tiny CPU eager request-state checks",
+        "reference": "native HF forward and greedy",
+        "summary": {"steps": total, "passed": total - failed, "failed": failed,
+                    "cache_checks": sum(len(step.checked_requests) for step in report.steps)},
+        "steps": [asdict(step) for step in report.steps],
+    }
+
+
 def run_synthetic(args) -> int:
     if args.device != "cpu":
         raise ValueError("synthetic checks currently support CPU only")
@@ -25,33 +60,29 @@ def run_synthetic(args) -> int:
 
     import torch
 
-    from dart.verification.synthetic import run_synthetic_check, synthetic_model_config
+    from dart.verification.synthetic import (
+        run_synthetic_check,
+        run_synthetic_state_check,
+        synthetic_model_config,
+    )
 
     threads = torch.get_num_threads()
     try:
         torch.set_num_threads(1)
-        report = run_synthetic_check(args.seed)
+        check = run_synthetic_state_check if args.state else run_synthetic_check
+        report = check(args.seed)
     finally:
         torch.set_num_threads(threads)
-    total, failed = len(report.results), len(report.failures)
-    print(f"Synthetic CPU check: {total - failed}/{total} comparisons passed (seed {args.seed}).")
-    for row in report.failures[:5]:
-        index = "" if row.failure.index is None else f" at token {row.failure.index}"
-        print(f"Failed: {row.backend} / {row.case.name}: {row.failure.kind}{index}.")
-    if failed > 5:
-        print(f"{failed - 5} more failures; use --out to save the full report.")
+    summary = _state_summary(report, args.seed) if args.state else _output_summary(report, args.seed)
     if output is not None:
         data = {
-            "schema": "dart-synthetic-check-v1", "status": "passed" if report.passed else "failed",
-            "seed": args.seed, "scope": "tiny CPU eager output checks", "reference": "native HF greedy",
+            **summary, "status": "passed" if report.passed else "failed", "seed": args.seed,
             "model": {"architecture": "LlamaForCausalLM", "config": synthetic_model_config(),
                       "device": "cpu", "dtype": "float32", "threads": 1},
             "versions": {"dart": __version__, "python": platform.python_version(),
                          "torch": version("torch"), "transformers": version("transformers")},
-            "summary": {"cases": len({row.case.name for row in report.results}),
-                        "comparisons": total, "passed": total - failed, "failed": failed},
-            "results": [asdict(row) for row in report.results],
-            "reproduce": ["dart", "check", "--synthetic", "--seed", str(args.seed)],
+            "reproduce": ["dart", "check", "--synthetic", *(["--state"] if args.state else []),
+                          "--seed", str(args.seed)],
         }
         output.parent.mkdir(parents=True, exist_ok=True)
         with output.open("x", encoding="utf-8") as destination:

@@ -18,6 +18,11 @@ from dart.verification.differential import (
     hf_decoder,
     run_differential,
 )
+from dart.verification.state_sequences import (
+    StateOperation,
+    StateSequenceCheck,
+    check_state_sequence,
+)
 from dart.verification.tree_verify import DraftTree
 
 VOCAB_SIZE = 67
@@ -50,16 +55,77 @@ class _ProbeDrafter:
         pass
 
 
-def synthetic_cases(seed: int = 17) -> tuple[GenerationCase, ...]:
-    """Six bounded cases, including zero output and a full context boundary."""
+def _generator(seed):
     if type(seed) is not int or not 0 <= seed < 2**63:
         raise ValueError("seed must be an integer in [0, 2**63)")
-    generator = torch.Generator(device="cpu").manual_seed(seed)
+    return torch.Generator(device="cpu").manual_seed(seed)
+
+
+def synthetic_cases(seed: int = 17) -> tuple[GenerationCase, ...]:
+    """Six bounded cases, including zero output and a full context boundary."""
+    generator = _generator(seed)
     cases = []
     for index, (length, budget) in enumerate(((1, 0), (4, 1), (7, 2), (8, 5), (51, 13), (8, 8))):
         prompt = torch.randint(3, VOCAB_SIZE, (length,), generator=generator).tolist()
         cases.append(GenerationCase(f"case-{index}", tuple(prompt), budget))
     return tuple(cases)
+
+
+def synthetic_state_operations(seed: int = 17) -> tuple[StateOperation, ...]:
+    """Bounded eager operations covering interleaving, rollback and context errors."""
+    generator = _generator(seed)
+
+    def tokens(count):
+        return tuple(torch.randint(3, VOCAB_SIZE, (count,), generator=generator).tolist())
+
+    return (
+        StateOperation("a", "prefill", tokens(4)),
+        StateOperation("b", "prefill", tokens(7)),
+        StateOperation("a", "forward", tokens(3)),
+        StateOperation("b", "block", tokens(4)),
+        StateOperation("a", "tree", tokens(5), (-1, -1, 0, 1)),
+        StateOperation("b", "forward", tokens(2)),
+        StateOperation("a", "crop", length=0),
+        StateOperation("b", "forward", tokens(1)),
+        StateOperation("a", "block", tokens(3)),
+        StateOperation("a", "release"),
+        StateOperation("a", "prefill", tokens(CONTEXT_LENGTH + 1), expect_error="ValueError"),
+        StateOperation("a", "prefill", tokens(CONTEXT_LENGTH - 1)),
+        StateOperation("a", "forward", tokens(1)),
+        StateOperation("a", "forward", tokens(1), expect_error="ValueError"),
+        StateOperation("a", "crop", length=CONTEXT_LENGTH - 1),
+        StateOperation("a", "forward", tokens(1)),
+        StateOperation("a", "release"),
+        StateOperation("a", "prefill", tokens(3)),
+        StateOperation("b", "crop", length=-1, expect_error="ValueError"),
+        StateOperation("b", "crop", length=CONTEXT_LENGTH + 1, expect_error="ValueError"),
+        StateOperation("b", "forward", tokens(CONTEXT_LENGTH), expect_error="ValueError"),
+        StateOperation("b", "forward", tokens(2)),
+        StateOperation("a", "tree", tokens(5), (-1, 0, -1, 2)),
+        StateOperation("b", "release"),
+        StateOperation("a", "forward", tokens(1)),
+        StateOperation("a", "release"),
+    )
+
+
+def _synthetic_models(seed):
+    with torch.random.fork_rng(devices=[]), torch.device("cpu"):
+        torch.random.default_generator.manual_seed(seed)
+        config = LlamaConfig(**synthetic_model_config())
+        reference = LlamaForCausalLM(config).to(device="cpu", dtype=torch.float32).eval()
+    target = TargetModel(copy.deepcopy(reference), device="cpu", dtype=torch.float32)
+    return target, reference
+
+
+def run_synthetic_state_check(seed: int = 17) -> StateSequenceCheck:
+    """Check every live cache against independent HF state, without a checkpoint.
+
+    Release drops request state, not the target. This suite exercises tiny eager
+    CPU paths; it does not validate graph capture or backend close behavior.
+    """
+    operations = synthetic_state_operations(seed)
+    target, reference = _synthetic_models(seed)
+    return check_state_sequence(target, reference, operations)
 
 
 def run_synthetic_check(
@@ -74,11 +140,7 @@ def run_synthetic_check(
     tree engines. This is a small output check, not a performance benchmark.
     """
     cases = synthetic_cases(seed)
-    with torch.random.fork_rng(devices=[]), torch.device("cpu"):
-        torch.random.default_generator.manual_seed(seed)
-        config = LlamaConfig(**synthetic_model_config())
-        reference = LlamaForCausalLM(config).to(device="cpu", dtype=torch.float32).eval()
-    target = TargetModel(copy.deepcopy(reference), device="cpu", dtype=torch.float32)
+    target, reference = _synthetic_models(seed)
     if adapter_factory is None:
         candidates = {
             "greedy": engine_decoder(DartEngine(target)),
