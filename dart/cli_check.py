@@ -54,6 +54,8 @@ def run_synthetic(args) -> int:
         raise ValueError("synthetic checks do not use corpus, split or norm-control options")
     if not 0 <= args.seed < 2**63:
         raise ValueError("seed must be in [0, 2**63)")
+    if args.reduce is not None and not 2 <= args.reduce <= 32:
+        raise ValueError("--reduce needs between 2 and 32 evaluations")
     output = Path(args.out) if args.out else None
     if output is not None and os.path.lexists(output):
         raise FileExistsError(f"output already exists: {output}")
@@ -65,25 +67,45 @@ def run_synthetic(args) -> int:
         run_synthetic_state_check,
         synthetic_model_config,
     )
+    from dart.verification.synthetic_replay import load_state_replay, reduce_state_check
 
+    replay = load_state_replay(args.replay) if args.replay is not None else None
+    seed = replay.seed if replay is not None else args.seed
     threads = torch.get_num_threads()
     try:
         torch.set_num_threads(1)
-        check = run_synthetic_state_check if args.state else run_synthetic_check
-        report = check(args.seed)
+        if replay is not None:
+            report = run_synthetic_state_check(seed, operations=replay.operations)
+        else:
+            check = run_synthetic_state_check if args.state else run_synthetic_check
+            report = check(seed)
+        reduction = reduce_state_check(report, seed, max_evaluations=args.reduce) if args.reduce is not None else None
     finally:
         torch.set_num_threads(threads)
-    summary = _state_summary(report, args.seed) if args.state else _output_summary(report, args.seed)
+    summary = _state_summary(report, seed) if args.state else _output_summary(report, seed)
+    if replay is not None:
+        summary["replay"] = {"source_sha256": replay.source_sha256, "selection": replay.selection}
+    if reduction is not None:
+        summary["reduction"] = asdict(reduction)
+        summary["reduction"].pop("original")
+        summary["reduction"]["reproduced"] = reduction.reproduced
+        status = "same failure reproduced" if reduction.reproduced else "failure did not reproduce"
+        print(f"Reduction: {len(reduction.original)} -> {len(reduction.reduced)} steps; "
+              f"{reduction.evaluations} checks; {status}.")
+    elif args.reduce is not None:
+        print("No failing case to reduce.")
     if output is not None:
         data = {
-            **summary, "status": "passed" if report.passed else "failed", "seed": args.seed,
+            **summary, "status": "passed" if report.passed else "failed", "seed": seed,
             "model": {"architecture": "LlamaForCausalLM", "config": synthetic_model_config(),
                       "device": "cpu", "dtype": "float32", "threads": 1},
             "versions": {"dart": __version__, "python": platform.python_version(),
                          "torch": version("torch"), "transformers": version("transformers")},
             "reproduce": ["dart", "check", "--synthetic", *(["--state"] if args.state else []),
-                          "--seed", str(args.seed)],
+                          "--seed", str(seed)],
         }
+        if replay is not None or reduction is not None:
+            data["reproduce"] = ["dart", "check", "--synthetic", "--state", "--replay", str(output)]
         output.parent.mkdir(parents=True, exist_ok=True)
         with output.open("x", encoding="utf-8") as destination:
             json.dump(data, destination, indent=2)

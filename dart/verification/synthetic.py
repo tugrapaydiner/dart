@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import copy
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Mapping, Sequence
 
 import torch
 from transformers import LlamaConfig, LlamaForCausalLM
@@ -14,6 +14,7 @@ from dart.verification.differential import (
     CheckReport,
     Decoder,
     GenerationCase,
+    InvalidCheckCase,
     engine_decoder,
     hf_decoder,
     run_differential,
@@ -21,6 +22,7 @@ from dart.verification.differential import (
 from dart.verification.state_sequences import (
     StateOperation,
     StateSequenceCheck,
+    _validate_operations,
     check_state_sequence,
 )
 from dart.verification.tree_verify import DraftTree
@@ -117,13 +119,31 @@ def _synthetic_models(seed):
     return target, reference
 
 
-def run_synthetic_state_check(seed: int = 17) -> StateSequenceCheck:
+def _bounded_state_operations(operations):
+    if not isinstance(operations, Sequence) or not 1 <= len(operations) <= 64:
+        raise InvalidCheckCase("provide between 1 and 64 synthetic state operations")
+    operations = tuple(operations)
+    _validate_operations(operations)
+    for operation in operations:
+        if len(operation.request) > 64 or len(operation.tokens) > CONTEXT_LENGTH + 1:
+            raise InvalidCheckCase("synthetic operation exceeds the name or token limit")
+        if any(token >= VOCAB_SIZE for token in operation.tokens):
+            raise InvalidCheckCase("synthetic token is outside the vocabulary")
+        if operation.length is not None and abs(operation.length) > CONTEXT_LENGTH + 1:
+            raise InvalidCheckCase("synthetic crop exceeds the length limit")
+    return operations
+
+
+def run_synthetic_state_check(
+    seed: int = 17, *, operations: Sequence[StateOperation] | None = None,
+) -> StateSequenceCheck:
     """Check every live cache against independent HF state, without a checkpoint.
 
     Release drops request state, not the target. This suite exercises tiny eager
     CPU paths; it does not validate graph capture or backend close behavior.
     """
-    operations = synthetic_state_operations(seed)
+    _generator(seed)
+    operations = _bounded_state_operations(synthetic_state_operations(seed) if operations is None else operations)
     target, reference = _synthetic_models(seed)
     return check_state_sequence(target, reference, operations)
 
