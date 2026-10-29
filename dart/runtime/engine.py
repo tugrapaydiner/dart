@@ -277,7 +277,7 @@ class DartEngine:
             )
         else:
             verify_fn = self.verify
-            if not needs_entropy and unwrap(verify_fn) is verify_block_greedy:
+            if not needs_entropy and unwrap(verify_fn) in (verify_block_greedy, unwrap(verify_tree_greedy)):
                 verify_fn = partial(verify_fn, compute_entropy=False)
 
         run_id = uuid.uuid4().hex[:12]

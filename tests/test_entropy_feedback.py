@@ -12,9 +12,11 @@ from dart.runtime.scheduler import HeuristicScheduler, SchedulerConfig
 from dart.runtime.time_scheduler import TimeScheduler
 from dart.runtime.types import DecodeConfig
 from dart.verification.block_verify import verify_block_greedy
+from dart.verification.tree_verify import verify_tree_greedy
 from tests.conftest import build_tiny_target, random_prompt
 
 
+@pytest.mark.parametrize("verify", [verify_block_greedy, verify_tree_greedy])
 @pytest.mark.parametrize("pending,drafts,eos", [
     ([4], [], set()),
     ([4], [7, 7], set()),
@@ -24,7 +26,7 @@ from tests.conftest import build_tiny_target, random_prompt
     ([4], [1, 2], {3}),
     ([4, 6], [2, 7], set()),
 ])
-def test_optional_entropy_keeps_decisions_and_cache(pending, drafts, eos):
+def test_optional_entropy_keeps_decisions_and_cache(pending, drafts, eos, verify):
     class Target:
         eos_token_ids = eos
 
@@ -35,12 +37,18 @@ def test_optional_entropy_keeps_decisions_and_cache(pending, drafts, eos):
         def crop(self, state, length):
             state.seq_len = length
 
+        def forward_tree(self, state, pending, drafts, parents):
+            return self.forward_block(state, pending + drafts)
+
+        def gather_tree_tail(self, state, keep_len, path):
+            state.seq_len = keep_len + len(path)
+
     target = Target()
     enabled_state = SimpleNamespace(seq_len=9)
     disabled_state = SimpleNamespace(seq_len=9)
-    expected = verify_block_greedy(target, enabled_state, pending, drafts)
+    expected = verify(target, enabled_state, pending, drafts)
     with patch.object(torch, "softmax", side_effect=AssertionError("unused entropy")):
-        actual = verify_block_greedy(target, disabled_state, pending, drafts, compute_entropy=False)
+        actual = verify(target, disabled_state, pending, drafts, compute_entropy=False)
     assert actual == expected
     assert actual.hidden_index == expected.hidden_index
     assert disabled_state.seq_len == enabled_state.seq_len
@@ -51,11 +59,12 @@ def test_optional_entropy_keeps_decisions_and_cache(pending, drafts, eos):
 
 @pytest.mark.parametrize("drafter", [NullDrafter, NGramDrafter])
 @pytest.mark.parametrize("budget", [1, 16])
-def test_fixed_lanes_skip_unused_entropy(drafter, budget):
+@pytest.mark.parametrize("verifier", ["block", "tree"])
+def test_fixed_lanes_skip_unused_entropy(drafter, budget, verifier):
     target = build_tiny_target()
     prompt = random_prompt(411, 12)
     expected = target.greedy_generate(prompt, budget)
-    with DartEngine(target, drafter()) as engine:
+    with DartEngine(target, drafter(), verifier=verifier) as engine:
         with patch.object(torch, "softmax", side_effect=AssertionError("unused entropy")):
             actual = engine.generate(prompt, DecodeConfig(max_new_tokens=budget, draft_len=4))
     assert actual.token_ids == expected
@@ -75,13 +84,14 @@ class RecordingDrafter:
         self.entropies.append(result.entropy)
 
 
-def test_custom_feedback_defaults_to_entropy_and_can_opt_out():
+@pytest.mark.parametrize("verifier", ["block", "tree"])
+def test_custom_feedback_defaults_to_entropy_and_can_opt_out(verifier):
     target = build_tiny_target()
     target.eos_token_ids = frozenset()
     drafter = RecordingDrafter()
     prompt = random_prompt(412, 10)
     expected = target.greedy_generate(prompt, 8)
-    with DartEngine(target, drafter) as engine:
+    with DartEngine(target, drafter, verifier=verifier) as engine:
         for flag in (None, False, True, False):
             if flag is not None:
                 drafter.requires_entropy = flag
@@ -92,7 +102,8 @@ def test_custom_feedback_defaults_to_entropy_and_can_opt_out():
             assert all((value > 0) == (flag is not False) for value in drafter.entropies)
 
 
-def test_scheduler_receives_prefill_entropy_and_live_feedback():
+@pytest.mark.parametrize("verifier", ["block", "tree"])
+def test_scheduler_receives_prefill_entropy_and_live_feedback(verifier):
     class Scheduler(HeuristicScheduler):
         def reset(self):
             super().reset()
@@ -114,7 +125,7 @@ def test_scheduler_receives_prefill_entropy_and_live_feedback():
     probs = logits.float().softmax(-1)
     entropy = float(-(probs * probs.clamp_min(1e-12).log()).sum())
     scheduler = Scheduler(SchedulerConfig(available_lanes=["ngram"], entropy_gate_threshold=0.0))
-    with DartEngine(target, lanes={"ngram": NGramDrafter()}, scheduler=scheduler) as engine:
+    with DartEngine(target, lanes={"ngram": NGramDrafter()}, scheduler=scheduler, verifier=verifier) as engine:
         for _ in range(2):
             actual = engine.generate(prompt, DecodeConfig(max_new_tokens=8))
             assert actual.token_ids == expected
@@ -123,14 +134,16 @@ def test_scheduler_receives_prefill_entropy_and_live_feedback():
             assert scheduler.states[1] == pytest.approx(0.7 * entropy + 0.3 * scheduler.entropies[0])
 
 
-def test_time_scheduler_only_requests_entropy_for_an_active_gate():
+@pytest.mark.parametrize("verifier", ["block", "tree"])
+def test_time_scheduler_only_requests_entropy_for_an_active_gate(verifier):
     target = build_tiny_target()
     target.eos_token_ids = frozenset()
     prompt = random_prompt(415, 10)
     expected = target.greedy_generate(prompt, 8)
     config = SchedulerConfig(available_lanes=["ngram", "target_only"])
     scheduler = TimeScheduler(config)
-    with DartEngine(target, lanes={"ngram": NGramDrafter(), "target_only": NullDrafter()}, scheduler=scheduler) as engine:
+    with DartEngine(target, lanes={"ngram": NGramDrafter(), "target_only": NullDrafter()},
+                    scheduler=scheduler, verifier=verifier) as engine:
         for threshold in (float("inf"), 0.0, float("inf")):
             config.entropy_gate_threshold = threshold
             with patch.object(torch, "softmax", wraps=torch.softmax) as entropy:
@@ -139,34 +152,37 @@ def test_time_scheduler_only_requests_entropy_for_an_active_gate():
             assert (entropy.call_count > 0) == (threshold == 0)
 
 
-def test_entropy_consumer_still_gets_feedback_with_a_time_scheduler():
+@pytest.mark.parametrize("verifier", ["block", "tree"])
+def test_entropy_consumer_still_gets_feedback_with_a_time_scheduler(verifier):
     target = build_tiny_target()
     target.eos_token_ids = frozenset()
     drafter = RecordingDrafter()
     scheduler = TimeScheduler(SchedulerConfig(available_lanes=[drafter.name]))
     prompt = random_prompt(416, 10)
-    with DartEngine(target, lanes={drafter.name: drafter}, scheduler=scheduler) as engine:
+    with DartEngine(target, lanes={drafter.name: drafter}, scheduler=scheduler, verifier=verifier) as engine:
         actual = engine.generate(prompt, DecodeConfig(max_new_tokens=8))
     assert actual.token_ids == target.greedy_generate(prompt, 8)
     assert drafter.entropies and all(value > 0 for value in drafter.entropies)
 
 
 @pytest.mark.parametrize("wrapped", [False, True])
-def test_verifier_instrumentation_keeps_its_call_signature(wrapped):
+@pytest.mark.parametrize("verifier", ["block", "tree"])
+def test_verifier_instrumentation_keeps_its_call_signature(wrapped, verifier):
     target = build_tiny_target()
     prompt = random_prompt(414, 10)
     expected = target.greedy_generate(prompt, 8)
     calls = []
-    with DartEngine(target, NGramDrafter()) as engine:
+    original = verify_block_greedy if verifier == "block" else verify_tree_greedy
+    with DartEngine(target, NGramDrafter(), verifier=verifier) as engine:
         if wrapped:
-            @wraps(verify_block_greedy)
+            @wraps(original)
             def verify(*args, **kwargs):
                 calls.append(kwargs)
-                return verify_block_greedy(*args, **kwargs)
+                return original(*args, **kwargs)
         else:
             def verify(target, state, pending, drafts):
                 calls.append({})
-                return verify_block_greedy(target, state, pending, drafts)
+                return original(target, state, pending, drafts)
         engine.verify = verify
         actual = engine.generate(prompt, DecodeConfig(max_new_tokens=8))
     assert actual.token_ids == expected
