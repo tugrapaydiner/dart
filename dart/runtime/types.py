@@ -143,6 +143,7 @@ class RoundRecord:
     n_committed: int
     draft_ms: float
     verify_ms: float
+    verifier: str = "block"  # "none" for approx rounds that skip verification
 
 
 @dataclass
@@ -187,3 +188,4 @@ class DecodeAction:
     verify_every: int
     denoise_steps: int
     exact_mode: bool
+    verifier: Optional[str] = None  # None keeps the engine's verifier

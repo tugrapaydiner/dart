@@ -63,6 +63,7 @@ class DecodeMetrics:
     mode: str = "exact"
     target_model: str = ""
     lanes_used: set[str] = field(default_factory=set)
+    verifiers_used: set[str] = field(default_factory=set)
     tokens_generated: int = 0
     draft_tokens_proposed: int = 0
     draft_tokens_accepted: int = 0
@@ -76,6 +77,8 @@ class DecodeMetrics:
     def record_round(self, rec: RoundRecord) -> None:
         self.rounds += 1
         self.lanes_used.add(rec.lane)
+        if rec.verifier != "none":
+            self.verifiers_used.add(rec.verifier)
         self.tokens_generated += rec.n_committed
         self.draft_tokens_proposed += rec.n_draft_proposed
         self.draft_tokens_accepted += rec.n_draft_accepted
@@ -101,6 +104,7 @@ class DecodeMetrics:
             "mode": self.mode,
             "target_model": self.target_model,
             "lanes_used": sorted(self.lanes_used),
+            "verifiers_used": sorted(self.verifiers_used),
             "tokens_generated": self.tokens_generated,
             "draft_tokens_proposed": self.draft_tokens_proposed,
             "draft_tokens_accepted": self.draft_tokens_accepted,

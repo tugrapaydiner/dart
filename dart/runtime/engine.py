@@ -70,6 +70,9 @@ class DartEngine:
       * scheduled:     DartEngine(target, lanes={...}, scheduler=...)
         where lanes maps lane name -> Drafter and the scheduler picks a
         lane every round (docs/design.md §10).
+
+    ``verifier`` is the default; a scheduler action may name another verifier
+    for one round. All verifiers share the pending-token cache contract.
     """
 
     def __init__(
@@ -179,15 +182,15 @@ class DartEngine:
         self, config: DecodeConfig, prompt_len: int, generated_len: int,
         entropy_ewma: float = 0.0,
     ):
-        """Return (drafter, per-round draft budget) for this round."""
+        """Return (drafter, per-round draft budget, verifier name) for this round."""
         allowed = set(config.allowed_lanes) if config.allowed_lanes is not None else None
         if self.scheduler is None:
             d = self.drafter
             # Honor allowed_lanes: a disallowed single drafter -> target-only step.
             if allowed is not None and d.name not in allowed and d.name != "target_only":
-                return self._null, 0
+                return self._null, 0, self.verifier_name
             n = config.canvas_len if "diffusion" in d.name else config.draft_len
-            return d, n
+            return d, n, self.verifier_name
         s = DecodeState(
             context_len=prompt_len + generated_len,
             generated_len=generated_len,
@@ -203,7 +206,18 @@ class DartEngine:
         action = self.scheduler.choose_action(s, allowed=allowed)
         d = self.lanes.get(action.lane, self._null)
         n = action.canvas_len if action.canvas_len > 0 else action.draft_len
-        return d, n
+        return d, n, action.verifier or self.verifier_name
+
+    def _check_round_verifier(self, verifier: str, config: DecodeConfig) -> None:
+        """Reject a round's verifier before it drafts or touches request state."""
+        if verifier not in _VERIFIERS:
+            raise ValueError(f"unknown verifier {verifier!r}; use {list(_VERIFIERS)}")
+        if verifier == "block" or verifier == self.verifier_name:
+            return  # Checked once at admission.
+        if config.mode != "exact":
+            raise ValueError(f"the {verifier} verifier requires exact mode")
+        if getattr(self.target, "uses_replay_cache", False):
+            raise ValueError("static and CUDA replay targets support block verification only")
 
     def _seed_drafters(self, seed: int) -> None:
         """Give each drafter its own stream derived from the request seed."""
@@ -288,18 +302,25 @@ class DartEngine:
             getattr(drafter, "requires_entropy", True) for drafter in self._all_drafters()
         )
         generator = None
+        verify_fns: dict[str, VerifyFn] = {}
         if sampling:
             generator = torch.Generator(device=self.target.device)
             generator.manual_seed(config.seed if config.seed is not None else 0)
-            verify_fn: VerifyFn = partial(
+            sampling_fn: VerifyFn = partial(
                 verify_block_sampling,
                 generator=generator,
                 temperature=config.temperature,
             )
-        else:
-            verify_fn = self.verify
-            if not needs_entropy and unwrap(verify_fn) in (verify_block_greedy, unwrap(verify_tree_greedy)):
-                verify_fn = partial(verify_fn, compute_entropy=False)
+
+        def verifier_fn(name: str) -> VerifyFn:
+            if sampling:
+                return sampling_fn
+            if name not in verify_fns:
+                fn = self.verify if name == self.verifier_name else _VERIFIERS[name]
+                if not needs_entropy and unwrap(fn) in (verify_block_greedy, unwrap(verify_tree_greedy)):
+                    fn = partial(fn, compute_entropy=False)
+                verify_fns[name] = fn
+            return verify_fns[name]
 
         run_id = uuid.uuid4().hex[:12]
         metrics = DecodeMetrics(
@@ -368,14 +389,15 @@ class DartEngine:
             while not finished and len(generated) < config.max_new_tokens:
                 round_start = time.perf_counter() if timed_scheduler else 0.0
                 committed_seq = prompt + generated
-                drafter, draft_len = self._pick_lane(
+                drafter, draft_len, verifier = self._pick_lane(
                     config, len(prompt), len(generated), entropy_ewma=ent_ewma
                 )
+                self._check_round_verifier(verifier, config)
 
                 t0 = time.perf_counter()
                 budget = config.max_new_tokens - len(generated)
                 per_round = min(draft_len, budget - 1)  # Leave room for the verifier's token.
-                if self.verifier_name == "tree":
+                if verifier == "tree":
                     # Tree-capable drafters propose several candidate branches;
                     # plain drafters degrade to a chain, for which tree and
                     # block verification coincide decision-for-decision.
@@ -423,7 +445,7 @@ class DartEngine:
                         round_idx=round_idx, lane=drafter.name,
                         n_draft_proposed=0, n_draft_accepted=0,
                         n_committed=len(kept),
-                        draft_ms=(t1 - t0) * 1000.0, verify_ms=0.0,
+                        draft_ms=(t1 - t0) * 1000.0, verify_ms=0.0, verifier="none",
                     )
                 else:
                     if park_kv:
@@ -437,6 +459,7 @@ class DartEngine:
                         staged = move_cache(state.cache, self.target.device)
                         res_stats.moved_tensors += staged.moved_tensors
                         res_stats.moved_bytes += staged.moved_bytes
+                    verify_fn = verifier_fn(verifier)
                     if sampling:
                         result = verify_fn(
                             self.target, state, pending_block, drafts,
@@ -469,6 +492,7 @@ class DartEngine:
                         n_committed=len(result.committed),
                         draft_ms=(t1 - t0) * 1000.0,
                         verify_ms=(t2 - t1) * 1000.0,
+                        verifier="sampling" if sampling else verifier,
                     )
                     self.trace.log_round(run_id, rec, result.committed)
                     if park_kv and not finished and len(generated) < config.max_new_tokens:
