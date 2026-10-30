@@ -37,7 +37,7 @@ from dart.runtime.scheduler import (
     HeuristicScheduler,
     SchedulerConfig,
 )
-from dart.runtime.time_scheduler import TimeScheduler
+from dart.runtime.time_scheduler import CostTableScheduler, TimeScheduler
 
 
 def build_target(spec: dict) -> TargetModel:
@@ -281,12 +281,16 @@ def _engine_for_target(cfg, target, cleanup):
     sched_cls = (
         BanditScheduler if sched_type in ("contextual_bandit", "bandit")
         else TimeScheduler if sched_type == "time"
+        else CostTableScheduler if sched_type == "cost_table"
         else HeuristicScheduler
     )
     timing_options = {
         key: sched_cfg[key] for key in ("retry_interval", "warmup_rounds", "min_time_saving")
         if key in sched_cfg
-    } if sched_cls is TimeScheduler else {}
+    } if sched_cls in (TimeScheduler, CostTableScheduler) else {}
+    if sched_cls is CostTableScheduler and "draft_lengths" in sched_cfg:
+        lengths = sched_cfg["draft_lengths"]
+        timing_options["draft_lengths"] = tuple(lengths) if isinstance(lengths, list) else lengths  # YAML gives lists.
     scheduler = sched_cls(
         SchedulerConfig(
             available_lanes=list(lanes),
