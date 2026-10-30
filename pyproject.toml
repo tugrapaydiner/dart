@@ -10,8 +10,8 @@ readme = {text = "DART provides verified drafting and local model evaluation. Th
 requires-python = ">=3.10"
 license = { text = "Apache-2.0" }
 dependencies = [
-    "torch>=2.1",
-    "transformers>=4.40",
+    "torch>=2.11",
+    "transformers>=5.16.1",
     "numpy>=1.24",
     "pyyaml>=6.0",
     "safetensors>=0.4",

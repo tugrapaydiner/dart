@@ -26,11 +26,11 @@ import torch
 from packaging.version import Version
 from torch import Tensor
 
-try:  # transformers >= 4.40
+try:
     from transformers import AutoModelForCausalLM, AutoTokenizer
     from transformers.cache_utils import DynamicCache
 except ImportError as e:  # pragma: no cover
-    raise ImportError("dart requires `transformers>=4.40`") from e
+    raise ImportError("dart requires `transformers>=5.16.1`") from e
 
 
 @dataclass

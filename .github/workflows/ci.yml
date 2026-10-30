@@ -109,7 +109,7 @@ jobs:
           (suite / "tests").mkdir(parents=True)
           (suite / "tests/__init__.py").write_text("", encoding="utf-8")
           checkout_only = {  # These import scripts/ or run commands from the source tree.
-              "test_cli_check.py", "test_cli_train.py", "test_compact_eval.py", "test_execution_bench.py",
+              "test_cli_check.py", "test_cli_train.py", "test_compact_eval.py", "test_dependency_floors.py", "test_execution_bench.py",
               "test_failure_training.py", "test_pilot_corpus.py", "test_real_model_script.py",
               "test_reconciliation_benchmark.py",
           }
