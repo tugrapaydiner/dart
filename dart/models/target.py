@@ -163,6 +163,9 @@ class TargetModel:
         """Check prompt admission without executing the model."""
         ids = self._ids(prompt_ids)
         self.validate_generation(ids.size(1), 0)
+        self._check_vocabulary(ids)
+
+    def _check_vocabulary(self, ids: Tensor) -> None:
         low, high = torch.aminmax(ids)
         if low.item() < 0 or high.item() >= self.model.config.vocab_size:
             raise ValueError("token id is outside the model vocabulary")
@@ -190,6 +193,7 @@ class TargetModel:
         input_ids = self._ids(prompt_ids)
         if input_ids.size(1) == 0:
             raise ValueError("prompt must contain at least one token")
+        self._check_vocabulary(input_ids)  # Out-of-range IDs assert inside CUDA embedding kernels.
         state = TargetState(cache=cache if cache is not None else DynamicCache())
         logits = self._forward(state, input_ids, last_logits_only=True)
         return state, logits[-1]
