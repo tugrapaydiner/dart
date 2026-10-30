@@ -19,9 +19,11 @@ from __future__ import annotations
 
 import inspect
 from dataclasses import dataclass, field
+from importlib.metadata import version
 from typing import Optional
 
 import torch
+from packaging.version import Version
 from torch import Tensor
 
 try:  # transformers >= 4.40
@@ -117,9 +119,10 @@ class TargetModel:
     ) -> "TargetModel":
         if dtype is None:
             dtype = torch.float32 if device == "cpu" else torch.bfloat16
+        dtype_option = "dtype" if Version(version("transformers")) >= Version("5") else "torch_dtype"  # 5.x deprecates torch_dtype.
         model = AutoModelForCausalLM.from_pretrained(
             name_or_path,
-            torch_dtype=dtype,
+            **{dtype_option: dtype},
             attn_implementation=attn_implementation,
             trust_remote_code=trust_remote_code,
             local_files_only=local_files_only,
