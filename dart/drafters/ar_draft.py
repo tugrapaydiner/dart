@@ -39,8 +39,14 @@ class ARDrafter:
         draft_model: TargetModel,
         sample_temperature: float = 1.0,
         seed: int = 0,
+        *,
+        owns_model: bool = False,
     ) -> None:
+        if type(owns_model) is not bool:
+            raise ValueError("owns_model must be a boolean")
         self.dm = draft_model
+        self._owns_model = owns_model
+        self._model_closed = False
         self.sample_temperature = sample_temperature
         self.gen = torch.Generator(device=draft_model.device).manual_seed(seed)
         self._state: Optional[TargetState] = None
@@ -56,6 +62,14 @@ class ARDrafter:
 
     def seed_request(self, seed: int) -> None:
         self.gen.manual_seed(seed)
+
+    def close(self) -> None:
+        """Close the draft model when this drafter owns it; shared models stay open."""
+        if self._owns_model and not self._model_closed:
+            close = getattr(self.dm, "close", None)
+            if close is not None:
+                close()
+            self._model_closed = True
 
     def _make_cache(self):
         """Cache for fresh prefills; subclasses substitute compressed caches."""

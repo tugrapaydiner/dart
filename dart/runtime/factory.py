@@ -159,7 +159,7 @@ def build_lane(name: str, spec: dict, target: TargetModel):
         )
     if name == "ar_draft":
         draft_target = build_target(spec)
-        return ARDrafter(draft_target)
+        return ARDrafter(draft_target, owns_model=True)
     if name == "mtp":
         heads = MTPHeads(
             hidden_size=target.model.config.hidden_size,
@@ -236,12 +236,20 @@ def build_engine(cfg: dict):
         close = getattr(target, "close", None)
         if close is not None:
             cleanup.callback(close)
-        engine = _engine_for_target(cfg, target)
+        engine = _engine_for_target(cfg, target, cleanup)
         cleanup.pop_all()  # The completed engine takes ownership.
         return engine
 
 
-def _engine_for_target(cfg, target):
+def _owned_lane(name, spec, target, cleanup):
+    lane = build_lane(name, spec or {}, target)
+    close = getattr(lane, "close", None)
+    if close is not None:
+        cleanup.callback(close)
+    return lane
+
+
+def _engine_for_target(cfg, target, cleanup):
     from dart.runtime.engine import DartEngine
 
     defaults = decode_defaults(cfg)
@@ -252,19 +260,19 @@ def _engine_for_target(cfg, target):
     if not lane_specs:
         return DartEngine(
             target, verifier=cfg.get("verifier", "block"),
-            default_decode_config=defaults, owns_target=True,
+            default_decode_config=defaults, owns_target=True, owns_drafters=True,
         )
 
     if len(lane_specs) == 1 and not cfg.get("scheduler"):
         name, spec = next(iter(lane_specs.items()))
         return DartEngine(
-            target, drafter=build_lane(name, spec or {}, target),
+            target, drafter=_owned_lane(name, spec, target, cleanup),
             verifier=cfg.get("verifier", "block"),
-            default_decode_config=defaults, owns_target=True,
+            default_decode_config=defaults, owns_target=True, owns_drafters=True,
         )
 
     lanes = {
-        name: build_lane(name, spec or {}, target)
+        name: _owned_lane(name, spec, target, cleanup)
         for name, spec in lane_specs.items()
     }
     lanes.setdefault("target_only", NullDrafter())
@@ -301,7 +309,7 @@ def _engine_for_target(cfg, target):
     )
     return DartEngine(
         target, lanes=lanes, scheduler=scheduler, verifier=cfg.get("verifier", "block"),
-        default_decode_config=defaults, owns_target=True,
+        default_decode_config=defaults, owns_target=True, owns_drafters=True,
     )
 
 

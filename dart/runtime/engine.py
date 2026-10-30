@@ -83,11 +83,13 @@ class DartEngine:
         default_decode_config: Optional[DecodeConfig] = None,
         *,
         owns_target: bool = False,
+        owns_drafters: bool = False,
     ) -> None:
-        if type(owns_target) is not bool:
-            raise ValueError("owns_target must be a boolean")
+        if type(owns_target) is not bool or type(owns_drafters) is not bool:
+            raise ValueError("owns_target and owns_drafters must be booleans")
         self.target = target
         self._owns_target = owns_target
+        self._owns_drafters = owns_drafters
         self._closed = False
         self._target_closed = False
         # Decode defaults captured from a YAML config (mode, residency, draft
@@ -108,17 +110,27 @@ class DartEngine:
         self.trace = TraceLogger(trace_path)
 
     def close(self) -> None:
-        """Close tracing and an owned target; borrowed targets remain usable."""
-        if self._owns_target:
+        """Close tracing and owned resources; borrowed ones remain usable.
+
+        Every owned resource is closed even if an earlier one fails.
+        """
+        if self._owns_target or self._owns_drafters:
             self._closed = True
-        try:
-            self.trace.close()
-        finally:
-            if self._owns_target and not self._target_closed:
-                close = getattr(self.target, "close", None)
-                if close is not None:
-                    close()
-                self._target_closed = True
+        with ExitStack() as stack:
+            if self._owns_drafters:
+                for drafter in {id(d): d for d in self._all_drafters()}.values():
+                    close = getattr(drafter, "close", None)
+                    if close is not None:
+                        stack.callback(close)
+            stack.callback(self._close_target)
+            stack.callback(self.trace.close)
+
+    def _close_target(self) -> None:
+        if self._owns_target and not self._target_closed:
+            close = getattr(self.target, "close", None)
+            if close is not None:
+                close()
+            self._target_closed = True
 
     def __enter__(self) -> "DartEngine":
         return self
