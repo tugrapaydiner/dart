@@ -169,23 +169,101 @@ def synthetic_state_operations(seed: int = 17, *, execution: str = "eager") -> t
         StateOperation("a", "forward", tokens(1)),
         StateOperation("a", "release"),
     )
-    if execution == "eager":
-        return operations
-    steps = []
+    if execution != "eager":
+        steps = []
+        for operation in operations:
+            if operation.action == "tree":
+                steps.append(replace(operation, expect_error="ValueError"))  # Static execution rejects trees.
+                steps.append(StateOperation(operation.request, "block", operation.tokens))
+            else:
+                steps.append(operation)
+        operations = tuple(steps)
+    return _reference_drafts(operations, seed)
+
+
+def _reference_drafts(operations, seed):
+    """Draft from the reference continuation so verification accepts tokens.
+
+    Block drafts alternate between one wrong token and full acceptance. Tree
+    drafts place the real branch behind a rejected first root, and every other
+    tree also gets a wrong final node.
+    """
+    reference = _reference_model(seed)
+    prefixes, steps, blocks, trees = {}, [], 0, 0
+
+    @torch.inference_mode()
+    def continuation(prefix, count):
+        ids, out = list(prefix), []
+        for _ in range(count):
+            out.append(int(reference(torch.tensor([ids])).logits[0, -1].argmax()))
+            ids.append(out[-1])
+        return out
+
+    def accepted(tokens, parents, cont):
+        children = {}
+        for index, parent in enumerate(parents):
+            children.setdefault(parent, []).append(index)
+        committed, node = [], -1
+        while True:
+            want = cont[len(committed)]
+            node = next((c for c in children.get(node, []) if tokens[c] == want), None)
+            if node is None or want == 2:  # A miss commits the correction; EOS ends the round.
+                return committed + [want]
+            committed.append(want)
+
+    def wrong(token):
+        return (token + 1) % VOCAB_SIZE
+
     for operation in operations:
-        if operation.action == "tree":
-            steps.append(replace(operation, expect_error="ValueError"))  # Static execution rejects trees.
-            steps.append(StateOperation(operation.request, "block", operation.tokens))
-        else:
+        request, action = operation.request, operation.action
+        if operation.expect_error is not None:
             steps.append(operation)
+            continue
+        if action in {"block", "tree"}:
+            pending, drafts = operation.tokens[0], list(operation.tokens[1:])
+            parents = list(operation.parents) if action == "tree" else list(range(-1, len(drafts) - 1))
+            depths = []
+            for parent in parents:
+                depths.append(0 if parent < 0 else depths[parent] + 1)
+            cont = continuation((*prefixes[request], pending), max(depths, default=-1) + 2)
+            path, node = [], len(drafts) - 1
+            while node >= 0:  # The real branch ends at the last packed node.
+                path.append(node)
+                node = parents[node]
+            for node in path:
+                drafts[node] = cont[depths[node]]
+            for node, parent in enumerate(parents):
+                if node not in path and (parent in path or parent < 0) and drafts[node] == cont[depths[node]]:
+                    drafts[node] = wrong(drafts[node])  # Siblings of the real branch must miss.
+            if action == "block" and blocks % 2 == 0 and len(drafts) > 1:
+                drafts[1] = wrong(drafts[1])
+            if action == "tree" and trees % 2 == 1 and path:
+                drafts[path[0]] = wrong(drafts[path[0]])
+            blocks, trees = blocks + (action == "block"), trees + (action == "tree")
+            operation = replace(operation, tokens=(pending, *drafts))
+            committed = accepted(drafts, parents, cont)
+            prefixes[request] = (*prefixes[request], pending, *committed[:-1])
+        elif action == "prefill":
+            prefixes[request] = operation.tokens
+        elif action == "forward":
+            prefixes[request] = (*prefixes[request], *operation.tokens)
+        elif action == "crop":
+            prefixes[request] = prefixes[request][:operation.length]
+        else:
+            prefixes.pop(request, None)
+        steps.append(operation)
     return tuple(steps)
 
 
-def _synthetic_models(seed):
+def _reference_model(seed):
     with torch.random.fork_rng(devices=[]), torch.device("cpu"):
         torch.random.default_generator.manual_seed(seed)
         config = LlamaConfig(**synthetic_model_config())
-        reference = LlamaForCausalLM(config).to(device="cpu", dtype=torch.float32).eval()
+        return LlamaForCausalLM(config).to(device="cpu", dtype=torch.float32).eval()
+
+
+def _synthetic_models(seed):
+    reference = _reference_model(seed)
     target = TargetModel(copy.deepcopy(reference), device="cpu", dtype=torch.float32)
     return target, reference
 
