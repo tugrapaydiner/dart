@@ -117,7 +117,7 @@ jobs:
               "test_draft_model_limits.py", "test_synthetic_acceptance.py", "test_round_actions.py",
               "test_cost_table_scheduler.py", "test_capacity_buckets.py", "test_tree_node_cap.py",
               "test_cost_table_verifiers.py", "test_synthetic_state_acceptance.py",
-              "test_trace_rounds.py",
+              "test_trace_rounds.py", "test_benchmark_cases.py",
               "test_compact_drafter.py", "test_drafter_state.py", "test_lanes_exactness.py", "test_sampling_devices.py",
           )
           for name in names:
