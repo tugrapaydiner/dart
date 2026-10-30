@@ -23,6 +23,7 @@ from dart.runtime.types import VerifyResult
 
 class RemoteDiffusionDrafter:
     name = "diffusion_remote"
+    uses_canvas = True
 
     def __init__(
         self,

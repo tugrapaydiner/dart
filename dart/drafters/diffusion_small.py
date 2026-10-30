@@ -113,6 +113,7 @@ class DiffusionDrafter:
     """Draft lane wrapping the canvas model with denoising + reconciliation."""
 
     name = "diffusion"
+    uses_canvas = True
 
     def __init__(
         self,

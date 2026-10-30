@@ -189,7 +189,7 @@ class DartEngine:
             # Honor allowed_lanes: a disallowed single drafter -> target-only step.
             if allowed is not None and d.name not in allowed and d.name != "target_only":
                 return self._null, 0, self.verifier_name
-            n = config.canvas_len if "diffusion" in d.name else config.draft_len
+            n = config.canvas_len if getattr(d, "uses_canvas", False) else config.draft_len
             return d, n, self.verifier_name
         s = DecodeState(
             context_len=prompt_len + generated_len,
