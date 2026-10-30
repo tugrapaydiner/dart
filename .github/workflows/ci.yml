@@ -24,6 +24,12 @@ jobs:
       fail-fast: false
       matrix:
         python-version: ["3.10", "3.12"]
+        constraints: [""]
+        include:  # The versions recorded in constraints-tested.txt; the jobs above take the latest releases.
+          - python-version: "3.13"
+            constraints: constraints-tested.txt
+    env:  # Applies to every pip install in the job; empty means unpinned.
+      PIP_CONSTRAINT: ${{ matrix.constraints && format('{0}/{1}', github.workspace, matrix.constraints) || '' }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
