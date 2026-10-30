@@ -48,15 +48,15 @@ def test_static_output_and_state_checks_use_real_backend_and_close_it(seed, monk
     monkeypatch.setattr(CudaGraphTarget, 'forward_predictions', record)
     monkeypatch.setattr(CudaGraphTarget, 'close', release)
     output = synthetic.run_synthetic_check(seed, execution='static')
-    assert output.passed and len(output.results) == 12
-    assert {row.backend for row in output.results} == {'greedy', 'block'}
+    assert output.passed and len(output.results) == 24
+    assert {row.backend for row in output.results} == {'greedy', 'block', 'adaptive', 'buckets'}
     assert calls and max(calls) > 1
     state = synthetic.run_synthetic_state_check(seed, execution='static')
     assert state.passed, state
     assert len(state.steps) == 28
     trees = [step for step in state.steps if step.operation.action == 'tree']
     assert len(trees) == 2 and all(step.operation.expect_error == 'ValueError' for step in trees)
-    assert len(closed) == 2 and all(target._closed and target._workspace is None for target in closed)
+    assert len(closed) == 4 and all(target._closed and target._workspace is None for target in closed)  # Output check: static target and two buckets.
 
 
 @pytest.mark.parametrize('state', [False, True])
@@ -130,7 +130,7 @@ def test_static_output_check_detects_backend_faults_and_closes_target(monkeypatc
         assert not report.passed and report.failures
         expected = {'exception'} if kind == 'exception' else {'tokens', 'eos'}
         assert {row.failure.kind for row in report.failures} <= expected
-    assert len(closed) == 1 and closed[0]._closed and closed[0]._workspace is None
+    assert len(closed) == 3 and all(target._closed and target._workspace is None for target in closed)  # Static target and two buckets.
     assert synthetic.run_synthetic_check(execution='static').passed
 
 

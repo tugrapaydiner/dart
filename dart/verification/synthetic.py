@@ -311,26 +311,43 @@ def run_synthetic_check(
     """Check tiny CPU paths against a separate, unmodified HF model.
 
     A custom factory receives only the candidate target. It can expose another
-    eager decoder using the same weights. Eager checks greedy, block and tree;
-    static checks greedy and block. Drafts follow the reference output with one
-    wrong token per round. This is not a performance benchmark.
+    eager decoder using the same weights. Eager checks greedy, block, tree and an
+    adaptive engine that switches draft length and block/tree verification per
+    round; static checks greedy, block, adaptive block rounds and capacity buckets.
+    Drafts follow the reference output with one wrong token per round. This is
+    not a performance benchmark.
     """
+    from dart.models.replay import CapacityBuckets
+    from dart.runtime.scheduler import SchedulerConfig
+    from dart.runtime.time_scheduler import CostTableScheduler
+
     synthetic_execution_config(execution)
     if execution != "eager" and adapter_factory is not None:
         raise ValueError("adapter_factory requires eager execution")
     cases = synthetic_cases(seed)
-    target, reference = _synthetic_models(seed)
+    base, reference = _synthetic_models(seed)
     with ExitStack() as cleanup:
-        target = _execution_target(target, execution, cleanup)
+        target = _execution_target(base, execution, cleanup)
         decode = hf_decoder(reference)
         expected = {case.name: tuple(decode(case)) for case in cases}
         sequences = [case.prompt + expected[case.name] for case in cases]
         if adapter_factory is None:
+            verifiers = ("block", "tree") if execution == "eager" else None  # Static targets verify blocks only.
+            planner = CostTableScheduler(SchedulerConfig(available_lanes=["synthetic"]), draft_lengths=(2, 4),
+                                         verifiers=verifiers, warmup_rounds=1, retry_interval=3)
             engines = {"greedy": cleanup.enter_context(DartEngine(target)),
-                       "block": cleanup.enter_context(DartEngine(target, _ReferenceDrafter(sequences)))}
+                       "block": cleanup.enter_context(DartEngine(target, _ReferenceDrafter(sequences))),
+                       "adaptive": cleanup.enter_context(DartEngine(
+                           target, lanes={"synthetic": _ReferenceDrafter(sequences)}, scheduler=planner))}
             if execution == "eager":
                 engines["tree"] = cleanup.enter_context(
                     DartEngine(target, _ReferenceDrafter(sequences), verifier="tree"))
+            else:
+                options = synthetic_execution_config(execution)
+                buckets = CapacityBuckets(base, (16, CONTEXT_LENGTH), max_block_tokens=options["max_block_tokens"],
+                                          replay=False, capture_predictions=options["capture_predictions"])
+                cleanup.callback(buckets.close)
+                engines["buckets"] = cleanup.enter_context(DartEngine(buckets, _ReferenceDrafter(sequences)))
             candidates = {name: engine_decoder(engine) for name, engine in engines.items()}
         else:
             candidates = adapter_factory(target)

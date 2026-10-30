@@ -52,5 +52,5 @@ def test_accepting_a_rejected_draft_is_detected(monkeypatch):
     record_rounds(monkeypatch, accept_wrong)
     report = run_synthetic_check()
     assert not report.passed
-    assert {row.backend for row in report.failures} == {"block", "tree"}
+    assert {row.backend for row in report.failures} == {"block", "tree", "adaptive"}
     assert all(row.failure.kind in {"tokens", "eos"} for row in report.failures)

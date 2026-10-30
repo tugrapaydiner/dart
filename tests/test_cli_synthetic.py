@@ -34,7 +34,7 @@ def test_module_cli_runs_actual_paths_without_writing_and_restores_cpu_state(tmp
     with pytest.raises(SystemExit) as error:
         runpy.run_module("dart", run_name="__main__")
     assert error.value.code == 0
-    assert capsys.readouterr().out == "Synthetic CPU check: 18/18 comparisons passed (seed 17).\n"
+    assert capsys.readouterr().out == "Synthetic CPU check: 24/24 comparisons passed (seed 17).\n"
     assert torch.get_num_threads() == threads and torch.equal(rng, torch.random.get_rng_state())
     assert list(tmp_path.iterdir()) == []
 
@@ -44,7 +44,7 @@ def test_opt_in_report_contains_reproducible_cases_and_complete_outputs(tmp_path
     assert cli.main(["check", "--synthetic", "--seed", "29", "--out", str(path)]) == 0
     report = json.loads(path.read_text(encoding="utf-8"))
     assert report["schema"] == "dart-synthetic-check-v1" and report["status"] == "passed"
-    assert report["summary"] == {"cases": 6, "comparisons": 18, "passed": 18, "failed": 0}
+    assert report["summary"] == {"cases": 6, "comparisons": 24, "passed": 24, "failed": 0}
     assert report["model"]["config"] == synthetic.synthetic_model_config()
     assert report["model"]["device"] == "cpu" and report["model"]["threads"] == 1
     assert all(report["versions"].values())
@@ -71,7 +71,7 @@ def test_real_verifier_fault_returns_failure_and_saves_failed_report(tmp_path, m
     report = json.loads(output.read_text(encoding="utf-8"))
     assert report["status"] == "failed" and report["summary"]["failed"] > 0
     failures = [row for row in report["results"] if row["failure"]]
-    assert {row["backend"] for row in failures} == {"greedy", "block"}
+    assert {row["backend"] for row in failures} == {"greedy", "block", "adaptive"}
     assert all(row["actual"] != row["expected"] for row in failures)
     assert "Failed:" in capsys.readouterr().out
 

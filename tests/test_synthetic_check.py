@@ -40,8 +40,8 @@ def test_default_paths_match_separate_hf_and_exercise_drafts(seed, monkeypatch):
     monkeypatch.setattr(TargetModel, "greedy_generate", lambda *a, **k: pytest.fail("shared reference used"))
     report = run_synthetic_check(seed)
     assert report.passed, report.failures
-    assert len(report.results) == 18
-    assert {row.backend for row in report.results} == {"greedy", "block", "tree"}
+    assert len(report.results) == 24
+    assert {row.backend for row in report.results} == {"greedy", "block", "tree", "adaptive"}
     assert max(calls["block"]) > 1
     assert any(parents.count(-1) > 1 for parents in calls["tree"])
     assert any(len(row.case.prompt) + row.case.max_new_tokens == CONTEXT_LENGTH for row in report.results)
@@ -67,7 +67,7 @@ def test_real_verifier_fault_is_detected(monkeypatch):
     monkeypatch.setitem(engine_module._VERIFIERS, "block", wrong_token)
     report = run_synthetic_check()
     assert not report.passed
-    assert {row.backend for row in report.failures} == {"greedy", "block"}
+    assert {row.backend for row in report.failures} == {"greedy", "block", "adaptive"}
     assert all(row.failure.kind in {"tokens", "eos"} for row in report.failures)
     assert all(row.passed for row in report.results if row.backend == "tree")
 
