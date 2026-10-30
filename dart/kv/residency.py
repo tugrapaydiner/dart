@@ -62,21 +62,24 @@ def _layer_slots(cache: DynamicCache):
             )
 
 
-def move_cache(cache: DynamicCache, device: str, pin: bool = False) -> ResidencyStats:
+def move_cache(cache: DynamicCache, device: str | torch.device, pin: bool = False) -> ResidencyStats:
     """Synchronously move a DynamicCache's tensors; returns transfer stats.
 
     Stats count only tensors actually moved, so metadata like
     ``kv_residency_moved_mb`` reflects real transfers, never intent.
     """
     stats = ResidencyStats()
-    if not torch.cuda.is_available() and device != "cpu":
+    target = torch.device(device)
+    if not torch.cuda.is_available() and target.type != "cpu":
         return stats  # nothing to do on CPU-only hosts
+    if target.type == "cuda" and target.index is None:
+        target = torch.device("cuda", torch.cuda.current_device())  # Tensors report an explicit index.
     for get, set_ in _layer_slots(cache):
         t = get()
-        if t is None or not isinstance(t, torch.Tensor) or str(t.device) == device:
+        if t is None or not isinstance(t, torch.Tensor) or t.device == target:
             continue
         moved = t.to(device, non_blocking=True)
-        if pin and device == "cpu":
+        if pin and target.type == "cpu":
             moved = moved.pin_memory()
         set_(moved)
         stats.moved_tensors += 1
