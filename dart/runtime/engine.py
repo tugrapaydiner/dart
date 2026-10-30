@@ -456,6 +456,9 @@ class DartEngine:
                 t0 = time.perf_counter()
                 budget = config.max_new_tokens - len(generated)
                 per_round = min(draft_len, budget - 1)  # Leave room for the verifier's token.
+                max_block = getattr(target, "max_block_tokens", None)
+                if max_block is not None:  # Replay targets verify only the block sizes they prepared.
+                    per_round = min(per_round, max_block - len(pending_block))
                 drafts, draft_probs = self._round_drafts(drafter, committed_seq, per_round, verifier, sampling, config)
                 t1 = time.perf_counter()
 
