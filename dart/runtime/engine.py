@@ -455,6 +455,7 @@ class DartEngine:
                         n_committed=len(kept),
                         draft_ms=(t1 - t0) * 1000.0, verify_ms=0.0, verifier="none",
                     )
+                    self.trace.log_round(run_id, rec, kept)
                 else:
                     if park_kv:
                         # Wait for the previous round's offload (overlapped with
