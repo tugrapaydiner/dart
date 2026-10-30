@@ -80,6 +80,43 @@ class _ProbeDrafter:
         pass
 
 
+class _ReferenceDrafter:
+    """Propose the reference continuation with one wrong token per round.
+
+    The wrong position cycles through every draft offset plus one clean round,
+    so drafts are rejected at each position and sometimes fully accepted.
+    """
+
+    name = "synthetic"
+    requires_entropy = False
+
+    def __init__(self, sequences):
+        self.sequences = tuple(tuple(sequence) for sequence in sequences)
+        self.rounds = 0
+
+    def propose(self, committed, max_tokens):
+        committed = tuple(committed)
+        drafts = next((list(sequence[len(committed):len(committed) + max_tokens]) for sequence in self.sequences
+                       if sequence[:len(committed)] == committed), None)
+        if drafts is None:  # Off the reference path; any proposal is still checked.
+            return _ProbeDrafter().propose(committed, max_tokens)
+        wrong = self.rounds % (max_tokens + 1)
+        self.rounds += 1
+        if wrong < len(drafts):
+            drafts[wrong] = (drafts[wrong] + 1) % VOCAB_SIZE
+        return drafts
+
+    def propose_tree(self, committed, max_tokens):
+        drafts = self.propose(committed, max_tokens)
+        if not drafts:
+            return DraftTree([], [])
+        decoy = [(drafts[0] + 2) % VOCAB_SIZE, *drafts[1:]]  # A rejected sibling ahead of the real branch.
+        return DraftTree.from_branches([decoy, drafts])
+
+    def observe(self, result):
+        pass
+
+
 def _generator(seed):
     if type(seed) is not int or not 0 <= seed < 2**63:
         raise ValueError("seed must be an integer in [0, 2**63)")
@@ -197,7 +234,8 @@ def run_synthetic_check(
 
     A custom factory receives only the candidate target. It can expose another
     eager decoder using the same weights. Eager checks greedy, block and tree;
-    static checks greedy and block. This is not a performance benchmark.
+    static checks greedy and block. Drafts follow the reference output with one
+    wrong token per round. This is not a performance benchmark.
     """
     synthetic_execution_config(execution)
     if execution != "eager" and adapter_factory is not None:
@@ -206,12 +244,16 @@ def run_synthetic_check(
     target, reference = _synthetic_models(seed)
     with ExitStack() as cleanup:
         target = _execution_target(target, execution, cleanup)
+        decode = hf_decoder(reference)
+        expected = {case.name: tuple(decode(case)) for case in cases}
+        sequences = [case.prompt + expected[case.name] for case in cases]
         if adapter_factory is None:
             engines = {"greedy": cleanup.enter_context(DartEngine(target)),
-                       "block": cleanup.enter_context(DartEngine(target, _ProbeDrafter()))}
+                       "block": cleanup.enter_context(DartEngine(target, _ReferenceDrafter(sequences)))}
             if execution == "eager":
-                engines["tree"] = cleanup.enter_context(DartEngine(target, _ProbeDrafter(), verifier="tree"))
+                engines["tree"] = cleanup.enter_context(
+                    DartEngine(target, _ReferenceDrafter(sequences), verifier="tree"))
             candidates = {name: engine_decoder(engine) for name, engine in engines.items()}
         else:
             candidates = adapter_factory(target)
-        return run_differential(cases, hf_decoder(reference), candidates, eos_token_ids=[2])
+        return run_differential(cases, lambda case: list(expected[case.name]), candidates, eos_token_ids=[2])
