@@ -82,6 +82,12 @@ class DraftTree:
             [-1 if self.parent[i] < 0 else remap[self.parent[i]] for i in kept],
         )
 
+    def limit(self, max_nodes: int) -> "DraftTree":
+        """Keep the first ``max_nodes`` packed nodes; parents precede children."""
+        if len(self.tokens) <= max_nodes:
+            return self
+        return DraftTree(self.tokens[:max_nodes], self.parent[:max_nodes])
+
     @classmethod
     def chain(cls, tokens: list[int]) -> "DraftTree":
         """A linear block as a degenerate tree (parent = previous node)."""
@@ -118,10 +124,14 @@ def verify_tree_greedy(
     state: TargetState,
     pending: int | list[int],
     draft_tree: "DraftTree | list[int]",
+    *,
+    compute_entropy: bool = True,
 ) -> VerifyResult:
     """Greedy tree verification.  Same state contract as the block verifier:
     on entry the cache covers everything before the pending block; on exit
-    it covers all committed tokens except the new pending one."""
+    it covers all committed tokens except the new pending one.
+    Set compute_entropy=False when no consumer needs that signal.
+    """
     if not isinstance(draft_tree, DraftTree):
         draft_tree = DraftTree.chain(list(draft_tree))
     pending_block = [pending] if isinstance(pending, int) else list(pending)
@@ -135,7 +145,7 @@ def verify_tree_greedy(
         # No drafts: identical to a plain target step via the block path.
         from dart.verification.block_verify import verify_block_greedy
 
-        return verify_block_greedy(target, state, pending_block, [])
+        return verify_block_greedy(target, state, pending_block, [], compute_entropy=compute_entropy)
 
     logits = target.forward_tree(
         state, pending_block, draft_tree.tokens, draft_tree.parent
@@ -183,7 +193,7 @@ def verify_tree_greedy(
         committed = [draft_tree.tokens[i] for i in path] + [int(correction)]
         finished = committed[-1] in target.eos_token_ids
 
-    if accepted_eos:
+    if accepted_eos or not compute_entropy:
         entropy = 0.0
     else:
         dist = torch.softmax(logits[cur_row].float(), dim=-1)

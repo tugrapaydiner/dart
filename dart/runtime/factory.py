@@ -11,6 +11,7 @@ loudly rather than silently degrading to target-only.
 
 from __future__ import annotations
 
+from contextlib import ExitStack
 from typing import Optional
 
 import torch
@@ -36,20 +37,29 @@ from dart.runtime.scheduler import (
     HeuristicScheduler,
     SchedulerConfig,
 )
-from dart.runtime.time_scheduler import TimeScheduler
+from dart.runtime.time_scheduler import CostTableScheduler, TimeScheduler
 
 
 def build_target(spec: dict) -> TargetModel:
     execution = spec.get("execution", "eager")
     if execution not in ("eager", "static", "cuda_graph"):
         raise ValueError("target execution must be eager, static or cuda_graph")
+    capture_predictions = spec.get("capture_predictions", False)
+    if type(capture_predictions) is not bool:
+        raise ValueError("capture_predictions must be a boolean")
+    if capture_predictions and execution == "eager":
+        raise ValueError("captured predictions require static or cuda_graph execution")
     target = _build_target(spec)
     if execution == "eager":
         return target
-    from dart.models.replay import CudaGraphTarget
+    from dart.models.replay import CapacityBuckets, CudaGraphTarget
 
-    return CudaGraphTarget(target, max_block_tokens=spec.get("max_block_tokens", 5),
-                           capacity=spec.get("cache_capacity"), replay=execution == "cuda_graph")
+    capacity = spec.get("cache_capacity")
+    options = {"max_block_tokens": spec.get("max_block_tokens", 5), "replay": execution == "cuda_graph",
+               "capture_predictions": capture_predictions}
+    if isinstance(capacity, list):  # A list prepares one bucket per capacity.
+        return CapacityBuckets(target, tuple(capacity), **options)
+    return CudaGraphTarget(target, capacity=capacity, **options)
 
 
 def _build_target(spec: dict) -> TargetModel:
@@ -151,8 +161,10 @@ def build_lane(name: str, spec: dict, target: TargetModel):
             recent_blocks=spec.get("recent_blocks", 2),
         )
     if name == "ar_draft":
+        if isinstance(spec.get("cache_capacity"), list):
+            raise ValueError("draft lanes need a single cache capacity")
         draft_target = build_target(spec)
-        return ARDrafter(draft_target)
+        return ARDrafter(draft_target, owns_model=True)
     if name == "mtp":
         heads = MTPHeads(
             hidden_size=target.model.config.hidden_size,
@@ -219,14 +231,32 @@ def decode_defaults(cfg: dict):
 
 
 def build_engine(cfg: dict):
-    from dart.runtime.engine import DartEngine
-
     threads = cfg.get("threads")
     if threads is not None:
         if type(threads) is not int or threads < 1:
             raise ValueError("threads must be an integer >= 1")
         torch.set_num_threads(threads)  # Applies to the whole process.
-    target = build_target(cfg["target"])
+    with ExitStack() as cleanup:
+        target = build_target(cfg["target"])
+        close = getattr(target, "close", None)
+        if close is not None:
+            cleanup.callback(close)
+        engine = _engine_for_target(cfg, target, cleanup)
+        cleanup.pop_all()  # The completed engine takes ownership.
+        return engine
+
+
+def _owned_lane(name, spec, target, cleanup):
+    lane = build_lane(name, spec or {}, target)
+    close = getattr(lane, "close", None)
+    if close is not None:
+        cleanup.callback(close)
+    return lane
+
+
+def _engine_for_target(cfg, target, cleanup):
+    from dart.runtime.engine import DartEngine
+
     defaults = decode_defaults(cfg)
     lane_specs: dict = cfg.get("lanes", {})
     if isinstance(lane_specs, list):  # allow simple list form from the doc
@@ -235,19 +265,19 @@ def build_engine(cfg: dict):
     if not lane_specs:
         return DartEngine(
             target, verifier=cfg.get("verifier", "block"),
-            default_decode_config=defaults,
+            default_decode_config=defaults, owns_target=True, owns_drafters=True,
         )
 
     if len(lane_specs) == 1 and not cfg.get("scheduler"):
         name, spec = next(iter(lane_specs.items()))
         return DartEngine(
-            target, drafter=build_lane(name, spec or {}, target),
+            target, drafter=_owned_lane(name, spec, target, cleanup),
             verifier=cfg.get("verifier", "block"),
-            default_decode_config=defaults,
+            default_decode_config=defaults, owns_target=True, owns_drafters=True,
         )
 
     lanes = {
-        name: build_lane(name, spec or {}, target)
+        name: _owned_lane(name, spec, target, cleanup)
         for name, spec in lane_specs.items()
     }
     lanes.setdefault("target_only", NullDrafter())
@@ -256,12 +286,18 @@ def build_engine(cfg: dict):
     sched_cls = (
         BanditScheduler if sched_type in ("contextual_bandit", "bandit")
         else TimeScheduler if sched_type == "time"
+        else CostTableScheduler if sched_type == "cost_table"
         else HeuristicScheduler
     )
     timing_options = {
         key: sched_cfg[key] for key in ("retry_interval", "warmup_rounds", "min_time_saving")
         if key in sched_cfg
-    } if sched_cls is TimeScheduler else {}
+    } if sched_cls in (TimeScheduler, CostTableScheduler) else {}
+    if sched_cls is CostTableScheduler:
+        for key in ("draft_lengths", "verifiers"):
+            if key in sched_cfg:
+                value = sched_cfg[key]
+                timing_options[key] = tuple(value) if isinstance(value, list) else value  # YAML gives lists.
     scheduler = sched_cls(
         SchedulerConfig(
             available_lanes=list(lanes),
@@ -284,7 +320,7 @@ def build_engine(cfg: dict):
     )
     return DartEngine(
         target, lanes=lanes, scheduler=scheduler, verifier=cfg.get("verifier", "block"),
-        default_decode_config=defaults,
+        default_decode_config=defaults, owns_target=True, owns_drafters=True,
     )
 
 

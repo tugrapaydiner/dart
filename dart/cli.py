@@ -23,16 +23,28 @@ def _parser() -> argparse.ArgumentParser:
     check = commands.add_parser("check", help="compare complete outputs with HF greedy")
     bench = commands.add_parser("bench", help="repeat latency comparisons and separate phase profiling")
     demo = commands.add_parser("demo", help="serve the comparison page on localhost")
+    source = check.add_mutually_exclusive_group(required=True)
+    source.add_argument("--model", help="existing local Supra-50M model directory")
+    source.add_argument("--synthetic", action="store_true", help="check tiny random CPU models; no download or default report")
+    check.add_argument("--state", action="store_true", help="check interleaved request caches; requires --synthetic")
+    check.add_argument("--execution", choices=("eager", "static"),
+                       help="synthetic CPU backend; defaults to eager, or the saved backend with --replay")
+    check.add_argument("--reduce", type=int, nargs="?", const=32, metavar="N",
+                       help="shrink a state failure with 2-32 checks (default: 32); requires --synthetic --state")
     for command in (check, bench, demo):
-        command.add_argument("--model", required=True, help="existing local Supra-50M model directory")
+        if command is not check:
+            command.add_argument("--model", required=True, help="existing local Supra-50M model directory")
         command.add_argument("--device", choices=("cpu", "cuda"), default="cpu")
         command.add_argument("--native-rms-norm", action="store_true", help="use PyTorch RMSNorm for float32 Llama layers")
     for command in (check, bench):
         command.add_argument("--norm-control", action="store_true", help="compare with original RMSNorm; requires --native-rms-norm")
         command.add_argument("--corpus", help="versioned corpus directory; otherwise generate the fixed pilot")
         command.add_argument("--split", choices=("train", "validation", "test"), default="validation")
-        command.add_argument("--seed", type=int, default=17, help="pilot seed; also controls benchmark ordering")
-        command.add_argument("--out", help="new report path; default: runs/<command>_<time>_<id>.json")
+        seed_options = command.add_mutually_exclusive_group() if command is check else command
+        seed_options.add_argument("--seed", type=int, default=17, help="pilot seed; also controls benchmark ordering")
+        if command is check:
+            seed_options.add_argument("--replay", help="replay a saved local report; requires --synthetic --state")
+        command.add_argument("--out", help="new report path; synthetic checks write only when set, model runs default to runs/")
     bench.add_argument("--per-workload", type=int, default=1, help="first sorted IDs per workload, 1-32 (default: 1)")
     bench.add_argument("--warmup", type=int, default=2, help="warm-up passes, 1-10 (default: 2)")
     bench.add_argument("--repeats", type=int, default=10, help="measured repeats, 2-100 (default: 10)")
@@ -178,6 +190,16 @@ def main(argv: list[str] | None = None) -> int:
     parser = _parser()
     args = parser.parse_args(argv)
     try:
+        if args.command == "check" and args.execution is not None and not args.synthetic:
+            raise ValueError("--execution requires --synthetic")
+        if args.command == "check" and args.state and not args.synthetic:
+            raise ValueError("--state requires --synthetic")
+        if args.command == "check" and (args.replay is not None or args.reduce is not None) and not (args.synthetic and args.state):
+            raise ValueError("--replay and --reduce require --synthetic --state")
+        if args.command == "check" and args.synthetic:
+            from dart.cli_check import run_synthetic
+
+            return run_synthetic(args)
         if args.command == "train":
             from dart.cli_train import run
 
