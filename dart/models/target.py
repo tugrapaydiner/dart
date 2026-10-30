@@ -39,7 +39,7 @@ class TargetState:
     decode-loop invariant (see dart/runtime/types.py) this is everything but
     the pending token.
 
-    A failed model forward invalidates this state. Start a new prefill instead
+    A failed forward or cache update invalidates this state. Start a new prefill instead
     of reusing a cache whose layers may have been only partly updated.
     """
 
@@ -48,7 +48,7 @@ class TargetState:
 
     def _check_usable(self) -> None:
         if self._failed:
-            raise RuntimeError("request cache is invalid after a failed forward; start a new prefill")
+            raise RuntimeError("request cache is invalid after a failed forward or cache update; start a new prefill")
 
     @property
     def seq_len(self) -> int:
@@ -313,9 +313,14 @@ class TargetModel:
         Cropping a contiguous prefix avoids a copy but retains its backing allocation.
         """
         state._check_usable()
-        if (type(keep_len) is int and isinstance(path, list)
-                and 0 <= keep_len <= state.seq_len - len(path)
-                and all(offset == index for index, offset in enumerate(path))):
+        current_length = state.seq_len
+        if type(keep_len) is not int or not 0 <= keep_len <= current_length:
+            raise ValueError("keep_len must be an integer within the current cache")
+        if not isinstance(path, (list, tuple)) or any(
+            type(offset) is not int or not 0 <= offset < current_length - keep_len for offset in path
+        ):
+            raise ValueError("path must contain integer offsets within the tree tail")
+        if all(offset == index for index, offset in enumerate(path)):
             self.crop(state, keep_len + len(path))
             return
         idx = torch.tensor(
@@ -324,15 +329,20 @@ class TargetModel:
             dtype=torch.long,
         )
         cache = state.cache
-        layers = getattr(cache, "layers", None)
-        if layers is not None:  # transformers >= 4.54 layout
-            for layer in layers:
-                layer.keys = layer.keys.index_select(2, idx)
-                layer.values = layer.values.index_select(2, idx)
-        else:  # legacy list-of-tensors layout
-            for i in range(len(cache.key_cache)):
-                cache.key_cache[i] = cache.key_cache[i].index_select(2, idx)
-                cache.value_cache[i] = cache.value_cache[i].index_select(2, idx)
+        try:
+            layers = getattr(cache, "layers", None)
+            if layers is not None:  # transformers >= 4.54 layout
+                for layer in layers:
+                    layer.keys = layer.keys.index_select(2, idx)
+                    layer.values = layer.values.index_select(2, idx)
+            else:  # legacy list-of-tensors layout
+                for i in range(len(cache.key_cache)):
+                    cache.key_cache[i] = cache.key_cache[i].index_select(2, idx)
+                    cache.value_cache[i] = cache.value_cache[i].index_select(2, idx)
+        except BaseException:
+            state._failed = True
+            self.last_hidden_block = None
+            raise
 
     @torch.inference_mode()
     def all_logits(self, tokens: list[int] | Tensor) -> Tensor:
@@ -349,12 +359,19 @@ class TargetModel:
         """Roll the KV state back so it covers only the first ``length`` tokens."""
         state._check_usable()
         current_length = state.seq_len
+        if type(length) is not int:
+            raise ValueError("cache length must be an integer")
         if length < 0 or length > current_length:
             raise ValueError(
                 f"cannot crop cache of length {current_length} to {length}"
             )
         if length < current_length:
-            state.cache.crop(length - current_length)  # HF accepts negative removal counts.
+            try:
+                state.cache.crop(length - current_length)  # HF accepts negative removal counts.
+            except BaseException:
+                state._failed = True
+                self.last_hidden_block = None
+                raise
 
     # ------------------------------------------------------------------ #
     # Trusted baseline
