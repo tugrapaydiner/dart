@@ -291,6 +291,10 @@ class DartEngine:
             config.mode != "exact" or self.verifier_name != "block" or config.full_kv_residency != "gpu"
         ):
             raise ValueError("CUDA replay requires exact mode, block verification and resident GPU KV")
+        if getattr(self.target, "uses_replay_cache", False) and any(
+            name != "block" for name in getattr(self.scheduler, "verifiers", None) or ()
+        ):
+            raise ValueError("static and CUDA replay targets support block verification only")
         timed_scheduler = getattr(self.scheduler, "requires_round_timing", False)
         if timed_scheduler and (config.mode != "exact" or config.full_kv_residency != "gpu"):
             raise ValueError("time scheduling requires exact mode and resident target KV")

@@ -293,9 +293,11 @@ def _engine_for_target(cfg, target, cleanup):
         key: sched_cfg[key] for key in ("retry_interval", "warmup_rounds", "min_time_saving")
         if key in sched_cfg
     } if sched_cls in (TimeScheduler, CostTableScheduler) else {}
-    if sched_cls is CostTableScheduler and "draft_lengths" in sched_cfg:
-        lengths = sched_cfg["draft_lengths"]
-        timing_options["draft_lengths"] = tuple(lengths) if isinstance(lengths, list) else lengths  # YAML gives lists.
+    if sched_cls is CostTableScheduler:
+        for key in ("draft_lengths", "verifiers"):
+            if key in sched_cfg:
+                value = sched_cfg[key]
+                timing_options[key] = tuple(value) if isinstance(value, list) else value  # YAML gives lists.
     scheduler = sched_cls(
         SchedulerConfig(
             available_lanes=list(lanes),

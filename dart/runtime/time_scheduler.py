@@ -62,15 +62,15 @@ class TimeScheduler(HeuristicScheduler):
         self.last_played[key] = self.decisions
         self.kv_gb[key] = kv_gb
 
-    def _candidates(self, allowed) -> dict[str, tuple[str, int]]:
-        """Map each drafting arm's key to its (lane, draft length)."""
-        return {lane: (lane, self.config.draft_len) for lane in dict.fromkeys(self.config.available_lanes)
+    def _candidates(self, allowed) -> dict[str, tuple[str, int, str | None]]:
+        """Map each drafting arm's key to its (lane, draft length, verifier); None keeps the engine's."""
+        return {lane: (lane, self.config.draft_len, None) for lane in dict.fromkeys(self.config.available_lanes)
                 if lane != "target_only" and (allowed is None or lane in allowed)}
 
-    def _choose_arm(self, allowed) -> tuple[str, str, int]:
+    def _choose_arm(self, allowed) -> tuple[str, str, int, str | None]:
         arms = {key: arm for key, arm in self._candidates(allowed).items()
                 if self.kv_gb.get(key, 0.0) <= self.config.max_gpu_kv_gb}
-        baseline = ("target_only", "target_only", 0)
+        baseline = ("target_only", "target_only", 0, None)
         if self.counts.get("target_only", 0) < self.warmup_rounds:
             return baseline
         for key, arm in arms.items():
@@ -91,7 +91,7 @@ class TimeScheduler(HeuristicScheduler):
 
     def choose_action(self, state: DecodeState, allowed=None) -> DecodeAction:
         self.decisions += 1
-        key, lane, draft_len = self._choose_arm(allowed)
+        key, lane, draft_len, verifier = self._choose_arm(allowed)
         self._last_arm = (key, lane)
         config = self.config
         draft_len, canvas_len = entropy_gated(
@@ -100,26 +100,37 @@ class TimeScheduler(HeuristicScheduler):
         return DecodeAction(
             lane=lane, draft_len=draft_len, canvas_len=canvas_len, kv_bits=config.kv_bits,
             verify_every=1, denoise_steps=config.denoise_steps if lane == "diffusion" else 0,
-            exact_mode=state.exact_required,
+            exact_mode=state.exact_required, verifier=verifier,
         )
 
 
 class CostTableScheduler(TimeScheduler):
-    """Choose (lane, draft length) arms by measured time per committed token.
+    """Choose (lane, draft length, verifier) arms by measured time per committed token.
 
     Every lane is paired with each length in ``draft_lengths``; statistics are
-    kept per arm under ``"lane:length"`` keys. Target-only steps remain the
-    baseline an arm must beat by ``min_time_saving``.
+    kept per arm under ``"lane:length"`` keys. With a ``verifiers`` menu such as
+    ``("block", "tree")`` each length is also paired with each verifier, under
+    ``"lane:length:verifier"`` keys. Target-only steps remain the baseline an arm
+    must beat by ``min_time_saving``.
     """
 
-    def __init__(self, config: SchedulerConfig, *, draft_lengths: tuple[int, ...] = (2, 4, 8), **options) -> None:
+    def __init__(self, config: SchedulerConfig, *, draft_lengths: tuple[int, ...] = (2, 4, 8),
+                 verifiers: tuple[str, ...] | None = None, **options) -> None:
         if (not isinstance(draft_lengths, tuple) or not draft_lengths
                 or len(set(draft_lengths)) != len(draft_lengths)
                 or any(type(length) is not int or not 1 <= length <= 64 for length in draft_lengths)):
             raise ValueError("draft_lengths must be a tuple of distinct integers from 1 to 64")
+        if verifiers is not None and (not isinstance(verifiers, tuple) or not verifiers
+                                      or len(set(verifiers)) != len(verifiers)
+                                      or any(name not in ("block", "tree") for name in verifiers)):
+            raise ValueError("verifiers must be a tuple of distinct names from 'block' and 'tree'")
         self.draft_lengths = draft_lengths
+        self.verifiers = verifiers
         super().__init__(config, **options)
 
-    def _candidates(self, allowed) -> dict[str, tuple[str, int]]:
-        return {f"{lane}:{length}": (lane, length)
-                for lane in super()._candidates(allowed) for length in self.draft_lengths}
+    def _candidates(self, allowed) -> dict[str, tuple[str, int, str | None]]:
+        lanes = super()._candidates(allowed)
+        if self.verifiers is None:
+            return {f"{lane}:{length}": (lane, length, None) for lane in lanes for length in self.draft_lengths}
+        return {f"{lane}:{length}:{verifier}": (lane, length, verifier)
+                for lane in lanes for length in self.draft_lengths for verifier in self.verifiers}
