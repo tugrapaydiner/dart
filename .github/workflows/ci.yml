@@ -115,7 +115,7 @@ jobs:
               "test_entropy_feedback.py", "test_tree_entropy.py", "test_tree_compaction.py",
               "test_cache_mutation_failures.py", "test_prompt_admission.py", "test_sampling_seed.py", "test_residency_devices.py", "test_draft_model_ownership.py",
               "test_draft_model_limits.py", "test_synthetic_acceptance.py", "test_round_actions.py",
-              "test_cost_table_scheduler.py", "test_capacity_buckets.py",
+              "test_cost_table_scheduler.py", "test_capacity_buckets.py", "test_tree_node_cap.py",
               "test_compact_drafter.py", "test_drafter_state.py", "test_lanes_exactness.py", "test_sampling_devices.py",
           )
           for name in names:

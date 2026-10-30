@@ -82,6 +82,12 @@ class DraftTree:
             [-1 if self.parent[i] < 0 else remap[self.parent[i]] for i in kept],
         )
 
+    def limit(self, max_nodes: int) -> "DraftTree":
+        """Keep the first ``max_nodes`` packed nodes; parents precede children."""
+        if len(self.tokens) <= max_nodes:
+            return self
+        return DraftTree(self.tokens[:max_nodes], self.parent[:max_nodes])
+
     @classmethod
     def chain(cls, tokens: list[int]) -> "DraftTree":
         """A linear block as a degenerate tree (parent = previous node)."""

@@ -414,7 +414,7 @@ class DartEngine:
                         drafts = DraftTree.chain(linear[:per_round])
                     if not isinstance(drafts, DraftTree):
                         drafts = DraftTree.chain(list(drafts))
-                    drafts = drafts.truncate(per_round)
+                    drafts = drafts.truncate(per_round).limit(config.max_tree_nodes)
                     draft_probs = None
                 else:
                     drafts, draft_probs = self._propose(

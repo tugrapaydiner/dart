@@ -67,6 +67,8 @@ class DecodeConfig:
     seed: Optional[int] = None
     # Where the full-precision verifier KV lives (reported in metadata, docs/design.md §2.4).
     full_kv_residency: Literal["gpu", "cpu_pinned"] = "gpu"
+    # Tree verification packs at most this many draft nodes per round, besides the pending token.
+    max_tree_nodes: int = 15
 
     def __post_init__(self) -> None:
         self.validate()
@@ -75,7 +77,7 @@ class DecodeConfig:
         if self.mode not in ("exact", "exact_sampling", "approx"):
             raise ValueError(f"unknown mode {self.mode!r}")
         for name, minimum in (
-            ("max_new_tokens", 0), ("draft_len", 0), ("canvas_len", 0), ("verify_every", 1),
+            ("max_new_tokens", 0), ("draft_len", 0), ("canvas_len", 0), ("verify_every", 1), ("max_tree_nodes", 0),
         ):
             value = getattr(self, name)
             if isinstance(value, bool) or not isinstance(value, int) or value < minimum:
