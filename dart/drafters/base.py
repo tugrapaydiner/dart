@@ -21,6 +21,8 @@ class Drafter(Protocol):
 
     An optional finish_request() hook releases request data after execution,
     including errors, without resetting statistics or the sampling generator.
+    An optional seed_request(seed) hook reseeds that generator when a request
+    sets DecodeConfig.seed, so seeded requests repeat exactly.
     """
 
     name: str

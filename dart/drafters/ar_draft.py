@@ -54,6 +54,9 @@ class ARDrafter:
         self.reset()
         self.dm.last_hidden_block = None
 
+    def seed_request(self, seed: int) -> None:
+        self.gen.manual_seed(seed)
+
     def _make_cache(self):
         """Cache for fresh prefills; subclasses substitute compressed caches."""
         return None  # TargetModel.prefill defaults to a full DynamicCache

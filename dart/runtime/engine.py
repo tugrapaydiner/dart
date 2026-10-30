@@ -193,6 +193,15 @@ class DartEngine:
         n = action.canvas_len if action.canvas_len > 0 else action.draft_len
         return d, n
 
+    def _seed_drafters(self, seed: int) -> None:
+        """Give each drafter its own stream derived from the request seed."""
+        seeds = torch.Generator().manual_seed(seed)
+        for drafter in {id(d): d for d in self._all_drafters()}.values():
+            drafter_seed = int(torch.randint(2**62, (), generator=seeds))  # Drawn for every lane so seeds stay stable.
+            seed_request = getattr(drafter, "seed_request", None)
+            if seed_request is not None:
+                seed_request(drafter_seed)
+
     # ------------------------------------------------------------------ #
     @staticmethod
     def _propose(drafter: Drafter, committed: list[int], budget: int, sampling: bool):
@@ -301,6 +310,8 @@ class DartEngine:
             if finish is not None:
                 cleanup.callback(finish)
         state, logits = self.target.prefill(prompt)
+        if config.seed is not None:
+            self._seed_drafters(config.seed)
         if self.scheduler is not None and hasattr(self.scheduler, "reset"):
             self.scheduler.reset()
         for d in self._all_drafters():

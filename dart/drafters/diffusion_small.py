@@ -237,5 +237,8 @@ class DiffusionDrafter:
         self._used_warm = False
         self._context = []
 
+    def seed_request(self, seed: int) -> None:
+        self.gen.manual_seed(seed)
+
     def finish_request(self) -> None:
         self.reset()
