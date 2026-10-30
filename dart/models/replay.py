@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import threading
 import time
+from contextlib import ExitStack
 from importlib.metadata import version
 
 import torch
@@ -333,3 +334,70 @@ class CudaGraphTarget(TargetModel):
                 self._workspace = None
                 self._model_tensors = ()
                 self._closed = True
+
+
+class CapacityBuckets:
+    """Prepared replay targets of several capacities sharing one model.
+
+    Each request runs on the smallest capacity that holds its prompt and output
+    budget. Up to four buckets and sixteen prepared blocks are allowed in total.
+    """
+
+    uses_replay_cache = True
+    record_hidden = False
+
+    def __init__(self, target: TargetModel, capacities, *, max_block_tokens=5, replay=True,
+                 capture_predictions=False):
+        if (not isinstance(capacities, tuple) or not 1 <= len(capacities) <= 4
+                or len(set(capacities)) != len(capacities) or any(type(c) is not int for c in capacities)):
+            raise ValueError("capacities must be a tuple of one to four distinct integers")
+        if type(max_block_tokens) is int and len(capacities) * max_block_tokens > 16:
+            raise ValueError("capacity buckets allow at most 16 prepared blocks in total")
+        with ExitStack() as cleanup:
+            buckets = []
+            for capacity in sorted(capacities):
+                bucket = CudaGraphTarget(target, max_block_tokens=max_block_tokens, capacity=capacity,
+                                         replay=replay, capture_predictions=capture_predictions)
+                cleanup.callback(bucket.close)
+                buckets.append(bucket)
+            cleanup.pop_all()
+        self.buckets = tuple(buckets)
+        largest = self.buckets[-1]
+        self.model, self.tokenizer, self.device, self.dtype = largest.model, largest.tokenizer, largest.device, largest.dtype
+        self.eos_token_ids = largest.eos_token_ids
+        self.max_block_tokens = max_block_tokens
+        self.capture_predictions = capture_predictions
+        self.execution_backend = largest.execution_backend
+        self.setup_ms = sum(bucket.setup_ms for bucket in self.buckets)
+        self.last_hidden_block = None
+
+    @property
+    def capacities(self):
+        return tuple(bucket.capacity for bucket in self.buckets)
+
+    @property
+    def context_limit(self):
+        return self.buckets[-1].context_limit
+
+    def for_request(self, prompt_len, max_new_tokens):
+        """Return the smallest bucket that holds the prompt and output budget."""
+        largest = self.buckets[-1]
+        if largest._closed:
+            raise RuntimeError("replay target is closed")
+        largest.validate_generation(prompt_len, max_new_tokens)
+        return next(bucket for bucket in self.buckets if bucket.capacity >= prompt_len + max_new_tokens)
+
+    def validate_generation(self, prompt_len, max_new_tokens):
+        self.for_request(prompt_len, max_new_tokens)
+
+    def validate_prompt(self, prompt_ids):
+        self.buckets[-1].validate_prompt(prompt_ids)
+
+    def greedy_generate(self, prompt_ids, max_new_tokens):
+        prompt_len = self.buckets[-1]._ids(prompt_ids).shape[1]
+        return self.for_request(prompt_len, max_new_tokens).greedy_generate(prompt_ids, max_new_tokens)
+
+    def close(self):
+        with ExitStack() as cleanup:
+            for bucket in self.buckets:
+                cleanup.callback(bucket.close)

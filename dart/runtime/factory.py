@@ -52,11 +52,14 @@ def build_target(spec: dict) -> TargetModel:
     target = _build_target(spec)
     if execution == "eager":
         return target
-    from dart.models.replay import CudaGraphTarget
+    from dart.models.replay import CapacityBuckets, CudaGraphTarget
 
-    return CudaGraphTarget(target, max_block_tokens=spec.get("max_block_tokens", 5),
-                           capacity=spec.get("cache_capacity"), replay=execution == "cuda_graph",
-                           capture_predictions=capture_predictions)
+    capacity = spec.get("cache_capacity")
+    options = {"max_block_tokens": spec.get("max_block_tokens", 5), "replay": execution == "cuda_graph",
+               "capture_predictions": capture_predictions}
+    if isinstance(capacity, list):  # A list prepares one bucket per capacity.
+        return CapacityBuckets(target, tuple(capacity), **options)
+    return CudaGraphTarget(target, capacity=capacity, **options)
 
 
 def _build_target(spec: dict) -> TargetModel:
@@ -158,6 +161,8 @@ def build_lane(name: str, spec: dict, target: TargetModel):
             recent_blocks=spec.get("recent_blocks", 2),
         )
     if name == "ar_draft":
+        if isinstance(spec.get("cache_capacity"), list):
+            raise ValueError("draft lanes need a single cache capacity")
         draft_target = build_target(spec)
         return ARDrafter(draft_target, owns_model=True)
     if name == "mtp":

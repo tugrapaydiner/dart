@@ -244,7 +244,7 @@ class DartEngine:
             return list(drafts), probs
         return list(drafter.propose(committed, budget)), None
 
-    def _empty_output(self, config, metrics, run_id, start):
+    def _empty_output(self, config, metrics, run_id, start, target):
         sampling = config.mode == "exact_sampling"
         metrics.wall_time_ms = (time.perf_counter() - start) * 1000.0
         metrics.gpu_peak_gb = gpu_memory_gb(self.target.device)
@@ -258,6 +258,8 @@ class DartEngine:
         )
         if config.full_kv_residency == "cpu_pinned":
             metadata.update(kv_residency_moves=0, kv_residency_moved_mb=0.0)
+        if getattr(target, "uses_replay_cache", False):
+            metadata["cache_capacity"] = target.capacity
         if sampling:
             metadata.update(distribution_exact=True, temperature=config.temperature, seed=config.seed)
         if config.mode == "approx":
@@ -333,16 +335,18 @@ class DartEngine:
         t_start = time.perf_counter()
 
         prompt = list(prompt_ids)
-        self.target.validate_generation(len(prompt), config.max_new_tokens)
+        for_request = getattr(self.target, "for_request", None)  # Capacity buckets pick a target per request.
+        target = self.target if for_request is None else for_request(len(prompt), config.max_new_tokens)
+        target.validate_generation(len(prompt), config.max_new_tokens)
         if config.max_new_tokens == 0:
-            self.target.validate_prompt(prompt)
-            return self._empty_output(config, metrics, run_id, t_start)
-        cleanup.callback(setattr, self.target, "last_hidden_block", None)
+            target.validate_prompt(prompt)
+            return self._empty_output(config, metrics, run_id, t_start, target)
+        cleanup.callback(setattr, target, "last_hidden_block", None)
         for drafter in {id(d): d for d in self._all_drafters()}.values():
             finish = getattr(drafter, "finish_request", None)
             if finish is not None:
                 cleanup.callback(finish)
-        state, logits = self.target.prefill(prompt)
+        state, logits = target.prefill(prompt)
         if config.seed is not None:
             self._seed_drafters(config.seed)
         if self.scheduler is not None and hasattr(self.scheduler, "reset"):
@@ -462,11 +466,11 @@ class DartEngine:
                     verify_fn = verifier_fn(verifier)
                     if sampling:
                         result = verify_fn(
-                            self.target, state, pending_block, drafts,
+                            target, state, pending_block, drafts,
                             draft_probs=draft_probs,
                         )
                     else:
-                        result = verify_fn(self.target, state, pending_block, drafts)
+                        result = verify_fn(target, state, pending_block, drafts)
                     t2 = time.perf_counter()
 
                     drafter.observe(result)
@@ -556,6 +560,8 @@ class DartEngine:
         if park_kv:
             metadata["kv_residency_moves"] = res_stats.moved_tensors
             metadata["kv_residency_moved_mb"] = round(res_stats.moved_bytes / 1e6, 3)
+        if getattr(target, "uses_replay_cache", False):
+            metadata["cache_capacity"] = target.capacity
         if sampling:
             metadata["distribution_exact"] = True
             metadata["temperature"] = config.temperature
