@@ -43,15 +43,10 @@ def test_partial_cache_mutation_blocks_reuse_but_other_requests_recover(models, 
 
             fault.setattr(torch.Tensor, 'index_select', fail_later)
         else:
-            second_key = _cache_pairs(state.cache)[1][0]
-            getitem = torch.Tensor.__getitem__
+            def fail_later(*args, **kwargs):
+                raise error
 
-            def fail_later(tensor, index):
-                if tensor is second_key:
-                    raise error
-                return getitem(tensor, index)
-
-            fault.setattr(torch.Tensor, '__getitem__', fail_later)
+            fault.setattr(state.cache.layers[1], 'crop', fail_later)  # Patching Tensor.__getitem__ leaks a type slot.
         with pytest.raises(error_type) as caught:
             if operation == 'crop':
                 target.crop(state, 2)
