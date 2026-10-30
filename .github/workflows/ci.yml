@@ -102,31 +102,18 @@ jobs:
           suite = Path("wheel-tests").resolve()
           (suite / "tests").mkdir(parents=True)
           (suite / "tests/__init__.py").write_text("", encoding="utf-8")
-          names = (
-              "conftest.py", "test_exactness.py", "test_tree_verify.py",
-              "test_generation_budget.py", "test_request_cleanup.py", "test_ngram_lookup.py",
-              "test_replay_ids.py", "test_replay_predictions.py", "test_config_api.py", "test_feedback_workloads.py",
-              "test_differential.py", "test_synthetic_check.py", "test_state_checks.py",
-              "test_state_sequences.py", "test_reduction.py", "test_cli_synthetic.py", "test_engine_lifecycle.py",
-              "test_replay_state_checks.py", "test_synthetic_state.py", "test_synthetic_replay.py",
-              "test_target_failures.py", "test_zero_output.py", "test_draft_execution.py",
-              "test_drafter_cleanup.py", "test_benchmark_rows.py",
-              "test_tree_nodes.py", "test_static_cpu.py", "test_memory_device.py", "test_synthetic_static.py",
-              "test_entropy_feedback.py", "test_tree_entropy.py", "test_tree_compaction.py",
-              "test_cache_mutation_failures.py", "test_prompt_admission.py", "test_sampling_seed.py", "test_residency_devices.py", "test_draft_model_ownership.py",
-              "test_draft_model_limits.py", "test_synthetic_acceptance.py", "test_round_actions.py",
-              "test_cost_table_scheduler.py", "test_capacity_buckets.py", "test_tree_node_cap.py",
-              "test_cost_table_verifiers.py", "test_synthetic_state_acceptance.py",
-              "test_trace_rounds.py", "test_benchmark_cases.py",
-              "test_drafter_budgets.py",
-              "test_compact_drafter.py", "test_drafter_state.py", "test_lanes_exactness.py", "test_sampling_devices.py",
-          )
-          for name in names:
-              shutil.copyfile(source / name, suite / "tests" / name)
+          checkout_only = {  # These import scripts/ or run commands from the source tree.
+              "test_cli_check.py", "test_cli_train.py", "test_compact_eval.py", "test_execution_bench.py",
+              "test_failure_training.py", "test_pilot_corpus.py", "test_real_model_script.py",
+              "test_reconciliation_benchmark.py",
+          }
+          for path in [source / "conftest.py", *source.glob("test_*.py")]:  # Skipped files still provide shared fixtures.
+              shutil.copyfile(path, suite / "tests" / path.name)
           (suite / "pytest.ini").write_text("[pytest]\n", encoding="utf-8")
           os.chdir(suite)
           sys.path.insert(0, str(suite))
-          result = pytest.main(["-c", "pytest.ini", "--confcutdir=tests", "--import-mode=importlib", "-ra", "tests"])
+          ignored = [f"--ignore=tests/{name}" for name in sorted(checkout_only)]
+          result = pytest.main(["-c", "pytest.ini", "--confcutdir=tests", "--import-mode=importlib", "-ra", *ignored, "tests"])
           check_origins()
           raise SystemExit(result)
           PY
