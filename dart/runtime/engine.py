@@ -244,29 +244,94 @@ class DartEngine:
             return list(drafts), probs
         return list(drafter.propose(committed, budget)), None
 
-    def _empty_output(self, config, metrics, run_id, start, target):
+    def _check_request(self, config: DecodeConfig) -> None:
+        """Reject mode, verifier and residency combinations before any execution."""
+        replay = getattr(self.target, "uses_replay_cache", False)
+        if replay and (config.mode != "exact" or self.verifier_name != "block" or config.full_kv_residency != "gpu"):
+            raise ValueError("CUDA replay requires exact mode, block verification and resident GPU KV")
+        if replay and any(name != "block" for name in getattr(self.scheduler, "verifiers", None) or ()):
+            raise ValueError("static and CUDA replay targets support block verification only")
+        if getattr(self.scheduler, "requires_round_timing", False) and (
+            config.mode != "exact" or config.full_kv_residency != "gpu"
+        ):
+            raise ValueError("time scheduling requires exact mode and resident target KV")
+        if self.verifier_name == "tree" and config.mode != "exact":
+            raise ValueError(
+                "the tree verifier supports exact (greedy) mode only; "
+                "use verifier='block' for sampling/approx"
+            )
+
+    def _round_drafts(self, drafter, committed, per_round, verifier, sampling, config):
+        """Return (drafts, draft_probs) for one round, clamped to its budget."""
+        if verifier != "tree":
+            drafts, draft_probs = self._propose(drafter, committed, per_round, sampling)
+            # Clamp to the round budget even if a drafter over-returns:
+            # tokens past the budget would be verified (wasted target
+            # compute) only to be truncated at the end.
+            return (drafts[:per_round] if per_round > 0 else []), draft_probs
+        # Tree-capable drafters propose several candidate branches;
+        # plain drafters degrade to a chain, for which tree and
+        # block verification coincide decision-for-decision.
+        if per_round <= 0:
+            drafts = DraftTree.chain([])
+        elif hasattr(drafter, "propose_tree"):
+            drafts = drafter.propose_tree(committed, per_round)
+        else:
+            drafts = DraftTree.chain(list(drafter.propose(committed, per_round))[:per_round])
+        if not isinstance(drafts, DraftTree):
+            drafts = DraftTree.chain(list(drafts))
+        return drafts.truncate(per_round).limit(config.max_tree_nodes), None
+
+    def _output(self, config, metrics, run_id, start, target, generated, rounds, *, unverified_tokens=0,
+                divergence_total=0, trailing_unverified=0, res_stats=None, kv_gb=0.0) -> GenerationOutput:
+        """Build the request's output and metadata; zero-output requests use the defaults."""
         sampling = config.mode == "exact_sampling"
+        if config.mode == "exact":
+            greedy_verified = True
+        elif config.mode == "approx":
+            greedy_verified = divergence_total == 0 and trailing_unverified == 0
+        else:
+            greedy_verified = False
+        metrics.tokens_generated = len(generated)
         metrics.wall_time_ms = (time.perf_counter() - start) * 1000.0
         metrics.gpu_peak_gb = gpu_memory_gb(self.target.device)
+        text = (
+            self.target.tokenizer.decode(generated, skip_special_tokens=False)
+            if self.target.tokenizer is not None
+            else None
+        )
         metadata = metrics.to_metadata(
-            run_id=run_id, verifier="sampling" if sampling else self.verifier_name,
-            exact_greedy_equivalent=None, greedy_verified=not sampling,
-            output_hash=output_hash([]), finished_eos=False, gpu_kv_gb=0.0,
-            full_kv_residency=config.full_kv_residency, tokens_verified=0,
+            run_id=run_id,
+            verifier=("sampling" if sampling else self.verifier_name),
+            exact_greedy_equivalent=None,  # No reference generation was run.
+            greedy_verified=greedy_verified,
+            output_hash=output_hash(generated),
+            finished_eos=bool(generated and generated[-1] in self.target.eos_token_ids),
+            gpu_kv_gb=round(kv_gb, 6),
+            full_kv_residency=config.full_kv_residency,
+            tokens_verified=max(0, len(generated) - unverified_tokens),
             gpu_memory_scope="process allocations on target device",
             gpu_memory_device=str(self.target.device) if torch.device(self.target.device).type == "cuda" else None,
         )
         if config.full_kv_residency == "cpu_pinned":
-            metadata.update(kv_residency_moves=0, kv_residency_moved_mb=0.0)
+            res_stats = res_stats or ResidencyStats()
+            metadata["kv_residency_moves"] = res_stats.moved_tensors
+            metadata["kv_residency_moved_mb"] = round(res_stats.moved_bytes / 1e6, 3)
         if getattr(target, "uses_replay_cache", False):
             metadata["cache_capacity"] = target.capacity
         if sampling:
-            metadata.update(distribution_exact=True, temperature=config.temperature, seed=config.seed)
+            metadata["distribution_exact"] = True
+            metadata["temperature"] = config.temperature
+            metadata["seed"] = config.seed
         if config.mode == "approx":
-            metadata.update(verify_skip_policy={"verify_every": config.verify_every}, unverified_tokens=0,
-                            trailing_unverified=0, pending_divergence=0, quality_risk=False)
-        text = self.target.tokenizer.decode([], skip_special_tokens=False) if self.target.tokenizer is not None else None
-        return GenerationOutput(token_ids=[], text=text, metadata=metadata, rounds=[])
+            metadata["verify_skip_policy"] = {"verify_every": config.verify_every}
+            metadata["unverified_tokens"] = unverified_tokens
+            metadata["trailing_unverified"] = trailing_unverified
+            metadata["pending_divergence"] = divergence_total
+            metadata["quality_risk"] = bool(
+                unverified_tokens and (divergence_total or trailing_unverified)
+            )
+        return GenerationOutput(token_ids=generated, text=text, metadata=metadata, rounds=rounds)
 
     @torch.inference_mode()
     def generate(
@@ -287,22 +352,8 @@ class DartEngine:
             prompt_ids = self.target.tokenizer.encode(prompt_ids)
         config = config or self.default_decode_config or DecodeConfig()
         config.validate()
-        if getattr(self.target, "uses_replay_cache", False) and (
-            config.mode != "exact" or self.verifier_name != "block" or config.full_kv_residency != "gpu"
-        ):
-            raise ValueError("CUDA replay requires exact mode, block verification and resident GPU KV")
-        if getattr(self.target, "uses_replay_cache", False) and any(
-            name != "block" for name in getattr(self.scheduler, "verifiers", None) or ()
-        ):
-            raise ValueError("static and CUDA replay targets support block verification only")
+        self._check_request(config)
         timed_scheduler = getattr(self.scheduler, "requires_round_timing", False)
-        if timed_scheduler and (config.mode != "exact" or config.full_kv_residency != "gpu"):
-            raise ValueError("time scheduling requires exact mode and resident target KV")
-        if self.verifier_name == "tree" and config.mode != "exact":
-            raise ValueError(
-                "the tree verifier supports exact (greedy) mode only; "
-                "use verifier='block' for sampling/approx"
-            )
         sampling = config.mode == "exact_sampling"
         needs_entropy = (self.scheduler is not None and getattr(self.scheduler, "requires_entropy", True)) or any(
             getattr(drafter, "requires_entropy", True) for drafter in self._all_drafters()
@@ -344,7 +395,7 @@ class DartEngine:
         target.validate_generation(len(prompt), config.max_new_tokens)
         if config.max_new_tokens == 0:
             target.validate_prompt(prompt)
-            return self._empty_output(config, metrics, run_id, t_start, target)
+            return self._output(config, metrics, run_id, t_start, target, [], [])
         cleanup.callback(setattr, target, "last_hidden_block", None)
         for drafter in {id(d): d for d in self._all_drafters()}.values():
             finish = getattr(drafter, "finish_request", None)
@@ -405,29 +456,7 @@ class DartEngine:
                 t0 = time.perf_counter()
                 budget = config.max_new_tokens - len(generated)
                 per_round = min(draft_len, budget - 1)  # Leave room for the verifier's token.
-                if verifier == "tree":
-                    # Tree-capable drafters propose several candidate branches;
-                    # plain drafters degrade to a chain, for which tree and
-                    # block verification coincide decision-for-decision.
-                    if per_round <= 0:
-                        drafts = DraftTree.chain([])
-                    elif hasattr(drafter, "propose_tree"):
-                        drafts = drafter.propose_tree(committed_seq, per_round)
-                    else:
-                        linear = list(drafter.propose(committed_seq, per_round))
-                        drafts = DraftTree.chain(linear[:per_round])
-                    if not isinstance(drafts, DraftTree):
-                        drafts = DraftTree.chain(list(drafts))
-                    drafts = drafts.truncate(per_round).limit(config.max_tree_nodes)
-                    draft_probs = None
-                else:
-                    drafts, draft_probs = self._propose(
-                        drafter, committed_seq, per_round, sampling
-                    )
-                    # Clamp to the round budget even if a drafter over-returns:
-                    # tokens past the budget would be verified (wasted target
-                    # compute) only to be truncated at the end.
-                    drafts = drafts[:per_round] if per_round > 0 else []
+                drafts, draft_probs = self._round_drafts(drafter, committed_seq, per_round, verifier, sampling, config)
                 t1 = time.perf_counter()
 
                 skip_verify = (
@@ -531,54 +560,9 @@ class DartEngine:
                 res_stats.moved_bytes += parked.moved_bytes
 
         generated = generated[: config.max_new_tokens]
-
-        trailing_unverified = max(0, len(pending_block) - 1)
-        if config.mode == "exact":
-            greedy_verified = True
-        elif config.mode == "approx":
-            greedy_verified = divergence_total == 0 and trailing_unverified == 0
-        else:
-            greedy_verified = False
-
-        metrics.tokens_generated = len(generated)
-        metrics.wall_time_ms = (time.perf_counter() - t_start) * 1000.0
-        metrics.gpu_peak_gb = gpu_memory_gb(self.target.device)
-        text = (
-            self.target.tokenizer.decode(generated, skip_special_tokens=False)
-            if self.target.tokenizer is not None
-            else None
-        )
         kv_gb = max((self._drafter_kv_gb(d) for d in self._all_drafters()), default=0.0)
-        metadata = metrics.to_metadata(
-            run_id=run_id,
-            verifier=("sampling" if sampling else self.verifier_name),
-            exact_greedy_equivalent=None,  # No reference generation was run.
-            greedy_verified=greedy_verified,
-            output_hash=output_hash(generated),
-            finished_eos=bool(generated and generated[-1] in self.target.eos_token_ids),
-            gpu_kv_gb=round(kv_gb, 6),
-            full_kv_residency=config.full_kv_residency,
-            tokens_verified=max(0, len(generated) - unverified_tokens),
-            gpu_memory_scope="process allocations on target device",
-            gpu_memory_device=str(self.target.device) if torch.device(self.target.device).type == "cuda" else None,
-        )
-        if park_kv:
-            metadata["kv_residency_moves"] = res_stats.moved_tensors
-            metadata["kv_residency_moved_mb"] = round(res_stats.moved_bytes / 1e6, 3)
-        if getattr(target, "uses_replay_cache", False):
-            metadata["cache_capacity"] = target.capacity
-        if sampling:
-            metadata["distribution_exact"] = True
-            metadata["temperature"] = config.temperature
-            metadata["seed"] = config.seed
-        if config.mode == "approx":
-            metadata["verify_skip_policy"] = {"verify_every": config.verify_every}
-            metadata["unverified_tokens"] = unverified_tokens
-            metadata["trailing_unverified"] = trailing_unverified
-            metadata["pending_divergence"] = divergence_total
-            metadata["quality_risk"] = bool(
-                unverified_tokens and (divergence_total or trailing_unverified)
-            )
-        return GenerationOutput(
-            token_ids=generated, text=text, metadata=metadata, rounds=rounds
+        return self._output(
+            config, metrics, run_id, t_start, target, generated, rounds,
+            unverified_tokens=unverified_tokens, divergence_total=divergence_total,
+            trailing_unverified=max(0, len(pending_block) - 1), res_stats=res_stats, kv_gb=kv_gb,
         )
