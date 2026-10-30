@@ -147,6 +147,11 @@ class TargetModel:
     # ------------------------------------------------------------------ #
     # Core forward primitives
     # ------------------------------------------------------------------ #
+    @property
+    def context_limit(self) -> Optional[int]:
+        """Longest sequence this target can hold, or None when unbounded."""
+        return getattr(self.model.config, "max_position_embeddings", None)
+
     def _check_context_length(self, length: int) -> None:
         limit = getattr(self.model.config, "max_position_embeddings", None)
         if limit is not None and length > limit:

@@ -214,6 +214,11 @@ class CudaGraphTarget(TargetModel):
         if self._signature() != self._model_signature:
             raise ValueError("model tensor storage changed; prepare a new replay target")
 
+    @property
+    def context_limit(self):
+        limit = super().context_limit
+        return self.capacity if limit is None else min(limit, self.capacity)
+
     def _check_context_length(self, length):
         super()._check_context_length(length)
         if length > self.capacity:

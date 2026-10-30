@@ -79,14 +79,20 @@ class ARDrafter:
         n = len(self._processed)
         return len(committed) >= n and committed[:n] == self._processed
 
+    def _budget(self, committed: list[int], max_tokens: int) -> int:
+        """Drafts that fit the draft model; the final draft needs no forward."""
+        limit = self.dm.context_limit
+        return max_tokens if limit is None else min(max_tokens, limit - len(committed) + 1)
+
     @torch.inference_mode()
     def _sync(self, committed: list[int]) -> Tensor:
         """Bring the draft cache up to ``committed``; return next-token logits."""
-        if self._state is None or not self._is_extension(committed) or not self._processed:
+        delta = committed[len(self._processed):]
+        too_long = len(delta) > getattr(self.dm, "max_block_tokens", len(delta))  # Static targets prepare fixed blocks.
+        if self._state is None or not self._is_extension(committed) or not self._processed or too_long:
             self.reset()
             self._state, logits = self.dm.prefill(committed, cache=self._make_cache())
             return logits
-        delta = committed[len(self._processed):]
         if delta:
             return self.dm.forward_block(self._state, delta)[-1]
         # Engine never calls propose twice without committing, but stay
@@ -96,6 +102,7 @@ class ARDrafter:
 
     @torch.inference_mode()
     def propose(self, committed: list[int], max_tokens: int) -> list[int]:
+        max_tokens = self._budget(committed, max_tokens)
         if max_tokens <= 0:
             return []
         last_logits = self._sync(committed)
@@ -114,6 +121,7 @@ class ARDrafter:
     def propose_with_probs(
         self, committed: list[int], max_tokens: int
     ) -> tuple[list[int], Optional[Tensor]]:
+        max_tokens = self._budget(committed, max_tokens)
         if max_tokens <= 0:
             return [], None
         t = max(self.sample_temperature, 1e-6)
