@@ -111,7 +111,8 @@ class CostTableScheduler(TimeScheduler):
     kept per arm under ``"lane:length"`` keys. With a ``verifiers`` menu such as
     ``("block", "tree")`` each length is also paired with each verifier, under
     ``"lane:length:verifier"`` keys. Target-only steps remain the baseline an arm
-    must beat by ``min_time_saving``.
+    must beat by ``min_time_saving``. Diffusion arms use the selected length as
+    their canvas budget too.
     """
 
     def __init__(self, config: SchedulerConfig, *, draft_lengths: tuple[int, ...] = (2, 4, 8),
@@ -127,6 +128,12 @@ class CostTableScheduler(TimeScheduler):
         self.draft_lengths = draft_lengths
         self.verifiers = verifiers
         super().__init__(config, **options)
+
+    def choose_action(self, state: DecodeState, allowed=None) -> DecodeAction:
+        action = super().choose_action(state, allowed=allowed)
+        if action.lane == "diffusion":
+            action.canvas_len = action.draft_len  # Both budgets include the entropy gate.
+        return action
 
     def _candidates(self, allowed) -> dict[str, tuple[str, int, str | None]]:
         lanes = super()._candidates(allowed)
