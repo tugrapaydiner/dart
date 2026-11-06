@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import threading
 import time
+from contextlib import ExitStack
 from importlib.metadata import version
 
 import torch
@@ -86,7 +87,7 @@ class _Workspace:
 
 
 class _ReplayBlock:
-    def __init__(self, model, workspace, length, capture):
+    def __init__(self, model, workspace, length, capture, *, capture_predictions=False):
         self.forward_model = model.forward
         self.workspace = workspace
         device = workspace.storage.device
@@ -96,6 +97,8 @@ class _ReplayBlock:
         self.columns = torch.arange(workspace.storage.shape[-2], device=device)
         self.graph = None
         self.output = None
+        self.capture_predictions = capture_predictions
+        self.predictions = None
         if capture:
             stream = torch.cuda.Stream(device=device)
             stream.wait_stream(torch.cuda.current_stream(device))
@@ -114,8 +117,11 @@ class _ReplayBlock:
         self.workspace.positions = positions
         mask = self.workspace.storage.new_zeros((1, 1, self.ids.shape[1], self.columns.numel()))
         mask.masked_fill_(self.columns[None, :] > positions[:, None], torch.finfo(mask.dtype).min)
-        return self.forward_model(input_ids=self.ids, position_ids=positions[None], attention_mask=mask,
-                                  past_key_values=self.workspace, use_cache=True, output_hidden_states=False).logits
+        logits = self.forward_model(input_ids=self.ids, position_ids=positions[None], attention_mask=mask,
+                                    past_key_values=self.workspace, use_cache=True, output_hidden_states=False).logits
+        if self.capture_predictions:
+            self.predictions = logits.argmax(dim=-1)
+        return logits
 
     def run(self):
         if self.graph is None:
@@ -127,51 +133,64 @@ class _ReplayBlock:
 class CudaGraphTarget(TargetModel):
     """Opt-in FP32 Llama replay for transformers >= 5.16.1.
 
-    Construction includes warmup and capture; prepare with no other CUDA work
+    Graph construction includes warmup and capture; prepare with no other CUDA work
     running in the process. Calls use the preparation stream and serialize
     workspace access. Each state and returned logit tensor owns its data.
-    ``replay=False`` runs the same static-cache path without graph capture.
+    ``replay=False`` runs the static-cache path on CPU or CUDA without graph capture.
+    ``capture_predictions=True`` also prepares argmax for entropy-free greedy calls.
     """
 
     uses_replay_cache = True
 
     @torch.inference_mode()
-    def __init__(self, target: TargetModel, *, max_block_tokens=5, capacity=None, replay=True):
+    def __init__(self, target: TargetModel, *, max_block_tokens=5, capacity=None, replay=True,
+                 capture_predictions=False):
         if type(replay) is not bool:
             raise ValueError("replay must be a boolean")
-        if torch.device(target.device).type != "cuda" or target.dtype != torch.float32:
+        if type(capture_predictions) is not bool:
+            raise ValueError("capture_predictions must be a boolean")
+        device = torch.device(target.device).type
+        if replay and (device != "cuda" or target.dtype != torch.float32):
             raise ValueError("CUDA replay requires a float32 CUDA target")
+        if device not in {"cpu", "cuda"} or target.dtype != torch.float32:
+            raise ValueError("static execution requires a float32 CPU or CUDA target")
         if not isinstance(target.model, LlamaForCausalLM) or Version(version("transformers")) < Version("5.16.1"):
-            raise ValueError("CUDA replay requires LlamaForCausalLM and transformers >= 5.16.1")
+            raise ValueError("static cache execution requires LlamaForCausalLM and transformers >= 5.16.1")
         config = target.model.config
         rope = getattr(config, "rope_parameters", None) or getattr(config, "rope_scaling", None) or {}
         if target.record_hidden or config._attn_implementation != "eager" or rope.get("rope_type", "default") != "default":
-            raise ValueError("CUDA replay requires eager attention, default RoPE and no hidden-state recording")
+            raise ValueError("static cache execution requires eager attention, default RoPE and no hidden-state recording")
         capacity = config.max_position_embeddings if capacity is None else capacity
         if type(capacity) is not int or not 1 <= capacity <= min(4096, config.max_position_embeddings):
             raise ValueError("replay capacity must be within the model context and at most 4096")
         if type(max_block_tokens) is not int or not 1 <= max_block_tokens <= min(16, capacity):
             raise ValueError("max_block_tokens must be an integer from 1 to min(16, capacity)")
         if len({parameter.device for parameter in target.model.parameters()}) != 1 or any(
-            parameter.dtype != torch.float32 or parameter.device.type != "cuda" for parameter in target.model.parameters()
+            parameter.dtype != torch.float32 or parameter.device.type != device for parameter in target.model.parameters()
         ):
-            raise ValueError("replay model parameters must all use float32 on one CUDA device")
+            raise ValueError(f"replay model parameters must all use float32 on one {device.upper()} device")
         super().__init__(target.model, target.tokenizer, device=target.device, dtype=target.dtype)
         self.eos_token_ids = target.eos_token_ids
         self.capacity = capacity
         self.max_block_tokens = max_block_tokens
+        self._capture_predictions = capture_predictions
         self.execution_backend = "cuda_graph" if replay else "static"
         self._owner = object()
         self._lock = threading.RLock()
         self._closed = False
-        self._stream = torch.cuda.current_stream(next(self.model.parameters()).device)
+        self._stream = torch.cuda.current_stream(next(self.model.parameters()).device) if device == "cuda" else None
         self._model_signature = self._signature()
         self._model_tensors = tuple(tensor.detach() for tensor in (*self.model.parameters(), *self.model.buffers()))
         self._workspace = _Workspace(self.model, capacity)
         started = time.perf_counter()
-        self._blocks = {length: _ReplayBlock(self.model, self._workspace, length, replay)
+        self._blocks = {length: _ReplayBlock(self.model, self._workspace, length, replay,
+                                            capture_predictions=capture_predictions)
                         for length in range(1, max_block_tokens + 1)}
         self.setup_ms = (time.perf_counter() - started) * 1000
+
+    @property
+    def capture_predictions(self):
+        return self._capture_predictions
 
     def _signature(self):
         pending, seen, tensors = [self.model], set(), []
@@ -189,12 +208,17 @@ class CudaGraphTarget(TargetModel):
     def _check_ready(self):
         if self._closed:
             raise RuntimeError("replay target is closed")
-        if torch.cuda.current_stream(self._stream.device) != self._stream:
+        if self._stream is not None and torch.cuda.current_stream(self._stream.device) != self._stream:
             raise ValueError("use the CUDA stream that prepared the replay target")
         if self.record_hidden or self.model.training or self.model.config._attn_implementation != "eager":
             raise ValueError("replay requires unchanged inference settings")
         if self._signature() != self._model_signature:
             raise ValueError("model tensor storage changed; prepare a new replay target")
+
+    @property
+    def context_limit(self):
+        limit = super().context_limit
+        return self.capacity if limit is None else min(limit, self.capacity)
 
     def _check_context_length(self, length):
         super()._check_context_length(length)
@@ -223,15 +247,29 @@ class CudaGraphTarget(TargetModel):
             raise ValueError("replay prefill creates its own request cache")
         return super().prefill(prompt_ids)
 
-    def _forward(self, state, input_ids, *, last_logits_only=False):
+    def validate_prompt(self, prompt_ids):
         with self._lock:
             self._check_ready()
+            super().validate_prompt(prompt_ids)
+
+    @torch.inference_mode()
+    def forward_predictions(self, state, tokens):
+        """Return owned next-token IDs from a prepared greedy block."""
+        if not self.capture_predictions:
+            raise ValueError("prepare the target with capture_predictions=True")
+        return self._forward(state, self._ids(tokens), return_predictions=True)
+
+    def _forward(self, state, input_ids, *, last_logits_only=False, return_predictions=False):
+        with self._lock:
+            self._check_ready()
+            state._check_usable()
             total_len = state.seq_len + input_ids.shape[1]
             self._check_context_length(total_len)
             if not isinstance(state.cache, ReplayCache) and state.seq_len == 0:
                 if type(state.cache) is not DynamicCache:
                     raise ValueError("replay requires a full DynamicCache")
-                return super()._forward(state, input_ids, last_logits_only=last_logits_only)
+                logits = super()._forward(state, input_ids, last_logits_only=last_logits_only)
+                return logits.argmax(dim=-1).tolist() if return_predictions else logits
             if input_ids.shape[1] not in self._blocks:
                 raise ValueError(f"block exceeds prepared replay size {self.max_block_tokens}")
             cache = state.cache
@@ -245,7 +283,10 @@ class CudaGraphTarget(TargetModel):
             block.start.fill_(cache.length)
             logits = block.run()
             cache.storage[..., cache.length:total_len, :].copy_(self._workspace.storage[..., cache.length:total_len, :])
-            output = logits[0].float().clone()  # Later replays must not overwrite a caller's logits.
+            if return_predictions:
+                output = block.predictions[0].tolist()  # Copy before another call can replay this workspace.
+            else:
+                output = logits[0].float().clone()  # Later replays must not overwrite a caller's logits.
             cache.length = total_len
             state.cache = cache
             return output
@@ -267,6 +308,9 @@ class CudaGraphTarget(TargetModel):
     def greedy_generate(self, prompt_ids, max_new_tokens):
         ids = self._ids(prompt_ids)
         self.validate_generation(ids.shape[1], max_new_tokens)
+        if max_new_tokens == 0:
+            self.validate_prompt(ids)
+            return []
         state = TargetState(DynamicCache())
         logits = self._forward(state, ids, last_logits_only=True)[-1]
         generated = []
@@ -275,14 +319,85 @@ class CudaGraphTarget(TargetModel):
             generated.append(token)
             if token in self.eos_token_ids or len(generated) == max_new_tokens:
                 break
-            token = int(self.forward_block(state, [token])[-1].argmax().item())
+            if self.capture_predictions:
+                token = self.forward_predictions(state, [token])[0]
+            else:
+                token = int(self.forward_block(state, [token])[-1].argmax().item())
         return generated
 
     def close(self):
         with self._lock:
             if not self._closed:
-                self._stream.synchronize()
+                if self._stream is not None:
+                    self._stream.synchronize()
                 self._blocks.clear()
                 self._workspace = None
                 self._model_tensors = ()
                 self._closed = True
+
+
+class CapacityBuckets:
+    """Prepared replay targets of several capacities sharing one model.
+
+    Each request runs on the smallest capacity that holds its prompt and output
+    budget. Up to four buckets and sixteen prepared blocks are allowed in total.
+    """
+
+    uses_replay_cache = True
+    record_hidden = False
+
+    def __init__(self, target: TargetModel, capacities, *, max_block_tokens=5, replay=True,
+                 capture_predictions=False):
+        if (not isinstance(capacities, tuple) or not 1 <= len(capacities) <= 4
+                or len(set(capacities)) != len(capacities) or any(type(c) is not int for c in capacities)):
+            raise ValueError("capacities must be a tuple of one to four distinct integers")
+        if type(max_block_tokens) is int and len(capacities) * max_block_tokens > 16:
+            raise ValueError("capacity buckets allow at most 16 prepared blocks in total")
+        with ExitStack() as cleanup:
+            buckets = []
+            for capacity in sorted(capacities):
+                bucket = CudaGraphTarget(target, max_block_tokens=max_block_tokens, capacity=capacity,
+                                         replay=replay, capture_predictions=capture_predictions)
+                cleanup.callback(bucket.close)
+                buckets.append(bucket)
+            cleanup.pop_all()
+        self.buckets = tuple(buckets)
+        largest = self.buckets[-1]
+        self.model, self.tokenizer, self.device, self.dtype = largest.model, largest.tokenizer, largest.device, largest.dtype
+        self.eos_token_ids = largest.eos_token_ids
+        self.max_block_tokens = max_block_tokens
+        self.capture_predictions = capture_predictions
+        self.execution_backend = largest.execution_backend
+        self.setup_ms = sum(bucket.setup_ms for bucket in self.buckets)
+        self.last_hidden_block = None
+
+    @property
+    def capacities(self):
+        return tuple(bucket.capacity for bucket in self.buckets)
+
+    @property
+    def context_limit(self):
+        return self.buckets[-1].context_limit
+
+    def for_request(self, prompt_len, max_new_tokens):
+        """Return the smallest bucket that holds the prompt and output budget."""
+        largest = self.buckets[-1]
+        if largest._closed:
+            raise RuntimeError("replay target is closed")
+        largest.validate_generation(prompt_len, max_new_tokens)
+        return next(bucket for bucket in self.buckets if bucket.capacity >= prompt_len + max_new_tokens)
+
+    def validate_generation(self, prompt_len, max_new_tokens):
+        self.for_request(prompt_len, max_new_tokens)
+
+    def validate_prompt(self, prompt_ids):
+        self.buckets[-1].validate_prompt(prompt_ids)
+
+    def greedy_generate(self, prompt_ids, max_new_tokens):
+        prompt_len = self.buckets[-1]._ids(prompt_ids).shape[1]
+        return self.for_request(prompt_len, max_new_tokens).greedy_generate(prompt_ids, max_new_tokens)
+
+    def close(self):
+        with ExitStack() as cleanup:
+            for bucket in self.buckets:
+                cleanup.callback(bucket.close)

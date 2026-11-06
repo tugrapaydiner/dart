@@ -368,7 +368,9 @@ def main() -> None:
                 if forwards:
                     row["accepted_tokens_per_diffusion_forward"] = report.draft_tokens_accepted / forwards
             if hasattr(drafter, "kv_stats"):
-                row["kv_stats"] = drafter.kv_stats()
+                row["kv_stats"] = getattr(drafter, "last_kv_stats", None)
+                if row["kv_stats"] is None:
+                    row["kv_stats"] = drafter.kv_stats()
             results[name] = row
         methods = {"hf_greedy": build_hf_method(target, args.max_new, record_hidden=False), "target_greedy": build_target_method(target, args.max_new)}
         methods.update({name: (lambda prompt, e=engine: e.generate(prompt, cfg)) for name, engine in engines.items()})

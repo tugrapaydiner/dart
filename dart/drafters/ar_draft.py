@@ -39,8 +39,14 @@ class ARDrafter:
         draft_model: TargetModel,
         sample_temperature: float = 1.0,
         seed: int = 0,
+        *,
+        owns_model: bool = False,
     ) -> None:
+        if type(owns_model) is not bool:
+            raise ValueError("owns_model must be a boolean")
         self.dm = draft_model
+        self._owns_model = owns_model
+        self._model_closed = False
         self.sample_temperature = sample_temperature
         self.gen = torch.Generator(device=draft_model.device).manual_seed(seed)
         self._state: Optional[TargetState] = None
@@ -50,6 +56,21 @@ class ARDrafter:
         self._state = None
         self._processed = []
 
+    def finish_request(self) -> None:
+        self.reset()
+        self.dm.last_hidden_block = None
+
+    def seed_request(self, seed: int) -> None:
+        self.gen.manual_seed(seed)
+
+    def close(self) -> None:
+        """Close the draft model when this drafter owns it; shared models stay open."""
+        if self._owns_model and not self._model_closed:
+            close = getattr(self.dm, "close", None)
+            if close is not None:
+                close()
+            self._model_closed = True
+
     def _make_cache(self):
         """Cache for fresh prefills; subclasses substitute compressed caches."""
         return None  # TargetModel.prefill defaults to a full DynamicCache
@@ -58,14 +79,20 @@ class ARDrafter:
         n = len(self._processed)
         return len(committed) >= n and committed[:n] == self._processed
 
+    def _budget(self, committed: list[int], max_tokens: int) -> int:
+        """Drafts that fit the draft model; the final draft needs no forward."""
+        limit = self.dm.context_limit
+        return max_tokens if limit is None else min(max_tokens, limit - len(committed) + 1)
+
     @torch.inference_mode()
     def _sync(self, committed: list[int]) -> Tensor:
         """Bring the draft cache up to ``committed``; return next-token logits."""
-        if self._state is None or not self._is_extension(committed) or not self._processed:
+        delta = committed[len(self._processed):]
+        too_long = len(delta) > getattr(self.dm, "max_block_tokens", len(delta))  # Static targets prepare fixed blocks.
+        if self._state is None or not self._is_extension(committed) or not self._processed or too_long:
             self.reset()
             self._state, logits = self.dm.prefill(committed, cache=self._make_cache())
             return logits
-        delta = committed[len(self._processed):]
         if delta:
             return self.dm.forward_block(self._state, delta)[-1]
         # Engine never calls propose twice without committing, but stay
@@ -75,6 +102,7 @@ class ARDrafter:
 
     @torch.inference_mode()
     def propose(self, committed: list[int], max_tokens: int) -> list[int]:
+        max_tokens = self._budget(committed, max_tokens)
         if max_tokens <= 0:
             return []
         last_logits = self._sync(committed)
@@ -82,7 +110,7 @@ class ARDrafter:
         for _ in range(max_tokens):
             tok = int(torch.argmax(last_logits).item())
             drafts.append(tok)
-            if tok in self.dm.eos_token_ids:
+            if tok in self.dm.eos_token_ids or len(drafts) == max_tokens:
                 break
             last_logits = self.dm.forward_block(self._state, [tok])[-1]
         self.dm.crop(self._state, len(committed))
@@ -93,6 +121,7 @@ class ARDrafter:
     def propose_with_probs(
         self, committed: list[int], max_tokens: int
     ) -> tuple[list[int], Optional[Tensor]]:
+        max_tokens = self._budget(committed, max_tokens)
         if max_tokens <= 0:
             return [], None
         t = max(self.sample_temperature, 1e-6)
@@ -104,7 +133,7 @@ class ARDrafter:
             tok = int(torch.multinomial(q, 1, generator=self.gen).item())
             drafts.append(tok)
             rows.append(q)
-            if tok in self.dm.eos_token_ids:
+            if tok in self.dm.eos_token_ids or len(drafts) == max_tokens:
                 break
             last_logits = self.dm.forward_block(self._state, [tok])[-1]
         self.dm.crop(self._state, len(committed))

@@ -18,17 +18,19 @@ Batch size is fixed at 1 for interactive serving
 from __future__ import annotations
 
 import inspect
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+from importlib.metadata import version
 from typing import Optional
 
 import torch
+from packaging.version import Version
 from torch import Tensor
 
-try:  # transformers >= 4.40
+try:
     from transformers import AutoModelForCausalLM, AutoTokenizer
     from transformers.cache_utils import DynamicCache
 except ImportError as e:  # pragma: no cover
-    raise ImportError("dart requires `transformers>=4.40`") from e
+    raise ImportError("dart requires `transformers>=5.16.1`") from e
 
 
 @dataclass
@@ -38,9 +40,17 @@ class TargetState:
     ``cache`` covers the first ``seq_len`` tokens of the sequence.  Under the
     decode-loop invariant (see dart/runtime/types.py) this is everything but
     the pending token.
+
+    A failed forward or cache update invalidates this state. Start a new prefill instead
+    of reusing a cache whose layers may have been only partly updated.
     """
 
     cache: DynamicCache
+    _failed: bool = field(default=False, init=False, repr=False)
+
+    def _check_usable(self) -> None:
+        if self._failed:
+            raise RuntimeError("request cache is invalid after a failed forward or cache update; start a new prefill")
 
     @property
     def seq_len(self) -> int:
@@ -109,9 +119,10 @@ class TargetModel:
     ) -> "TargetModel":
         if dtype is None:
             dtype = torch.float32 if device == "cpu" else torch.bfloat16
+        dtype_option = "dtype" if Version(version("transformers")) >= Version("5") else "torch_dtype"  # 5.x deprecates torch_dtype.
         model = AutoModelForCausalLM.from_pretrained(
             name_or_path,
-            torch_dtype=dtype,
+            **{dtype_option: dtype},
             attn_implementation=attn_implementation,
             trust_remote_code=trust_remote_code,
             local_files_only=local_files_only,
@@ -139,6 +150,11 @@ class TargetModel:
     # ------------------------------------------------------------------ #
     # Core forward primitives
     # ------------------------------------------------------------------ #
+    @property
+    def context_limit(self) -> Optional[int]:
+        """Longest sequence this target can hold, or None when unbounded."""
+        return getattr(self.model.config, "max_position_embeddings", None)
+
     def _check_context_length(self, length: int) -> None:
         limit = getattr(self.model.config, "max_position_embeddings", None)
         if limit is not None and length > limit:
@@ -150,6 +166,17 @@ class TargetModel:
         if isinstance(max_new_tokens, bool) or not isinstance(max_new_tokens, int) or max_new_tokens < 0:
             raise ValueError("max_new_tokens must be an integer >= 0")
         self._check_context_length(prompt_len + max_new_tokens)
+
+    def validate_prompt(self, prompt_ids: list[int] | Tensor) -> None:
+        """Check prompt admission without executing the model."""
+        ids = self._ids(prompt_ids)
+        self.validate_generation(ids.size(1), 0)
+        self._check_vocabulary(ids)
+
+    def _check_vocabulary(self, ids: Tensor) -> None:
+        low, high = torch.aminmax(ids)
+        if low.item() < 0 or high.item() >= self.model.config.vocab_size:
+            raise ValueError("token id is outside the model vocabulary")
 
     def _ids(self, tokens: list[int] | Tensor) -> Tensor:
         if isinstance(tokens, Tensor):
@@ -174,6 +201,7 @@ class TargetModel:
         input_ids = self._ids(prompt_ids)
         if input_ids.size(1) == 0:
             raise ValueError("prompt must contain at least one token")
+        self._check_vocabulary(input_ids)  # Out-of-range IDs assert inside CUDA embedding kernels.
         state = TargetState(cache=cache if cache is not None else DynamicCache())
         logits = self._forward(state, input_ids, last_logits_only=True)
         return state, logits[-1]
@@ -188,6 +216,7 @@ class TargetModel:
         return self._forward(state, self._ids(tokens))
 
     def _forward(self, state: TargetState, input_ids: Tensor, *, last_logits_only: bool = False) -> Tensor:
+        state._check_usable()
         past_len = state.seq_len
         total_len = past_len + input_ids.size(1)
         self._check_context_length(total_len)
@@ -195,19 +224,25 @@ class TargetModel:
             (1, total_len), device=self.device, dtype=torch.long
         )
         logits_options = {"logits_to_keep": 1} if last_logits_only and self._last_prefill_logits else {}
-        out = self.model(
+        return self._run_model(
+            state,
             input_ids=input_ids,
             attention_mask=attention_mask,
-            past_key_values=state.cache,
-            use_cache=True,
-            output_hidden_states=self.record_hidden,
             **logits_options,
         )
-        # Re-bind: some transformers versions return a new cache object.
-        state.cache = out.past_key_values
-        if self.record_hidden:
-            self.last_hidden_block = out.hidden_states[-1][0].detach()
-        return out.logits[0].float()
+
+    def _run_model(self, state: TargetState, **kwargs) -> Tensor:
+        try:
+            out = self.model(past_key_values=state.cache, use_cache=True,
+                             output_hidden_states=self.record_hidden, **kwargs)
+            state.cache = out.past_key_values  # Some models return a new cache.
+            if self.record_hidden:
+                self.last_hidden_block = out.hidden_states[-1][0].detach()
+            return out.logits[0].float()
+        except BaseException:
+            state._failed = True
+            self.last_hidden_block = None
+            raise
 
     @torch.inference_mode()
     def forward_tree(
@@ -231,6 +266,7 @@ class TargetModel:
         Requires a model that honors custom 4D attention masks and explicit
         ``position_ids`` (e.g. Llama-family, eager attention).
         """
+        state._check_usable()
         p_len, n = len(pending), len(tree_tokens)
         if p_len == 0:
             raise ValueError("pending block must contain at least one token")
@@ -269,18 +305,12 @@ class TargetModel:
         ]
         position_ids = torch.tensor([positions], device=self.device)
 
-        out = self.model(
+        return self._run_model(
+            state,
             input_ids=self._ids(pending + list(tree_tokens)),
             attention_mask=mask,
             position_ids=position_ids,
-            past_key_values=state.cache,
-            use_cache=True,
-            output_hidden_states=self.record_hidden,
         )
-        state.cache = out.past_key_values
-        if self.record_hidden:
-            self.last_hidden_block = out.hidden_states[-1][0].detach()
-        return out.logits[0].float()
 
     def gather_tree_tail(
         self, state: TargetState, keep_len: int, path: list[int]
@@ -292,22 +322,39 @@ class TargetModel:
         Valid because a packed node's K/V depend only on tokens its mask
         let it attend to — the prefix and its ancestors — so the surviving
         entries are exactly those of a linear forward over that branch.
+        Cropping a contiguous prefix avoids a copy but retains its backing allocation.
         """
+        state._check_usable()
+        current_length = state.seq_len
+        if type(keep_len) is not int or not 0 <= keep_len <= current_length:
+            raise ValueError("keep_len must be an integer within the current cache")
+        if not isinstance(path, (list, tuple)) or any(
+            type(offset) is not int or not 0 <= offset < current_length - keep_len for offset in path
+        ):
+            raise ValueError("path must contain integer offsets within the tree tail")
+        if all(offset == index for index, offset in enumerate(path)):
+            self.crop(state, keep_len + len(path))
+            return
         idx = torch.tensor(
             list(range(keep_len)) + [keep_len + p for p in path],
             device=self.device,
             dtype=torch.long,
         )
         cache = state.cache
-        layers = getattr(cache, "layers", None)
-        if layers is not None:  # transformers >= 4.54 layout
-            for layer in layers:
-                layer.keys = layer.keys.index_select(2, idx)
-                layer.values = layer.values.index_select(2, idx)
-        else:  # legacy list-of-tensors layout
-            for i in range(len(cache.key_cache)):
-                cache.key_cache[i] = cache.key_cache[i].index_select(2, idx)
-                cache.value_cache[i] = cache.value_cache[i].index_select(2, idx)
+        try:
+            layers = getattr(cache, "layers", None)
+            if layers is not None:  # transformers >= 4.54 layout
+                for layer in layers:
+                    layer.keys = layer.keys.index_select(2, idx)
+                    layer.values = layer.values.index_select(2, idx)
+            else:  # legacy list-of-tensors layout
+                for i in range(len(cache.key_cache)):
+                    cache.key_cache[i] = cache.key_cache[i].index_select(2, idx)
+                    cache.value_cache[i] = cache.value_cache[i].index_select(2, idx)
+        except BaseException:
+            state._failed = True
+            self.last_hidden_block = None
+            raise
 
     @torch.inference_mode()
     def all_logits(self, tokens: list[int] | Tensor) -> Tensor:
@@ -322,13 +369,21 @@ class TargetModel:
 
     def crop(self, state: TargetState, length: int) -> None:
         """Roll the KV state back so it covers only the first ``length`` tokens."""
+        state._check_usable()
         current_length = state.seq_len
+        if type(length) is not int:
+            raise ValueError("cache length must be an integer")
         if length < 0 or length > current_length:
             raise ValueError(
                 f"cannot crop cache of length {current_length} to {length}"
             )
         if length < current_length:
-            state.cache.crop(length - current_length)  # HF accepts negative removal counts.
+            try:
+                state.cache.crop(length - current_length)  # HF accepts negative removal counts.
+            except BaseException:
+                state._failed = True
+                self.last_hidden_block = None
+                raise
 
     # ------------------------------------------------------------------ #
     # Trusted baseline
@@ -344,6 +399,9 @@ class TargetModel:
         """
         input_ids = self._ids(prompt_ids)
         self.validate_generation(input_ids.size(1), max_new_tokens)
+        if max_new_tokens == 0:
+            self.validate_prompt(input_ids)
+            return []
         state, logits = self.prefill(input_ids)
         generated: list[int] = []
         next_token = int(torch.argmax(logits).item())
