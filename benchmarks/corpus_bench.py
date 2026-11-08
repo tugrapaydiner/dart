@@ -90,8 +90,8 @@ def benchmark_corpus(
         raise ValueError("profile must be a boolean")
     if type(compare_policies) is not bool:
         raise ValueError("compare_policies must be a boolean")
-    if compare_policies and (profile or norm_control is not None):
-        raise ValueError("policy comparisons require profile=False and no norm control")
+    if compare_policies and norm_control is not None:
+        raise ValueError("policy comparisons cannot use a norm control")
     if engine.verifier_name != "block":
         raise ValueError("corpus benchmarking requires the block verifier")
     target = engine.target
@@ -128,6 +128,7 @@ def benchmark_corpus(
     direct = {key: build_target_method(target, row.max_new_tokens) for key, row in zip(keys, records)}
     with ExitStack() as stack:
         baseline = stack.enter_context(DartEngine(target))
+        profile_engines = {"target_only": baseline, "dart": engine}
         methods = {
             "hf_greedy": lambda prompt: hf[tuple(prompt)](prompt),
             "hf_prompt_lookup": lambda prompt: lookup[configs[tuple(prompt)].max_new_tokens](prompt),
@@ -147,6 +148,7 @@ def benchmark_corpus(
                     "min_time_saving": scheduler.min_time_saving,
                 }
             control = stack.enter_context(DartEngine(target, verifier=settings["verifier"], owns_drafters=True, **options))
+            profile_engines[name] = control
             control_configs = {key: replace(cfg, draft_len=settings["draft_len"]) for key, cfg in configs.items()}
             methods[name] = lambda prompt, control=control, configs=control_configs: control.generate(prompt, configs[tuple(prompt)])
         if norm_control is not None:
@@ -179,7 +181,7 @@ def benchmark_corpus(
         if profile:
             if progress:
                 progress("Repeated timing passed; starting separate phase profiling")
-            profile_report = profile_methods(methods, prompts, target, {"target_only": baseline, "dart": engine})
+            profile_report = profile_methods(methods, prompts, target, profile_engines)
     profile_samples = profile_report["samples"] if profile_report is not None else []
     for sample in [*timing["samples"], *profile_samples]:
         if sample["output_hash"] != checks["outputs"][sample["prompt_index"]]["output_hash"]:

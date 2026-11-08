@@ -113,7 +113,6 @@ def test_benchmark_records_adaptive_policy_and_matching_controls(policy_model, t
 
 @pytest.mark.parametrize("args, message", [
     (["check", "--synthetic", "--policy", "time"], "--policy requires --model"),
-    (["bench", "--model", "unused", "--policy", "cost_table"], "cost_table benchmarks require --skip-profile"),
     (["bench", "--model", "unused", "--policy", "time", "--native-rms-norm", "--norm-control", "--skip-profile"],
      "norm-control benchmarks require the fixed policy"),
 ])

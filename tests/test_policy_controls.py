@@ -122,7 +122,7 @@ def test_policy_mismatch_stops_before_saving_and_closes_controls(monkeypatch, fa
         assert engine.generate([5, 6, 7], DecodeConfig(max_new_tokens=3)).token_ids == engine.target.greedy_generate([5, 6, 7], 3)
 
 
-@pytest.mark.parametrize("case", ["profile", "no_ngram", "disabled_ngram", "residency", "replay", "invalid_bool", "norm"])
+@pytest.mark.parametrize("case", ["no_ngram", "disabled_ngram", "residency", "replay", "invalid_bool", "norm"])
 def test_unsupported_policy_comparisons_fail_before_generation(monkeypatch, case):
     monkeypatch.setattr(corpus_bench, "evaluate_corpus", lambda *a, **k: pytest.fail("unexpected generation"))
     with build_engine() as engine:
@@ -137,7 +137,7 @@ def test_unsupported_policy_comparisons_fail_before_generation(monkeypatch, case
             engine.target.uses_replay_cache = True
         with pytest.raises(ValueError, match="polic"):
             corpus_bench.benchmark_corpus(engine, records(), config, compare_policies=1 if case == "invalid_bool" else True,
-                                          profile=case == "profile", norm_control=engine if case == "norm" else None)
+                                          profile=False, norm_control=engine if case == "norm" else None)
 
 
 def test_cli_runs_and_records_the_optional_comparison(policy_model, monkeypatch, tmp_path):
@@ -153,10 +153,9 @@ def test_cli_runs_and_records_the_optional_comparison(policy_model, monkeypatch,
     assert partial["policy_controls"] == report["policy_controls"]
 
 
-@pytest.mark.parametrize("extra", [[], ["--skip-profile", "--native-rms-norm", "--norm-control"]])
-def test_invalid_cli_comparison_fails_before_loading(policy_model, capsys, extra):
+def test_invalid_cli_comparison_fails_before_loading(policy_model, capsys):
     directory, built, _ = policy_model
     with pytest.raises(SystemExit) as error:
-        cli.main(["bench", "--model", str(directory), "--compare-policies", *extra])
+        cli.main(["bench", "--model", str(directory), "--compare-policies", "--skip-profile", "--native-rms-norm", "--norm-control"])
     assert error.value.code == 2 and not built
-    assert "policy comparisons require" in capsys.readouterr().err
+    assert "policy comparisons cannot use" in capsys.readouterr().err

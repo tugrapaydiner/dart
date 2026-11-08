@@ -263,6 +263,12 @@ class DartEngine:
                 "use verifier='block' for sampling/approx"
             )
 
+    def _resolve_verifier(self, name: str, needs_entropy: bool) -> VerifyFn:
+        fn = self.verify if name == self.verifier_name else _VERIFIERS[name]
+        if not needs_entropy and unwrap(fn) in (verify_block_greedy, unwrap(verify_tree_greedy)):
+            fn = partial(fn, compute_entropy=False)
+        return fn
+
     def _round_drafts(self, drafter, committed, per_round, verifier, sampling, config):
         """Return (drafts, draft_probs) for one round, clamped to its budget."""
         if verifier != "tree":
@@ -375,10 +381,7 @@ class DartEngine:
             if sampling:
                 return sampling_fn
             if name not in verify_fns:
-                fn = self.verify if name == self.verifier_name else _VERIFIERS[name]
-                if not needs_entropy and unwrap(fn) in (verify_block_greedy, unwrap(verify_tree_greedy)):
-                    fn = partial(fn, compute_entropy=False)
-                verify_fns[name] = fn
+                verify_fns[name] = self._resolve_verifier(name, needs_entropy)
             return verify_fns[name]
 
         run_id = uuid.uuid4().hex[:12]

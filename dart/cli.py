@@ -38,7 +38,7 @@ def _parser() -> argparse.ArgumentParser:
         command.add_argument("--native-rms-norm", action="store_true", help="use PyTorch RMSNorm for float32 Llama layers")
     for command in (check, bench):
         command.add_argument("--policy", choices=("fixed", "time", "cost_table"),
-                             help="model policy (default: fixed); cost_table tries block/tree drafts and needs --skip-profile for bench")
+                             help="model policy (default: fixed); cost_table tries block/tree drafts")
         command.add_argument("--norm-control", action="store_true", help="compare with original RMSNorm; requires --native-rms-norm")
         command.add_argument("--corpus", help="versioned corpus directory; otherwise generate the fixed pilot")
         command.add_argument("--split", choices=("train", "validation", "test"), default="validation")
@@ -52,7 +52,7 @@ def _parser() -> argparse.ArgumentParser:
     bench.add_argument("--repeats", type=int, default=10, help="measured repeats, 2-100 (default: 10)")
     bench.add_argument("--skip-profile", action="store_true", help="save latency comparisons without separate phase diagnostics")
     bench.add_argument("--compare-policies", action="store_true",
-                       help="add six fixed block/tree controls and time4 on the same model; requires --skip-profile")
+                       help="add six fixed block/tree controls and time4 on the same model")
     demo.add_argument("--port", type=int, default=8400, help="localhost port; 0 picks a free port (default: 8400)")
     add_commands(commands)
     add_command(commands)
@@ -90,12 +90,10 @@ def _run(args) -> int:
     if args.command == "bench" and args.norm_control and not args.skip_profile:
         raise ValueError("norm-control benchmarks require skip-profile; use separate decode traces")
     if args.command == "bench":
-        if args.compare_policies and (not args.skip_profile or args.norm_control):
-            raise ValueError("policy comparisons require --skip-profile and cannot use --norm-control")
+        if args.compare_policies and args.norm_control:
+            raise ValueError("policy comparisons cannot use --norm-control")
         if args.norm_control and policy != "fixed":
             raise ValueError("norm-control benchmarks require the fixed policy")
-        if policy == "cost_table" and not args.skip_profile:
-            raise ValueError("cost_table benchmarks require --skip-profile; per-round tree profiling is unsupported")
         if not 1 <= args.warmup <= 10 or not 2 <= args.repeats <= 100:
             raise ValueError("use warmup from 1 to 10 and repeats from 2 to 100")
         if not 1 <= args.per_workload <= 32 or args.seed < 0:
