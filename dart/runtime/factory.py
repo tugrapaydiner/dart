@@ -49,6 +49,13 @@ def build_target(spec: dict) -> TargetModel:
         raise ValueError("capture_predictions must be a boolean")
     if capture_predictions and execution == "eager":
         raise ValueError("captured predictions require static or cuda_graph execution")
+    greedy_chunks = spec.get("greedy_chunk_sizes", ())
+    if isinstance(greedy_chunks, list):
+        greedy_chunks = tuple(greedy_chunks)
+    if greedy_chunks != ():
+        from dart.models.replay import _validate_greedy_chunks
+
+        _validate_greedy_chunks(greedy_chunks, capture_predictions)
     target = _build_target(spec)
     if execution == "eager":
         return target
@@ -56,7 +63,7 @@ def build_target(spec: dict) -> TargetModel:
 
     capacity = spec.get("cache_capacity")
     options = {"max_block_tokens": spec.get("max_block_tokens", 5), "replay": execution == "cuda_graph",
-               "capture_predictions": capture_predictions}
+               "capture_predictions": capture_predictions, "greedy_chunk_sizes": greedy_chunks}
     if isinstance(capacity, list):  # A list prepares one bucket per capacity.
         return CapacityBuckets(target, tuple(capacity), **options)
     return CudaGraphTarget(target, capacity=capacity, **options)

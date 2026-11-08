@@ -130,6 +130,33 @@ class _ReplayBlock:
         return self.output
 
 
+class _GreedyBlock(_ReplayBlock):
+    def __init__(self, model, workspace, count, capture):
+        self.count = count
+        super().__init__(model, workspace, 1, capture, capture_predictions=True)
+
+    def forward(self):
+        tokens, predictions = self.ids, []
+        for step in range(self.count):
+            positions = (self.start + step).reshape(1)
+            self.workspace.positions = positions
+            mask = self.workspace.storage.new_zeros((1, 1, 1, self.columns.numel()))
+            mask.masked_fill_(self.columns > positions, torch.finfo(mask.dtype).min)
+            logits = self.forward_model(input_ids=tokens, position_ids=positions[None], attention_mask=mask,
+                                        past_key_values=self.workspace, use_cache=True, output_hidden_states=False).logits
+            tokens = logits.argmax(dim=-1)
+            predictions.append(tokens)
+        return torch.cat(predictions, dim=1)
+
+
+def _validate_greedy_chunks(sizes, capture_predictions):
+    if (not isinstance(sizes, tuple) or any(type(n) is not int or not 2 <= n <= 8 for n in sizes)
+            or len(set(sizes)) != len(sizes)):
+        raise ValueError("greedy chunk sizes must be distinct integers from 2 to 8")
+    if sizes and not capture_predictions:
+        raise ValueError("greedy chunks require capture_predictions=True")
+
+
 class CudaGraphTarget(TargetModel):
     """Opt-in FP32 Llama replay for transformers >= 5.16.1.
 
@@ -138,17 +165,20 @@ class CudaGraphTarget(TargetModel):
     workspace access. Each state and returned logit tensor owns its data.
     ``replay=False`` runs the static-cache path on CPU or CUDA without graph capture.
     ``capture_predictions=True`` also prepares argmax for entropy-free greedy calls.
+    ``greedy_chunk_sizes=(2, 4)`` optionally groups greedy steps before returning IDs.
+    Chunks keep the same model work; EOS can leave unused steps in the last chunk.
     """
 
     uses_replay_cache = True
 
     @torch.inference_mode()
     def __init__(self, target: TargetModel, *, max_block_tokens=5, capacity=None, replay=True,
-                 capture_predictions=False):
+                 capture_predictions=False, greedy_chunk_sizes=()):
         if type(replay) is not bool:
             raise ValueError("replay must be a boolean")
         if type(capture_predictions) is not bool:
             raise ValueError("capture_predictions must be a boolean")
+        _validate_greedy_chunks(greedy_chunk_sizes, capture_predictions)
         device = torch.device(target.device).type
         if replay and (device != "cuda" or target.dtype != torch.float32):
             raise ValueError("CUDA replay requires a float32 CUDA target")
@@ -165,6 +195,8 @@ class CudaGraphTarget(TargetModel):
             raise ValueError("replay capacity must be within the model context and at most 4096")
         if type(max_block_tokens) is not int or not 1 <= max_block_tokens <= min(16, capacity):
             raise ValueError("max_block_tokens must be an integer from 1 to min(16, capacity)")
+        if max(greedy_chunk_sizes, default=0) > capacity or max_block_tokens + len(greedy_chunk_sizes) > 16:
+            raise ValueError("greedy chunks exceed capacity or the 16 prepared block limit")
         if len({parameter.device for parameter in target.model.parameters()}) != 1 or any(
             parameter.dtype != torch.float32 or parameter.device.type != device for parameter in target.model.parameters()
         ):
@@ -174,6 +206,7 @@ class CudaGraphTarget(TargetModel):
         self.capacity = capacity
         self.max_block_tokens = max_block_tokens
         self._capture_predictions = capture_predictions
+        self._greedy_chunk_sizes = greedy_chunk_sizes
         self.execution_backend = "cuda_graph" if replay else "static"
         self._owner = object()
         self._lock = threading.RLock()
@@ -183,14 +216,25 @@ class CudaGraphTarget(TargetModel):
         self._model_tensors = tuple(tensor.detach() for tensor in (*self.model.parameters(), *self.model.buffers()))
         self._workspace = _Workspace(self.model, capacity)
         started = time.perf_counter()
-        self._blocks = {length: _ReplayBlock(self.model, self._workspace, length, replay,
-                                            capture_predictions=capture_predictions)
-                        for length in range(1, max_block_tokens + 1)}
+        self._blocks, self._greedy_blocks = {}, {}
+        try:
+            for length in range(1, max_block_tokens + 1):
+                self._blocks[length] = _ReplayBlock(self.model, self._workspace, length, replay,
+                                                    capture_predictions=capture_predictions)
+            for count in greedy_chunk_sizes:
+                self._greedy_blocks[count] = _GreedyBlock(self.model, self._workspace, count, replay)
+        except BaseException:
+            self.close()
+            raise
         self.setup_ms = (time.perf_counter() - started) * 1000
 
     @property
     def capture_predictions(self):
         return self._capture_predictions
+
+    @property
+    def greedy_chunk_sizes(self):
+        return self._greedy_chunk_sizes
 
     def _signature(self):
         pending, seen, tensors = [self.model], set(), []
@@ -259,6 +303,46 @@ class CudaGraphTarget(TargetModel):
             raise ValueError("prepare the target with capture_predictions=True")
         return self._forward(state, self._ids(tokens), return_predictions=True)
 
+    @torch.inference_mode()
+    def forward_greedy(self, state, pending, count):
+        """Run a prepared greedy chunk; return owned IDs through the first EOS."""
+        with self._lock:
+            self._check_ready()
+            state._check_usable()
+            if type(count) is not int or (count != 1 and count not in self._greedy_blocks):
+                raise ValueError("greedy chunk count was not prepared")
+            if type(pending) is not int or pending in self.eos_token_ids:
+                raise ValueError("pending token must be a non-EOS integer")
+            if state.seq_len <= 0:
+                raise ValueError("greedy chunks require a nonempty prefix")
+            if count == 1:
+                return self.forward_predictions(state, [pending])
+            ids = self._ids([pending])
+            self._check_context_length(state.seq_len + count)
+            cache = state.cache
+            if not isinstance(cache, ReplayCache):
+                cache = ReplayCache.from_dynamic(cache, self.capacity, self._owner)
+            if cache.owner is not self._owner or cache.storage.shape != self._workspace.storage.shape:
+                raise ValueError("cache belongs to a different replay target")
+            block = self._greedy_blocks[count]
+            self._workspace.storage[..., :cache.length, :].copy_(cache.storage[..., :cache.length, :])
+            block.ids.copy_(ids)
+            block.start.fill_(cache.length)
+            output = block.run()[0].tolist()
+            for index, token in enumerate(output):
+                if token in self.eos_token_ids:
+                    output = output[:index + 1]
+                    break
+            total = cache.length + len(output)
+            try:
+                cache.storage[..., cache.length:total, :].copy_(self._workspace.storage[..., cache.length:total, :])
+                cache.length = total
+                state.cache = cache
+            except BaseException:
+                state._failed = True
+                raise
+            return output
+
     def _forward(self, state, input_ids, *, last_logits_only=False, return_predictions=False):
         with self._lock:
             self._check_ready()
@@ -315,6 +399,13 @@ class CudaGraphTarget(TargetModel):
         logits = self._forward(state, ids, last_logits_only=True)[-1]
         generated = []
         token = int(logits.argmax().item())
+        if self._greedy_blocks:
+            generated.append(token)
+            while len(generated) < max_new_tokens and generated[-1] not in self.eos_token_ids:
+                remaining = max_new_tokens - len(generated)
+                count = max([1, *(n for n in self._greedy_blocks if n <= remaining)])
+                generated.extend(self.forward_greedy(state, generated[-1], count))
+            return generated
         for _ in range(max_new_tokens):
             generated.append(token)
             if token in self.eos_token_ids or len(generated) == max_new_tokens:
@@ -331,6 +422,7 @@ class CudaGraphTarget(TargetModel):
                 if self._stream is not None:
                     self._stream.synchronize()
                 self._blocks.clear()
+                self._greedy_blocks.clear()
                 self._workspace = None
                 self._model_tensors = ()
                 self._closed = True
@@ -347,17 +439,19 @@ class CapacityBuckets:
     record_hidden = False
 
     def __init__(self, target: TargetModel, capacities, *, max_block_tokens=5, replay=True,
-                 capture_predictions=False):
+                 capture_predictions=False, greedy_chunk_sizes=()):
         if (not isinstance(capacities, tuple) or not 1 <= len(capacities) <= 4
                 or len(set(capacities)) != len(capacities) or any(type(c) is not int for c in capacities)):
             raise ValueError("capacities must be a tuple of one to four distinct integers")
-        if type(max_block_tokens) is int and len(capacities) * max_block_tokens > 16:
+        _validate_greedy_chunks(greedy_chunk_sizes, capture_predictions)
+        if type(max_block_tokens) is int and len(capacities) * (max_block_tokens + len(greedy_chunk_sizes)) > 16:
             raise ValueError("capacity buckets allow at most 16 prepared blocks in total")
         with ExitStack() as cleanup:
             buckets = []
             for capacity in sorted(capacities):
                 bucket = CudaGraphTarget(target, max_block_tokens=max_block_tokens, capacity=capacity,
-                                         replay=replay, capture_predictions=capture_predictions)
+                                         replay=replay, capture_predictions=capture_predictions,
+                                         greedy_chunk_sizes=greedy_chunk_sizes)
                 cleanup.callback(bucket.close)
                 buckets.append(bucket)
             cleanup.pop_all()
@@ -367,6 +461,7 @@ class CapacityBuckets:
         self.eos_token_ids = largest.eos_token_ids
         self.max_block_tokens = max_block_tokens
         self.capture_predictions = capture_predictions
+        self.greedy_chunk_sizes = greedy_chunk_sizes
         self.execution_backend = largest.execution_backend
         self.setup_ms = sum(bucket.setup_ms for bucket in self.buckets)
         self.last_hidden_block = None
