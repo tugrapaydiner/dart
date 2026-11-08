@@ -192,10 +192,13 @@ class DartEngine:
                 return self._null, 0, self.verifier_name
             n = config.canvas_len if getattr(d, "uses_canvas", False) else config.draft_len
             return d, n, self.verifier_name
+        free_gb = float("inf")
+        if type(self.scheduler).__dict__.get("requires_free_memory") is not False:  # Subclasses opt out themselves.
+            free_gb = self._gpu_free_gb(self.target.device)
         s = DecodeState(
             context_len=prompt_len + generated_len,
             generated_len=generated_len,
-            gpu_free_gb=self._gpu_free_gb(self.target.device),
+            gpu_free_gb=free_gb,
             batch_size=1,
             prompt_kind=config.prompt_kind,
             exact_required=(config.mode == "exact"),

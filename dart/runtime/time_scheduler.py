@@ -10,6 +10,7 @@ class TimeScheduler(HeuristicScheduler):
     """Choose lanes by measured time per committed token, with periodic probes."""
 
     requires_round_timing = True
+    requires_free_memory = False  # Uses observed lane KV, not device free memory.
 
     @property
     def requires_entropy(self) -> bool:
@@ -117,6 +118,8 @@ class CostTableScheduler(TimeScheduler):
     before forming keys, so equivalent choices share one cost estimate. Tree
     budgets also respect the request's node cap.
     """
+
+    requires_free_memory = False
 
     def __init__(self, config: SchedulerConfig, *, draft_lengths: tuple[int, ...] = (2, 4, 8),
                  verifiers: tuple[str, ...] | None = None, **options) -> None:
