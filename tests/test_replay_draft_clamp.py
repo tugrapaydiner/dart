@@ -55,4 +55,5 @@ def test_cost_table_arms_above_the_block_size_run_clamped(base):
     finally:
         target.close()
     assert output.token_ids == base.greedy_generate(prompt, 40)
-    assert "ngram:8" in scheduler.counts and all(step.n_draft_proposed <= 4 for step in output.rounds)
+    assert "ngram:4" in scheduler.counts and "ngram:8" not in scheduler.counts
+    assert all(step.n_draft_proposed <= 4 for step in output.rounds)

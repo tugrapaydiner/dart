@@ -177,6 +177,7 @@ class DecodeState:
     acceptance_ewma: dict[str, float]
     kv_transfer_ms: float
     target_step_ms: float
+    max_draft_tokens: Optional[int] = None  # Output/replay cap on drafts; None means unspecified.
 
 
 @dataclass

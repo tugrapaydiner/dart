@@ -62,13 +62,13 @@ class TimeScheduler(HeuristicScheduler):
         self.last_played[key] = self.decisions
         self.kv_gb[key] = kv_gb
 
-    def _candidates(self, allowed) -> dict[str, tuple[str, int, str | None]]:
+    def _candidates(self, allowed, state: DecodeState) -> dict[str, tuple[str, int, str | None]]:
         """Map each drafting arm's key to its (lane, draft length, verifier); None keeps the engine's."""
         return {lane: (lane, self.config.draft_len, None) for lane in dict.fromkeys(self.config.available_lanes)
                 if lane != "target_only" and (allowed is None or lane in allowed)}
 
-    def _choose_arm(self, allowed) -> tuple[str, str, int, str | None]:
-        arms = {key: arm for key, arm in self._candidates(allowed).items()
+    def _choose_arm(self, allowed, state: DecodeState) -> tuple[str, str, int, str | None]:
+        arms = {key: arm for key, arm in self._candidates(allowed, state).items()
                 if self.kv_gb.get(key, 0.0) <= self.config.max_gpu_kv_gb}
         baseline = ("target_only", "target_only", 0, None)
         if self.counts.get("target_only", 0) < self.warmup_rounds:
@@ -89,14 +89,15 @@ class TimeScheduler(HeuristicScheduler):
         key = min(useful, key=costs.get)
         return (key, *arms[key])
 
+    def _draft_sizes(self, lane: str, draft_len: int, state: DecodeState) -> tuple[int, int]:
+        return entropy_gated(draft_len, self.config.canvas_len if lane == "diffusion" else 0, state, self.config)
+
     def choose_action(self, state: DecodeState, allowed=None) -> DecodeAction:
         self.decisions += 1
-        key, lane, draft_len, verifier = self._choose_arm(allowed)
+        key, lane, draft_len, verifier = self._choose_arm(allowed, state)
         self._last_arm = (key, lane)
         config = self.config
-        draft_len, canvas_len = entropy_gated(
-            draft_len, config.canvas_len if lane == "diffusion" else 0, state, config,
-        )
+        draft_len, canvas_len = self._draft_sizes(lane, draft_len, state)
         return DecodeAction(
             lane=lane, draft_len=draft_len, canvas_len=canvas_len, kv_bits=config.kv_bits,
             verify_every=1, denoise_steps=config.denoise_steps if lane == "diffusion" else 0,
@@ -112,7 +113,8 @@ class CostTableScheduler(TimeScheduler):
     ``("block", "tree")`` each length is also paired with each verifier, under
     ``"lane:length:verifier"`` keys. Target-only steps remain the baseline an arm
     must beat by ``min_time_saving``. Diffusion arms use the selected length as
-    their canvas budget too.
+    their canvas budget too. Lengths are gated and clipped to the round budget
+    before forming keys, so equivalent choices share one cost estimate.
     """
 
     def __init__(self, config: SchedulerConfig, *, draft_lengths: tuple[int, ...] = (2, 4, 8),
@@ -130,14 +132,25 @@ class CostTableScheduler(TimeScheduler):
         super().__init__(config, **options)
 
     def choose_action(self, state: DecodeState, allowed=None) -> DecodeAction:
-        action = super().choose_action(state, allowed=allowed)
-        if action.lane == "diffusion":
-            action.canvas_len = action.draft_len  # Both budgets include the entropy gate.
-        return action
+        limit = state.max_draft_tokens
+        if limit is not None and (type(limit) is not int or limit < 0):
+            raise ValueError("max_draft_tokens must be a nonnegative integer or None")
+        return super().choose_action(state, allowed=allowed)
 
-    def _candidates(self, allowed) -> dict[str, tuple[str, int, str | None]]:
-        lanes = super()._candidates(allowed)
-        if self.verifiers is None:
-            return {f"{lane}:{length}": (lane, length, None) for lane in lanes for length in self.draft_lengths}
-        return {f"{lane}:{length}:{verifier}": (lane, length, verifier)
-                for lane in lanes for length in self.draft_lengths for verifier in self.verifiers}
+    def _draft_sizes(self, lane: str, draft_len: int, state: DecodeState) -> tuple[int, int]:
+        return draft_len, draft_len if lane == "diffusion" else 0  # Candidates are already gated and bounded.
+
+    def _candidates(self, allowed, state: DecodeState) -> dict[str, tuple[str, int, str | None]]:
+        lanes = super()._candidates(allowed, state)
+        arms = {}
+        for lane in lanes:
+            for requested in self.draft_lengths:
+                length, _ = entropy_gated(requested, 0, state, self.config)
+                if state.max_draft_tokens is not None:
+                    length = min(length, state.max_draft_tokens)
+                if length <= 0:
+                    continue
+                for verifier in self.verifiers or (None,):
+                    key = f"{lane}:{length}" + (f":{verifier}" if verifier is not None else "")
+                    arms[key] = (lane, length, verifier)
+        return arms

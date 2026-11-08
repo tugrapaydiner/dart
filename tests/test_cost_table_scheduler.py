@@ -106,7 +106,8 @@ def test_engine_with_cost_table_matches_greedy_and_plays_every_arm():
     with DartEngine(target, lanes={"ngram": NGramDrafter()}, scheduler=planner) as engine:
         output = engine.generate(prompt, DecodeConfig(max_new_tokens=40))
     assert output.token_ids == target.greedy_generate(prompt, 40)
-    assert set(planner.counts) == {"target_only", "ngram:2", "ngram:4", "ngram:8"}
+    assert {"target_only", "ngram:2", "ngram:4", "ngram:8"} <= set(planner.counts)
+    assert all(key == "target_only" or 1 <= int(key.split(":")[1]) <= 8 for key in planner.counts)
     assert sum(planner.counts.values()) == len(output.rounds)
     assert all(step.n_draft_proposed <= 8 for step in output.rounds)
 

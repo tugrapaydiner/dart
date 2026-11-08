@@ -181,6 +181,7 @@ class DartEngine:
     def _pick_lane(
         self, config: DecodeConfig, prompt_len: int, generated_len: int,
         entropy_ewma: float = 0.0,
+        max_draft_tokens: int | None = None,
     ):
         """Return (drafter, per-round draft budget, verifier name) for this round."""
         allowed = set(config.allowed_lanes) if config.allowed_lanes is not None else None
@@ -202,6 +203,7 @@ class DartEngine:
             acceptance_ewma=dict(self.scheduler.acceptance_ewma),
             kv_transfer_ms=0.0,
             target_step_ms=0.0,
+            max_draft_tokens=max_draft_tokens,
         )
         action = self.scheduler.choose_action(s, allowed=allowed)
         d = self.lanes.get(action.lane, self._null)
@@ -447,18 +449,20 @@ class DartEngine:
                 self._synchronize_round()
             while not finished and len(generated) < config.max_new_tokens:
                 round_start = time.perf_counter() if timed_scheduler else 0.0
+                budget = config.max_new_tokens - len(generated)
+                max_draft = budget - 1  # Leave room for the verifier's token.
+                max_block = getattr(target, "max_block_tokens", None)
+                if max_block is not None:
+                    max_draft = min(max_draft, max_block - len(pending_block))
+                max_draft = max(0, max_draft)
                 committed_seq = prompt + generated
                 drafter, draft_len, verifier = self._pick_lane(
-                    config, len(prompt), len(generated), entropy_ewma=ent_ewma
+                    config, len(prompt), len(generated), entropy_ewma=ent_ewma, max_draft_tokens=max_draft,
                 )
                 self._check_round_verifier(verifier, config)
 
                 t0 = time.perf_counter()
-                budget = config.max_new_tokens - len(generated)
-                per_round = min(draft_len, budget - 1)  # Leave room for the verifier's token.
-                max_block = getattr(target, "max_block_tokens", None)
-                if max_block is not None:  # Replay targets verify only the block sizes they prepared.
-                    per_round = min(per_round, max_block - len(pending_block))
+                per_round = min(draft_len, max_draft)
                 drafts, draft_probs = self._round_drafts(drafter, committed_seq, per_round, verifier, sampling, config)
                 t1 = time.perf_counter()
 
