@@ -86,8 +86,46 @@ class _Workspace:
         return a, b
 
 
+class _CaptureStreamPool:
+    def __init__(self, device):
+        self.device = device
+        self.available = []
+        self.active = set()
+        self.lock = threading.Lock()
+
+    def acquire(self):
+        with self.lock:
+            stream = self.available.pop() if self.available else torch.cuda.Stream(device=self.device)
+            if stream.cuda_stream in self.active:
+                raise RuntimeError("capture stream is already in use")
+            self.active.add(stream.cuda_stream)
+            return stream
+
+    def release(self, stream):
+        with self.lock:
+            self.active.remove(stream.cuda_stream)
+            if len(self.available) < 16:
+                self.available.append(stream)
+
+
+_capture_stream_pools = threading.local()
+
+
+def _capture_pool(device):
+    if not hasattr(_capture_stream_pools, "devices"):
+        _capture_stream_pools.devices = {}
+    device = torch.device(device)
+    if device not in _capture_stream_pools.devices:
+        _capture_stream_pools.devices[device] = _CaptureStreamPool(device)
+    return _capture_stream_pools.devices[device]
+
+
 class _ReplayBlock:
     def __init__(self, model, workspace, length, capture, *, capture_predictions=False):
+        self._closed = False
+        self._capture_stream = self._capture_pool = None
+        self._replay_stream = None
+        self.graph = None
         self.forward_model = model.forward
         self.workspace = workspace
         device = workspace.storage.device
@@ -95,22 +133,28 @@ class _ReplayBlock:
         self.start = torch.zeros((), dtype=torch.long, device=device)
         self.steps = torch.arange(length, device=device)
         self.columns = torch.arange(workspace.storage.shape[-2], device=device)
-        self.graph = None
         self.output = None
         self.capture_predictions = capture_predictions
         self.predictions = None
         if capture:
-            stream = torch.cuda.Stream(device=device)
-            stream.wait_stream(torch.cuda.current_stream(device))
-            with torch.cuda.stream(stream):
-                for _ in range(3):
-                    self.forward()
-            torch.cuda.current_stream(device).wait_stream(stream)
-            torch.cuda.synchronize(device)
-            self.graph = torch.cuda.CUDAGraph()
-            with torch.cuda.device(device), torch.cuda.graph(self.graph, stream=stream):
-                self.output = self.forward()
-            torch.cuda.synchronize(device)
+            self._replay_stream = torch.cuda.current_stream(device)
+            self._capture_pool = _capture_pool(device)
+            self._capture_stream = self._capture_pool.acquire()
+            try:
+                stream = self._capture_stream
+                stream.wait_stream(self._replay_stream)
+                with torch.cuda.stream(stream):
+                    for _ in range(3):
+                        self.forward()
+                torch.cuda.current_stream(device).wait_stream(stream)
+                torch.cuda.synchronize(device)
+                self.graph = torch.cuda.CUDAGraph()
+                with torch.cuda.device(device), torch.cuda.graph(self.graph, stream=stream):
+                    self.output = self.forward()
+                torch.cuda.synchronize(device)
+            except BaseException:
+                self.close()
+                raise
 
     def forward(self):
         positions = self.steps + self.start
@@ -124,10 +168,34 @@ class _ReplayBlock:
         return logits
 
     def run(self):
+        if self._closed:
+            raise RuntimeError("replay block is closed")
         if self.graph is None:
             return self.forward()
         self.graph.replay()
         return self.output
+
+    def close(self):
+        self._closed = True
+        if self._replay_stream is not None:
+            self._replay_stream.synchronize()
+        if self._capture_stream is not None:
+            self._capture_stream.synchronize()
+        if self.graph is not None:
+            self.graph.reset()  # Destroy graph references before reusing its stream.
+            self.graph = None
+        if self._capture_stream is not None:
+            self._capture_pool.release(self._capture_stream)
+            self._capture_stream = self._capture_pool = None
+        self._replay_stream = None
+        self.output = self.predictions = self.workspace = self.forward_model = None
+        self.ids = self.start = self.steps = self.columns = None
+
+    def __del__(self):
+        try:
+            self.close()
+        except BaseException:
+            pass  # Failed cleanup must not recycle the stream.
 
 
 class _GreedyBlock(_ReplayBlock):
@@ -418,14 +486,18 @@ class CudaGraphTarget(TargetModel):
 
     def close(self):
         with self._lock:
-            if not self._closed:
-                if self._stream is not None:
-                    self._stream.synchronize()
-                self._blocks.clear()
-                self._greedy_blocks.clear()
-                self._workspace = None
-                self._model_tensors = ()
-                self._closed = True
+            if self._closed and self._workspace is None:
+                return
+            self._closed = True
+            if self._stream is not None:
+                self._stream.synchronize()
+            with ExitStack() as cleanup:
+                for block in (*self._blocks.values(), *self._greedy_blocks.values()):
+                    cleanup.callback(block.close)
+            self._blocks.clear()
+            self._greedy_blocks.clear()
+            self._workspace = None
+            self._model_tensors = ()
 
 
 class CapacityBuckets:
