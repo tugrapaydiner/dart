@@ -37,6 +37,8 @@ def _parser() -> argparse.ArgumentParser:
         command.add_argument("--device", choices=("cpu", "cuda"), default="cpu")
         command.add_argument("--native-rms-norm", action="store_true", help="use PyTorch RMSNorm for float32 Llama layers")
     for command in (check, bench):
+        command.add_argument("--policy", choices=("fixed", "time", "cost_table"),
+                             help="model policy (default: fixed); cost_table tries block/tree drafts and needs --skip-profile for bench")
         command.add_argument("--norm-control", action="store_true", help="compare with original RMSNorm; requires --native-rms-norm")
         command.add_argument("--corpus", help="versioned corpus directory; otherwise generate the fixed pilot")
         command.add_argument("--split", choices=("train", "validation", "test"), default="validation")
@@ -80,11 +82,16 @@ def _run(args) -> int:
     from dart.presets import supra_config
     from dart.runtime.factory import build_engine
 
+    policy = args.policy or "fixed"
     if args.norm_control and not args.native_rms_norm:
         raise ValueError("norm-control requires native-rms-norm")
     if args.command == "bench" and args.norm_control and not args.skip_profile:
         raise ValueError("norm-control benchmarks require skip-profile; use separate decode traces")
     if args.command == "bench":
+        if args.norm_control and policy != "fixed":
+            raise ValueError("norm-control benchmarks require the fixed policy")
+        if policy == "cost_table" and not args.skip_profile:
+            raise ValueError("cost_table benchmarks require --skip-profile; per-round tree profiling is unsupported")
         if not 1 <= args.warmup <= 10 or not 2 <= args.repeats <= 100:
             raise ValueError("use warmup from 1 to 10 and repeats from 2 to 100")
         if not 1 <= args.per_workload <= 32 or args.seed < 0:
@@ -96,7 +103,7 @@ def _run(args) -> int:
     timing_output = output.with_suffix(".timing.json")
     if args.command == "bench" and timing_output.exists():
         raise FileExistsError(f"timing output already exists: {timing_output}")
-    config = supra_config(args.model, args.device, native_rms_norm=args.native_rms_norm)
+    config = supra_config(args.model, args.device, native_rms_norm=args.native_rms_norm, policy=policy)
 
     def progress(done, total):
         if done % 8 == 0 or done == total:
@@ -190,6 +197,8 @@ def main(argv: list[str] | None = None) -> int:
     parser = _parser()
     args = parser.parse_args(argv)
     try:
+        if args.command == "check" and args.synthetic and args.policy is not None:
+            raise ValueError("--policy requires --model")
         if args.command == "check" and args.execution is not None and not args.synthetic:
             raise ValueError("--execution requires --synthetic")
         if args.command == "check" and args.state and not args.synthetic:
