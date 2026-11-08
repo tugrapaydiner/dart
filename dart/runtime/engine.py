@@ -204,6 +204,8 @@ class DartEngine:
             kv_transfer_ms=0.0,
             target_step_ms=0.0,
             max_draft_tokens=max_draft_tokens,
+            max_tree_nodes=config.max_tree_nodes,
+            default_verifier=self.verifier_name,
         )
         action = self.scheduler.choose_action(s, allowed=allowed)
         d = self.lanes.get(action.lane, self._null)
@@ -280,6 +282,7 @@ class DartEngine:
         # Tree-capable drafters propose several candidate branches;
         # plain drafters degrade to a chain, for which tree and
         # block verification coincide decision-for-decision.
+        per_round = min(per_round, config.max_tree_nodes)  # No retained path can exceed the node cap.
         if per_round <= 0:
             drafts = DraftTree.chain([])
         elif hasattr(drafter, "propose_tree"):

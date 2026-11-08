@@ -114,7 +114,8 @@ class CostTableScheduler(TimeScheduler):
     ``"lane:length:verifier"`` keys. Target-only steps remain the baseline an arm
     must beat by ``min_time_saving``. Diffusion arms use the selected length as
     their canvas budget too. Lengths are gated and clipped to the round budget
-    before forming keys, so equivalent choices share one cost estimate.
+    before forming keys, so equivalent choices share one cost estimate. Tree
+    budgets also respect the request's node cap.
     """
 
     def __init__(self, config: SchedulerConfig, *, draft_lengths: tuple[int, ...] = (2, 4, 8),
@@ -132,9 +133,10 @@ class CostTableScheduler(TimeScheduler):
         super().__init__(config, **options)
 
     def choose_action(self, state: DecodeState, allowed=None) -> DecodeAction:
-        limit = state.max_draft_tokens
-        if limit is not None and (type(limit) is not int or limit < 0):
-            raise ValueError("max_draft_tokens must be a nonnegative integer or None")
+        for name in ("max_draft_tokens", "max_tree_nodes"):
+            limit = getattr(state, name)
+            if limit is not None and (type(limit) is not int or limit < 0):
+                raise ValueError(f"{name} must be a nonnegative integer or None")
         return super().choose_action(state, allowed=allowed)
 
     def _draft_sizes(self, lane: str, draft_len: int, state: DecodeState) -> tuple[int, int]:
@@ -151,6 +153,11 @@ class CostTableScheduler(TimeScheduler):
                 if length <= 0:
                     continue
                 for verifier in self.verifiers or (None,):
-                    key = f"{lane}:{length}" + (f":{verifier}" if verifier is not None else "")
-                    arms[key] = (lane, length, verifier)
+                    size = length
+                    if (verifier or state.default_verifier) == "tree" and state.max_tree_nodes is not None:
+                        size = min(size, state.max_tree_nodes)
+                    if size <= 0:
+                        continue
+                    key = f"{lane}:{size}" + (f":{verifier}" if verifier is not None else "")
+                    arms[key] = (lane, size, verifier)
         return arms

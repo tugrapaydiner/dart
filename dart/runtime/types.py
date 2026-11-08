@@ -178,6 +178,8 @@ class DecodeState:
     kv_transfer_ms: float
     target_step_ms: float
     max_draft_tokens: Optional[int] = None  # Output/replay cap on drafts; None means unspecified.
+    max_tree_nodes: Optional[int] = None
+    default_verifier: str = "block"  # Used by actions without an explicit verifier.
 
 
 @dataclass
