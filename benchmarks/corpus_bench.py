@@ -21,6 +21,7 @@ from dart.runtime.time_scheduler import TimeScheduler
 from dart.runtime.types import DecodeConfig
 
 COMPARISON_BASELINES = (*BASELINES, "hf_prompt_lookup")
+STATIC_CONTROL = "hf_static_greedy"
 NORM_CONTROL = "dart_model_norm"
 POLICY_CONTROLS = {
     "fixed2": (2, "block"), "fixed4": (4, "block"), "fixed8": (8, "block"),
@@ -44,7 +45,8 @@ def select_records(records: list[Prompt], per_workload: int) -> list[Prompt]:
 
 def _summarize(samples: list[dict], seed: int) -> dict:
     timing = summarize_samples(samples, "hf_greedy", seed)
-    baselines = [*COMPARISON_BASELINES, *(name for name in POLICY_CONTROLS if name in timing),
+    baselines = [*COMPARISON_BASELINES, *([STATIC_CONTROL] if STATIC_CONTROL in timing else []),
+                 *(name for name in POLICY_CONTROLS if name in timing),
                  *([NORM_CONTROL] if NORM_CONTROL in timing else [])]
     fastest = min(baselines, key=lambda name: timing[name]["mean_ms"])
     comparison = summarize_samples(samples, fastest, seed)
@@ -80,6 +82,7 @@ def benchmark_corpus(
     profile: bool = True,
     norm_control: DartEngine | None = None,
     compare_policies: bool = False,
+    hf_static_capacity: int | None = None,
 ) -> dict:
     """Repeated comparisons; optional fixed/time controls share the target and n-gram settings."""
     if type(warmup) is not int or type(repeats) is not int or warmup < 1 or repeats < 2:
@@ -114,6 +117,18 @@ def benchmark_corpus(
     }
     lookup = {budget: build_hf_method(target, budget, record_hidden=False, **lookup_settings)
               for budget in {row.max_new_tokens for row in records}}
+    static = {}
+    static_settings = None
+    if hf_static_capacity is not None:
+        static = {budget: build_hf_method(target, budget, record_hidden=False, static_capacity=hf_static_capacity)
+                  for budget in {row.max_new_tokens for row in records}}
+        for row in records:
+            prompt = encode_prompt(row, target.tokenizer, target.model.config.max_position_embeddings)
+            target.validate_generation(len(prompt), row.max_new_tokens)
+            if len(prompt) + row.max_new_tokens > hf_static_capacity:
+                raise ValueError("prompt and output budget exceed hf_static_capacity")
+        static_settings = {"capacity": hf_static_capacity, "cache_implementation": "static", "compile": False,
+                           "cache_lifetime": "request", "allocation_scope": "included in request timing"}
     if norm_control is not None:
         checks = evaluate_corpus(engine, records, config, reference_target=norm_control.target)
     else:
@@ -136,6 +151,8 @@ def benchmark_corpus(
             "target_only": lambda prompt: baseline.generate(prompt, configs[tuple(prompt)]),
             "dart": lambda prompt: engine.generate(prompt, configs[tuple(prompt)]),
         }
+        if static:
+            methods[STATIC_CONTROL] = lambda prompt: static[configs[tuple(prompt)].max_new_tokens](prompt)
         for name, settings in policy_settings.items():
             drafter = NGramDrafter(**settings["ngram"])
             options = {"drafter": drafter}
@@ -172,6 +189,7 @@ def benchmark_corpus(
                 "split": checks["split"], "selected_corpus_hash": checks["selected_corpus_hash"],
                 "seed": seed, "correctness": checks, "timing": timing,
                 "hf_prompt_lookup": lookup_settings,
+                "hf_static_greedy": static_settings,
                 "profiling_requested": profile,
                 "record_hidden_by_method": hidden_settings,
                 "normalization_control": NORM_CONTROL if norm_control is not None else None,
@@ -192,7 +210,9 @@ def benchmark_corpus(
         "correctness": checks, "timing": timing, "profile": profile_report,
         "profiling_requested": profile,
         "hf_prompt_lookup": lookup_settings,
-        "baseline_methods": [*COMPARISON_BASELINES, *policy_settings, *([NORM_CONTROL] if norm_control is not None else [])],
+        "hf_static_greedy": static_settings,
+        "baseline_methods": [*COMPARISON_BASELINES, *([STATIC_CONTROL] if static else []),
+                             *policy_settings, *([NORM_CONTROL] if norm_control is not None else [])],
         "normalization_control": NORM_CONTROL if norm_control is not None else None,
         "policy_controls": policy_settings,
         "lookup_scope": "native HF lookup; prompt must not end in EOS; reserve draft length minus one extra context positions",
