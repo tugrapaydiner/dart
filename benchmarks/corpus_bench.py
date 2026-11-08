@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable
+from contextlib import ExitStack
 from dataclasses import replace
 
 from benchmarks.corpus_eval import evaluate_corpus
@@ -15,10 +16,16 @@ from benchmarks.timing import measure_methods, summarize_samples
 from dart.data.corpus import Prompt, encode_prompt
 from dart.drafters.ngram import NGramDrafter
 from dart.runtime.engine import DartEngine
+from dart.runtime.scheduler import SchedulerConfig
+from dart.runtime.time_scheduler import TimeScheduler
 from dart.runtime.types import DecodeConfig
 
 COMPARISON_BASELINES = (*BASELINES, "hf_prompt_lookup")
 NORM_CONTROL = "dart_model_norm"
+POLICY_CONTROLS = {
+    "fixed2": (2, "block"), "fixed4": (4, "block"), "fixed8": (8, "block"),
+    "tree2": (2, "tree"), "tree4": (4, "tree"), "tree8": (8, "tree"), "time4": (4, "block"),
+}
 
 
 def select_records(records: list[Prompt], per_workload: int) -> list[Prompt]:
@@ -37,7 +44,8 @@ def select_records(records: list[Prompt], per_workload: int) -> list[Prompt]:
 
 def _summarize(samples: list[dict], seed: int) -> dict:
     timing = summarize_samples(samples, "hf_greedy", seed)
-    baselines = [*COMPARISON_BASELINES, *([NORM_CONTROL] if NORM_CONTROL in timing else [])]
+    baselines = [*COMPARISON_BASELINES, *(name for name in POLICY_CONTROLS if name in timing),
+                 *([NORM_CONTROL] if NORM_CONTROL in timing else [])]
     fastest = min(baselines, key=lambda name: timing[name]["mean_ms"])
     comparison = summarize_samples(samples, fastest, seed)
     result = {
@@ -51,6 +59,19 @@ def _summarize(samples: list[dict], seed: int) -> dict:
     return result
 
 
+def _policy_settings(engine: DartEngine, config: DecodeConfig) -> dict:
+    if getattr(engine.target, "uses_replay_cache", False):
+        raise ValueError("policy comparisons require eager execution; tree replay is unsupported")
+    if config.mode != "exact" or config.full_kv_residency != "gpu":
+        raise ValueError("policy comparisons require exact mode and resident target KV")
+    drafter = engine.lanes.get("ngram") if engine.lanes is not None else engine.drafter
+    if type(drafter) is not NGramDrafter or (config.allowed_lanes is not None and "ngram" not in config.allowed_lanes):
+        raise ValueError("policy comparisons require an enabled ngram lane")
+    ngram = {key: getattr(drafter, key) for key in ("min_ngram", "max_ngram", "tree_width", "max_scan")}
+    return {name: {"draft_len": length, "verifier": verifier, "ngram": dict(ngram), "scheduler": None}
+            for name, (length, verifier) in POLICY_CONTROLS.items()}
+
+
 def benchmark_corpus(
     engine: DartEngine, records: list[Prompt], config: DecodeConfig | None = None, *,
     warmup: int = 2, repeats: int = 10, seed: int = 17, progress=None,
@@ -58,19 +79,25 @@ def benchmark_corpus(
     lookup_tokens: int | None = None, lookup_max_ngram: int = 4,
     profile: bool = True,
     norm_control: DartEngine | None = None,
+    compare_policies: bool = False,
 ) -> dict:
-    """Repeated comparisons with full output checks and optional phase diagnostics."""
+    """Repeated comparisons; optional fixed/time controls share the target and n-gram settings."""
     if type(warmup) is not int or type(repeats) is not int or warmup < 1 or repeats < 2:
         raise ValueError("use warmup >= 1 and repeats >= 2")
     if type(seed) is not int or seed < 0:
         raise ValueError("seed must be a nonnegative integer")
     if type(profile) is not bool:
         raise ValueError("profile must be a boolean")
+    if type(compare_policies) is not bool:
+        raise ValueError("compare_policies must be a boolean")
+    if compare_policies and (profile or norm_control is not None):
+        raise ValueError("policy comparisons require profile=False and no norm control")
     if engine.verifier_name != "block":
         raise ValueError("corpus benchmarking requires the block verifier")
     target = engine.target
     config = config or engine.default_decode_config or DecodeConfig()
     config.validate()
+    policy_settings = _policy_settings(engine, config) if compare_policies else {}
     if norm_control is not None:
         if profile:
             raise ValueError("norm controls require profile=False; capture separate decode traces")
@@ -99,7 +126,8 @@ def benchmark_corpus(
                for key, row, output in zip(keys, records, checks["outputs"])}
     hf = {key: build_hf_method(target, row.max_new_tokens, record_hidden=False) for key, row in zip(keys, records)}
     direct = {key: build_target_method(target, row.max_new_tokens) for key, row in zip(keys, records)}
-    with DartEngine(target) as baseline:
+    with ExitStack() as stack:
+        baseline = stack.enter_context(DartEngine(target))
         methods = {
             "hf_greedy": lambda prompt: hf[tuple(prompt)](prompt),
             "hf_prompt_lookup": lambda prompt: lookup[configs[tuple(prompt)].max_new_tokens](prompt),
@@ -107,9 +135,24 @@ def benchmark_corpus(
             "target_only": lambda prompt: baseline.generate(prompt, configs[tuple(prompt)]),
             "dart": lambda prompt: engine.generate(prompt, configs[tuple(prompt)]),
         }
+        for name, settings in policy_settings.items():
+            drafter = NGramDrafter(**settings["ngram"])
+            options = {"drafter": drafter}
+            if name == "time4":
+                scheduler = TimeScheduler(SchedulerConfig(available_lanes=["ngram"], draft_len=settings["draft_len"]))
+                options = {"lanes": {"ngram": drafter}, "scheduler": scheduler}
+                settings["scheduler"] = {
+                    "type": "time", "draft_len": scheduler.config.draft_len, "ewma_alpha": scheduler.config.ewma_alpha,
+                    "warmup_rounds": scheduler.warmup_rounds, "retry_interval": scheduler.retry_interval,
+                    "min_time_saving": scheduler.min_time_saving,
+                }
+            control = stack.enter_context(DartEngine(target, verifier=settings["verifier"], owns_drafters=True, **options))
+            control_configs = {key: replace(cfg, draft_len=settings["draft_len"]) for key, cfg in configs.items()}
+            methods[name] = lambda prompt, control=control, configs=control_configs: control.generate(prompt, configs[tuple(prompt)])
         if norm_control is not None:
             methods[NORM_CONTROL] = lambda prompt: norm_control.generate(prompt, configs[tuple(prompt)])
-        hidden_settings = {name: target.record_hidden if name in ("dart", NORM_CONTROL) else False for name in methods}
+        hidden_settings = {name: target.record_hidden if name in ("dart", NORM_CONTROL) or name in policy_settings else False
+                           for name in methods}
         methods = {
             name: with_hidden_recording(
                 norm_control.target if name == NORM_CONTROL else target, hidden_settings[name], method,
@@ -130,6 +173,7 @@ def benchmark_corpus(
                 "profiling_requested": profile,
                 "record_hidden_by_method": hidden_settings,
                 "normalization_control": NORM_CONTROL if norm_control is not None else None,
+                "policy_controls": policy_settings,
             })
         profile_report = None
         if profile:
@@ -146,12 +190,14 @@ def benchmark_corpus(
         "correctness": checks, "timing": timing, "profile": profile_report,
         "profiling_requested": profile,
         "hf_prompt_lookup": lookup_settings,
-        "baseline_methods": [*COMPARISON_BASELINES, *([NORM_CONTROL] if norm_control is not None else [])],
+        "baseline_methods": [*COMPARISON_BASELINES, *policy_settings, *([NORM_CONTROL] if norm_control is not None else [])],
         "normalization_control": NORM_CONTROL if norm_control is not None else None,
+        "policy_controls": policy_settings,
         "lookup_scope": "native HF lookup; prompt must not end in EOS; reserve draft length minus one extra context positions",
         "timing_scope": "token ids through generation and output decoding; loading, tokenization, correctness and warm-up excluded",
         "acceptance_scope": "one separate full-output correctness pass",
         "memory_scope": ("allocator peak with two target models resident for the normalization comparison" if norm_control is not None
+                         else "allocator peak with one shared target and all policy engines resident" if compare_policies
                          else "allocator peak with one shared target and both engine instances resident"),
         "interval_scope": "paired repeat intervals for fixed prompts; each comparison uses its observed fastest baseline",
         "record_hidden_by_method": hidden_settings,

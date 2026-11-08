@@ -51,6 +51,8 @@ def _parser() -> argparse.ArgumentParser:
     bench.add_argument("--warmup", type=int, default=2, help="warm-up passes, 1-10 (default: 2)")
     bench.add_argument("--repeats", type=int, default=10, help="measured repeats, 2-100 (default: 10)")
     bench.add_argument("--skip-profile", action="store_true", help="save latency comparisons without separate phase diagnostics")
+    bench.add_argument("--compare-policies", action="store_true",
+                       help="add six fixed block/tree controls and time4 on the same model; requires --skip-profile")
     demo.add_argument("--port", type=int, default=8400, help="localhost port; 0 picks a free port (default: 8400)")
     add_commands(commands)
     add_command(commands)
@@ -88,6 +90,8 @@ def _run(args) -> int:
     if args.command == "bench" and args.norm_control and not args.skip_profile:
         raise ValueError("norm-control benchmarks require skip-profile; use separate decode traces")
     if args.command == "bench":
+        if args.compare_policies and (not args.skip_profile or args.norm_control):
+            raise ValueError("policy comparisons require --skip-profile and cannot use --norm-control")
         if args.norm_control and policy != "fixed":
             raise ValueError("norm-control benchmarks require the fixed policy")
         if policy == "cost_table" and not args.skip_profile:
@@ -150,6 +154,7 @@ def _run(args) -> int:
                 on_timing=save_timing,
                 profile=not args.skip_profile,
                 norm_control=control,
+                compare_policies=args.compare_policies,
             )
             report["selection"] = selection
     report.update(metadata)
