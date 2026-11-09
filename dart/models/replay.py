@@ -15,6 +15,29 @@ from transformers.cache_utils import DynamicCache
 from dart.models.target import TargetModel, TargetState
 
 
+_LAYER_SETTINGS = frozenset({"variance_epsilon", "normalized_shape", "scaling", "attention_scaling",
+                             "attention_dropout", "head_dim", "num_key_value_groups", "rope_type"})
+
+
+def _setting_value(value):
+    if type(value) in (bool, int, float, str, type(None)):
+        return type(value), value
+    if type(value) in (tuple, list) and all(type(item) is int for item in value):
+        return type(value), tuple(value)
+    return type(value), id(value)  # Do not compare tensor settings on the device.
+
+
+def _same_setting(value, saved):
+    kind, expected = saved
+    if type(value) is not kind:
+        return False
+    if kind in (bool, int, float, str, type(None)):
+        return value == expected
+    if kind in (tuple, list):
+        return all(type(item) is int for item in value) and tuple(value) == expected
+    return id(value) == expected
+
+
 class ReplayCache(DynamicCache):
     """A request-owned KV snapshot; only its valid prefix can be read."""
 
@@ -281,6 +304,7 @@ class CudaGraphTarget(TargetModel):
         self._closed = False
         self._stream = torch.cuda.current_stream(next(self.model.parameters()).device) if device == "cuda" else None
         self._model_signature = self._signature()
+        self._layer_settings = self._settings_signature()
         self._model_tensors = tuple(tensor.detach() for tensor in (*self.model.parameters(), *self.model.buffers()))
         self._workspace = _Workspace(self.model, capacity)
         started = time.perf_counter()
@@ -305,7 +329,7 @@ class CudaGraphTarget(TargetModel):
         return self._greedy_chunk_sizes
 
     def _signature(self):
-        pending, seen, tensors = [self.model], set(), []
+        pending, seen, tensors, layers = [self.model], set(), [], []
         while pending:
             module = pending.pop()
             if module is None or module in seen:
@@ -314,8 +338,14 @@ class CudaGraphTarget(TargetModel):
             pending.extend(module._modules.values())
             tensors.extend(tensor for tensor in (*module._parameters.values(), *module._buffers.values())
                            if tensor is not None)  # Check live registrations without building parameter names.
-        return tuple((tensor.data_ptr(), tensor.device, tensor.dtype, tuple(tensor.shape), tensor.stride())
-                     for tensor in tensors)
+            layers.append((module, type(module), module.training))
+        storage = tuple((tensor.data_ptr(), tensor.device, tensor.dtype, tuple(tensor.shape), tensor.stride())
+                        for tensor in tensors)
+        return storage, tuple(layers)
+
+    def _settings_signature(self):
+        return tuple((module.__dict__, name, _setting_value(module.__dict__[name]))
+                     for module in self.model.modules() for name in sorted(module.__dict__.keys() & _LAYER_SETTINGS))
 
     def _check_ready(self):
         if self._closed:
@@ -324,8 +354,13 @@ class CudaGraphTarget(TargetModel):
             raise ValueError("use the CUDA stream that prepared the replay target")
         if self.record_hidden or self.model.training or self.model.config._attn_implementation != "eager":
             raise ValueError("replay requires unchanged inference settings")
-        if self._signature() != self._model_signature:
+        signature = self._signature()
+        if signature[0] != self._model_signature[0]:
             raise ValueError("model tensor storage changed; prepare a new replay target")
+        if signature[1] != self._model_signature[1] or any(
+            not _same_setting(attributes.get(name), saved) for attributes, name, saved in self._layer_settings
+        ):
+            raise ValueError("model layer settings changed; prepare a new replay target")
 
     @property
     def context_limit(self):
@@ -498,6 +533,8 @@ class CudaGraphTarget(TargetModel):
             self._greedy_blocks.clear()
             self._workspace = None
             self._model_tensors = ()
+            self._model_signature = ()
+            self._layer_settings = ()
 
 
 class CapacityBuckets:

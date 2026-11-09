@@ -102,6 +102,7 @@ def cpu_replay_guard(monkeypatch):
     target.model, target.record_hidden, target._closed = model, False, False
     target._stream = SimpleNamespace(device="cuda")
     target._model_signature = target._signature()
+    target._layer_settings = target._settings_signature()
     target._model_tensors = tuple((*model.parameters(), *model.buffers()))
     monkeypatch.setattr(torch.cuda, "current_stream", lambda device: target._stream)
     target._check_ready()
