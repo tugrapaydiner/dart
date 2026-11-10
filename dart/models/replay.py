@@ -14,7 +14,6 @@ from transformers.cache_utils import DynamicCache
 
 from dart.models.target import TargetModel, TargetState
 
-
 _LAYER_SETTINGS = frozenset({"variance_epsilon", "normalized_shape", "scaling", "attention_scaling",
                              "attention_dropout", "head_dim", "num_key_value_groups", "rope_type"})
 

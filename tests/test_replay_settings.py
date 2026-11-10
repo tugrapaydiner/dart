@@ -25,10 +25,13 @@ def change(model, setting, patch):
         "activation": (layer.mlp, "act_fn", torch.nn.Tanh().eval()),
     }
     if setting == "norm":
-        patch.setattr(layer, "input_layernorm", TorchRMSNorm(layer.input_layernorm))
+        patch.setitem(layer._modules, "input_layernorm", TorchRMSNorm(layer.input_layernorm))
     else:
         obj, name, value = choices[setting]
-        patch.setattr(obj, name, value)
+        if setting == "activation":
+            patch.setitem(obj._modules, name, value)  # Restore the registered layer on undo.
+        else:
+            patch.setattr(obj, name, value)
 
 
 def values(state):
