@@ -175,6 +175,21 @@ def _state_dict_fits(module: torch.nn.Module, state: dict) -> bool:
     )
 
 
+def hf_generation_settings(target, max_new_tokens: int, record_hidden: bool | None = None) -> dict:
+    eos = sorted(target.eos_token_ids)
+    pad = getattr(target.model.config, "pad_token_id", None)
+    settings = GenerationConfig().to_dict()
+    defaults = getattr(GenerationConfig, "_get_default_generation_params", lambda: {})()
+    settings.update(defaults)
+    settings = {key: value for key, value in settings.items() if not key.startswith("_") and key not in ("transformers_version", "max_length")}
+    settings.update(
+        max_new_tokens=max_new_tokens, do_sample=False, num_beams=1, use_cache=True,
+        eos_token_id=eos or None, pad_token_id=pad if pad is not None else (eos[0] if eos else 0),
+        output_hidden_states=target.record_hidden if record_hidden is None else record_hidden,
+    )
+    return settings
+
+
 def build_hf_method(
     target, max_new_tokens: int, record_hidden: bool | None = None, *,
     prompt_lookup_num_tokens: int | None = None, max_matching_ngram_size: int = 4,
@@ -194,17 +209,7 @@ def build_hf_method(
                             ("max_matching_ngram_size", max_matching_ngram_size)):
             if type(value) is not int or value < 1:
                 raise ValueError(f"{name} must be a positive integer")
-    eos = sorted(target.eos_token_ids)
-    pad = getattr(target.model.config, "pad_token_id", None)
-    settings = GenerationConfig().to_dict()
-    defaults = getattr(GenerationConfig, "_get_default_generation_params", lambda: {})()
-    settings.update(defaults)
-    settings = {key: value for key, value in settings.items() if not key.startswith("_") and key not in ("transformers_version", "max_length")}
-    settings.update(
-        max_new_tokens=max_new_tokens, do_sample=False, num_beams=1, use_cache=True,
-        eos_token_id=eos or None, pad_token_id=pad if pad is not None else (eos[0] if eos else 0),
-        output_hidden_states=target.record_hidden if record_hidden is None else record_hidden,
-    )
+    settings = hf_generation_settings(target, max_new_tokens, record_hidden)
     if prompt_lookup_num_tokens is not None:
         settings.update(prompt_lookup_num_tokens=prompt_lookup_num_tokens,
                         max_matching_ngram_size=max_matching_ngram_size)

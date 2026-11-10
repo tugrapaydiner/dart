@@ -6,6 +6,7 @@ from dataclasses import replace
 
 from benchmarks.corpus_eval import evaluate_corpus
 from benchmarks.headroom import BASELINES
+from benchmarks.hf_static import PersistentStaticControl
 from benchmarks.profiling import profile_methods
 from benchmarks.run_bench import (
     build_hf_method,
@@ -22,6 +23,7 @@ from dart.runtime.types import DecodeConfig
 
 COMPARISON_BASELINES = (*BASELINES, "hf_prompt_lookup")
 STATIC_CONTROL = "hf_static_greedy"
+PERSISTENT_CONTROL = "hf_persistent_static_greedy"
 NORM_CONTROL = "dart_model_norm"
 POLICY_CONTROLS = {
     "fixed2": (2, "block"), "fixed4": (4, "block"), "fixed8": (8, "block"),
@@ -45,7 +47,7 @@ def select_records(records: list[Prompt], per_workload: int) -> list[Prompt]:
 
 def _summarize(samples: list[dict], seed: int) -> dict:
     timing = summarize_samples(samples, "hf_greedy", seed)
-    baselines = [*COMPARISON_BASELINES, *([STATIC_CONTROL] if STATIC_CONTROL in timing else []),
+    baselines = [*COMPARISON_BASELINES, *(name for name in (STATIC_CONTROL, PERSISTENT_CONTROL) if name in timing),
                  *(name for name in POLICY_CONTROLS if name in timing),
                  *([NORM_CONTROL] if NORM_CONTROL in timing else [])]
     fastest = min(baselines, key=lambda name: timing[name]["mean_ms"])
@@ -83,6 +85,7 @@ def benchmark_corpus(
     norm_control: DartEngine | None = None,
     compare_policies: bool = False,
     hf_static_capacity: int | None = None,
+    hf_persistent_capacity: int | None = None,
 ) -> dict:
     """Repeated comparisons; optional fixed/time controls share the target and n-gram settings."""
     if type(warmup) is not int or type(repeats) is not int or warmup < 1 or repeats < 2:
@@ -129,6 +132,14 @@ def benchmark_corpus(
                 raise ValueError("prompt and output budget exceed hf_static_capacity")
         static_settings = {"capacity": hf_static_capacity, "cache_implementation": "static", "compile": False,
                            "cache_lifetime": "request", "allocation_scope": "included in request timing"}
+    persistent_settings = None
+    if hf_persistent_capacity is not None:
+        PersistentStaticControl.validate(target, hf_persistent_capacity)
+        for row in records:
+            prompt = encode_prompt(row, target.tokenizer, target.model.config.max_position_embeddings)
+            target.validate_generation(len(prompt), row.max_new_tokens)
+            if len(prompt) + row.max_new_tokens > hf_persistent_capacity:
+                raise ValueError("prompt and output budget exceed hf_persistent_capacity")
     if norm_control is not None:
         checks = evaluate_corpus(engine, records, config, reference_target=norm_control.target)
     else:
@@ -153,6 +164,16 @@ def benchmark_corpus(
         }
         if static:
             methods[STATIC_CONTROL] = lambda prompt: static[configs[tuple(prompt)].max_new_tokens](prompt)
+        if hf_persistent_capacity is not None:
+            persistent = stack.enter_context(PersistentStaticControl(target, hf_persistent_capacity))
+            methods[PERSISTENT_CONTROL] = lambda prompt: persistent.generate(prompt, configs[tuple(prompt)].max_new_tokens)
+            persistent_settings = {
+                "capacity": hf_persistent_capacity, "cache_implementation": "static", "compile": False,
+                "cache_lifetime": "comparison", "cache_count": 1, "cache_bytes": persistent.cache_bytes,
+                "preallocation_ms": persistent.setup_ms,
+                "allocation_scope": "preallocation measured separately; request timing includes reset before and after generation",
+                "memory_scope": "persistent cache remains resident during every method; allocator peaks include it",
+            }
         for name, settings in policy_settings.items():
             drafter = NGramDrafter(**settings["ngram"])
             options = {"drafter": drafter}
@@ -190,6 +211,7 @@ def benchmark_corpus(
                 "seed": seed, "correctness": checks, "timing": timing,
                 "hf_prompt_lookup": lookup_settings,
                 "hf_static_greedy": static_settings,
+                "hf_persistent_static_greedy": persistent_settings,
                 "profiling_requested": profile,
                 "record_hidden_by_method": hidden_settings,
                 "normalization_control": NORM_CONTROL if norm_control is not None else None,
@@ -211,7 +233,9 @@ def benchmark_corpus(
         "profiling_requested": profile,
         "hf_prompt_lookup": lookup_settings,
         "hf_static_greedy": static_settings,
+        "hf_persistent_static_greedy": persistent_settings,
         "baseline_methods": [*COMPARISON_BASELINES, *([STATIC_CONTROL] if static else []),
+                             *([PERSISTENT_CONTROL] if persistent_settings is not None else []),
                              *policy_settings, *([NORM_CONTROL] if norm_control is not None else [])],
         "normalization_control": NORM_CONTROL if norm_control is not None else None,
         "policy_controls": policy_settings,
@@ -220,7 +244,8 @@ def benchmark_corpus(
         "acceptance_scope": "one separate full-output correctness pass",
         "memory_scope": ("allocator peak with two target models resident for the normalization comparison" if norm_control is not None
                          else "allocator peak with one shared target and all policy engines resident" if compare_policies
-                         else "allocator peak with one shared target and both engine instances resident"),
+                         else "allocator peak with one shared target and both engine instances resident")
+                        + ("; one persistent native cache resident during all methods" if persistent_settings is not None else ""),
         "interval_scope": "paired repeat intervals for fixed prompts; each comparison uses its observed fastest baseline",
         "record_hidden_by_method": hidden_settings,
         "summary": _summarize(timing["samples"], seed),

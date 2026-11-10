@@ -55,6 +55,8 @@ def _parser() -> argparse.ArgumentParser:
                        help="add six fixed block/tree controls and time4 on the same model")
     bench.add_argument("--hf-static-capacity", type=int, metavar="N",
                        help="add native HF greedy with a fresh static cache of N tokens; compilation disabled")
+    bench.add_argument("--hf-persistent-capacity", type=int, metavar="N",
+                       help="add native HF greedy reusing one static cache of N tokens; compilation disabled")
     demo.add_argument("--port", type=int, default=8400, help="localhost port; 0 picks a free port (default: 8400)")
     add_commands(commands)
     add_command(commands)
@@ -94,6 +96,8 @@ def _run(args) -> int:
     if args.command == "bench":
         if args.hf_static_capacity is not None and args.hf_static_capacity < 1:
             raise ValueError("hf-static-capacity must be positive")
+        if args.hf_persistent_capacity is not None and args.hf_persistent_capacity < 1:
+            raise ValueError("hf-persistent-capacity must be positive")
         if args.compare_policies and args.norm_control:
             raise ValueError("policy comparisons cannot use --norm-control")
         if args.norm_control and policy != "fixed":
@@ -158,6 +162,7 @@ def _run(args) -> int:
                 norm_control=control,
                 compare_policies=args.compare_policies,
                 hf_static_capacity=args.hf_static_capacity,
+                hf_persistent_capacity=args.hf_persistent_capacity,
             )
             report["selection"] = selection
     report.update(metadata)
