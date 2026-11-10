@@ -229,9 +229,11 @@ def test_live_dart_cache_is_unchanged_and_closed_target_is_rejected():
     with PersistentStaticControl(target, 64) as control:
         state, _ = target.prefill([11, 13, 17])
         target.forward_block(state, [19])
+        with torch.inference_mode():
+            state.cache.storage[..., state.seq_len:, :].fill_(float("nan"))
         original = state.cache.storage.clone()
         assert control.generate([3, 5, 7], 5).token_ids == expected(reference, [3, 5, 7], 5)
-        torch.testing.assert_close(state.cache.storage, original, rtol=0, atol=0)
+        assert torch.equal(state.cache.storage.view(torch.uint8), original.view(torch.uint8))
         assert state.seq_len == 4
         target.close()
         for budget in (0, 5):
