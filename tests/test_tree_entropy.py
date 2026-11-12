@@ -1,3 +1,4 @@
+from dataclasses import replace
 from functools import partial
 
 import pytest
@@ -61,8 +62,9 @@ def test_all_rejection_positions_preserve_hf_outputs_and_live_cache(models, monk
 
 @pytest.mark.parametrize('offset', range(3))
 @pytest.mark.parametrize('accepted', [False, True])
-def test_accepted_and_corrected_eos_preserve_cache_and_followup(models, monkeypatch, offset, accepted):
-    case, oracle = setup_case(models, 4 if accepted else offset, True)
+@pytest.mark.parametrize('reverse', [False, True])
+def test_accepted_and_corrected_eos_preserve_cache_and_followup(models, monkeypatch, offset, accepted, reverse):
+    case, oracle = setup_case(models, 4 if accepted else offset, reverse)
     eos = oracle[offset]
     assert eos not in [case.pending, *oracle[:offset]]
     target, reference = models
@@ -70,6 +72,42 @@ def test_accepted_and_corrected_eos_preserve_cache_and_followup(models, monkeypa
     reference.config.eos_token_id = reference.generation_config.eos_token_id = eos
     report = check_without_entropy(models, case, monkeypatch)
     assert report.actual == tuple(oracle[:offset + 1])
+
+
+@pytest.mark.parametrize('layout,offset', [('other_root', 0), ('shared_prefix', 1), ('other_branch', 2)])
+def test_accepted_eos_is_not_copied_into_retained_cache(models, monkeypatch, layout, offset):
+    case, oracle = setup_case(models, 4, True)
+    target, reference = models
+    eos = oracle[offset]
+    assert eos not in oracle[:offset]
+    target.eos_token_ids = frozenset({eos})
+    reference.config.eos_token_id = reference.generation_config.eos_token_id = eos
+    if layout == 'shared_prefix':
+        branches = [[oracle[0], (eos + 1) % 67], oracle[:2]]
+    else:
+        branches = [[(oracle[0] + 1) % 67], oracle[:offset + 1]]
+    tree = DraftTree.from_branches(branches)
+    case = replace(case, drafts=tuple(tree.tokens), parents=tuple(tree.parent))
+    selected = []
+    gather, select = target.gather_tree_tail, torch.Tensor.index_select
+
+    def record_select(tensor, dim, index):
+        selected.append(index.numel())
+        return select(tensor, dim, index)
+
+    def record_gather(*args):
+        with monkeypatch.context() as patch:
+            patch.setattr(torch.Tensor, 'index_select', record_select)
+            return gather(*args)
+
+    monkeypatch.setattr(target, 'gather_tree_tail', record_gather)
+    report = check_verifier_state(target, reference, case, inspect_tree=True)
+    assert report.passed, report.failures
+    assert report.actual == tuple(oracle[:offset + 1])
+    if layout == 'other_branch':
+        assert selected and set(selected) == {len(case.prefix) + 1 + offset}
+    else:
+        assert selected == []
 
 
 @pytest.mark.parametrize('prompt', [(0, 5, 0, 6), (5, 0, 6, 0)])

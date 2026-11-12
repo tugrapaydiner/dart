@@ -202,7 +202,8 @@ def verify_tree_greedy(
     # Keep the accepted path's KV entries, drop every other packed node,
     # then align with the block verifier's postcondition (the final
     # committed token is the new pending one and is never in cache).
-    target.gather_tree_tail(state, base_len + p_len, path)
+    kept_path = path[:-1] if accepted_eos else path  # EOS stays pending.
+    target.gather_tree_tail(state, base_len + p_len, kept_path)
     target.crop(state, base_len + p_len - 1 + len(committed))
 
     return VerifyResult(
