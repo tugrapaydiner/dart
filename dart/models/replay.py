@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import threading
 import time
+import weakref
 from contextlib import ExitStack
 from importlib.metadata import version
 
@@ -37,14 +38,32 @@ def _same_setting(value, saved):
     return id(value) == expected
 
 
+class _CacheStorage:
+    def __init__(self, tensor):
+        self.tensor = tensor
+        self.exposed = True
+
+
 class ReplayCache(DynamicCache):
-    """A request-owned KV snapshot; only its valid prefix can be read."""
+    """A request-owned KV snapshot; only its valid prefix can be read.
+
+    Reading storage keeps later calls on the copying path so mutable views work.
+    """
 
     def __init__(self, storage: torch.Tensor, length: int, owner: object):
         super().__init__()
-        self.storage = storage
+        self._buffer = _CacheStorage(storage)
         self.length = length
         self.owner = owner
+
+    @property
+    def storage(self):
+        self._buffer.exposed = True  # A caller may keep and edit this view later.
+        return self._buffer.tensor
+
+    @storage.setter
+    def storage(self, value):
+        self._buffer = _CacheStorage(value)
 
     @classmethod
     def from_dynamic(cls, cache: DynamicCache, capacity: int, owner: object):
@@ -65,7 +84,9 @@ class ReplayCache(DynamicCache):
         for index, layer in enumerate(cache.layers):
             storage[index, 0, ..., :length, :].copy_(layer.keys)
             storage[index, 1, ..., :length, :].copy_(layer.values)
-        return cls(storage, length, owner)
+        result = cls(storage, length, owner)
+        result._buffer.exposed = False
+        return result
 
     @property
     def is_compileable(self):
@@ -306,6 +327,8 @@ class CudaGraphTarget(TargetModel):
         self._layer_settings = self._settings_signature()
         self._model_tensors = tuple(tensor.detach() for tensor in (*self.model.parameters(), *self.model.buffers()))
         self._workspace = _Workspace(self.model, capacity)
+        self._resident_cache = None
+        self._resident_length = 0
         started = time.perf_counter()
         self._blocks, self._greedy_blocks = {}, {}
         try:
@@ -405,6 +428,18 @@ class CudaGraphTarget(TargetModel):
             raise ValueError("prepare the target with capture_predictions=True")
         return self._forward(state, self._ids(tokens), return_predictions=True)
 
+    def _restore_prefix(self, cache):
+        storage = cache._buffer.tensor if type(cache) is ReplayCache else cache.storage
+        if cache.owner is not self._owner or storage.shape != self._workspace.storage.shape:
+            raise ValueError("cache belongs to a different replay target")
+        resident = (type(cache) is ReplayCache and not cache._buffer.exposed
+                    and self._resident_cache is not None and self._resident_cache() is cache
+                    and cache.length <= self._resident_length)
+        self._resident_cache = None  # Any failed workspace write requires a fresh restore.
+        if not resident:
+            self._workspace.storage[..., :cache.length, :].copy_(storage[..., :cache.length, :])
+        return storage
+
     @torch.inference_mode()
     def forward_greedy(self, state, pending, count):
         """Run a prepared greedy chunk; return owned IDs through the first EOS."""
@@ -424,10 +459,8 @@ class CudaGraphTarget(TargetModel):
             cache = state.cache
             if not isinstance(cache, ReplayCache):
                 cache = ReplayCache.from_dynamic(cache, self.capacity, self._owner)
-            if cache.owner is not self._owner or cache.storage.shape != self._workspace.storage.shape:
-                raise ValueError("cache belongs to a different replay target")
             block = self._greedy_blocks[count]
-            self._workspace.storage[..., :cache.length, :].copy_(cache.storage[..., :cache.length, :])
+            storage = self._restore_prefix(cache)
             block.ids.copy_(ids)
             block.start.fill_(cache.length)
             output = block.run()[0].tolist()
@@ -437,12 +470,14 @@ class CudaGraphTarget(TargetModel):
                     break
             total = cache.length + len(output)
             try:
-                cache.storage[..., cache.length:total, :].copy_(self._workspace.storage[..., cache.length:total, :])
+                storage[..., cache.length:total, :].copy_(self._workspace.storage[..., cache.length:total, :])
                 cache.length = total
                 state.cache = cache
             except BaseException:
                 state._failed = True
                 raise
+            self._resident_cache = weakref.ref(cache)
+            self._resident_length = total
             return output
 
     def _forward(self, state, input_ids, *, last_logits_only=False, return_predictions=False):
@@ -461,20 +496,20 @@ class CudaGraphTarget(TargetModel):
             cache = state.cache
             if not isinstance(cache, ReplayCache):
                 cache = ReplayCache.from_dynamic(cache, self.capacity, self._owner)
-            if cache.owner is not self._owner or cache.storage.shape != self._workspace.storage.shape:
-                raise ValueError("cache belongs to a different replay target")
             block = self._blocks[input_ids.shape[1]]
-            self._workspace.storage[..., :cache.length, :].copy_(cache.storage[..., :cache.length, :])
+            storage = self._restore_prefix(cache)
             block.ids.copy_(input_ids)
             block.start.fill_(cache.length)
             logits = block.run()
-            cache.storage[..., cache.length:total_len, :].copy_(self._workspace.storage[..., cache.length:total_len, :])
+            storage[..., cache.length:total_len, :].copy_(self._workspace.storage[..., cache.length:total_len, :])
             if return_predictions:
                 output = block.predictions[0].tolist()  # Copy before another call can replay this workspace.
             else:
                 output = logits[0].float().clone()  # Later replays must not overwrite a caller's logits.
             cache.length = total_len
             state.cache = cache
+            self._resident_cache = weakref.ref(cache)
+            self._resident_length = total_len
             return output
 
     def crop(self, state, length):
@@ -531,6 +566,8 @@ class CudaGraphTarget(TargetModel):
             self._blocks.clear()
             self._greedy_blocks.clear()
             self._workspace = None
+            self._resident_cache = None
+            self._resident_length = 0
             self._model_tensors = ()
             self._model_signature = ()
             self._layer_settings = ()
