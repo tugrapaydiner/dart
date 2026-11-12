@@ -404,6 +404,8 @@ class DartEngine:
         for_request = getattr(self.target, "for_request", None)  # Capacity buckets pick a target per request.
         target = self.target if for_request is None else for_request(len(prompt), config.max_new_tokens)
         target.validate_generation(len(prompt), config.max_new_tokens)
+        if self.scheduler is not None and hasattr(self.scheduler, "reset"):
+            self.scheduler.reset()  # Zero-output and failed prefills start a new request too.
         if config.max_new_tokens == 0:
             target.validate_prompt(prompt)
             return self._output(config, metrics, run_id, t_start, target, [], [])
@@ -415,8 +417,6 @@ class DartEngine:
         state, logits = target.prefill(prompt)
         if config.seed is not None:
             self._seed_drafters(config.seed)
-        if self.scheduler is not None and hasattr(self.scheduler, "reset"):
-            self.scheduler.reset()
         for d in self._all_drafters():
             if hasattr(d, "after_prefill"):
                 d.after_prefill()
