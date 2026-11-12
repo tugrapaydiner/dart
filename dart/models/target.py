@@ -18,6 +18,7 @@ Batch size is fixed at 1 for interactive serving
 from __future__ import annotations
 
 import inspect
+from array import array
 from dataclasses import dataclass, field
 from importlib.metadata import version
 from typing import Optional
@@ -329,11 +330,12 @@ class TargetModel:
         if all(offset == index for index, offset in enumerate(path)):
             self.crop(state, keep_len + len(path))
             return
-        idx = torch.tensor(
-            list(range(keep_len)) + [keep_len + p for p in path],
-            device=self.device,
-            dtype=torch.long,
-        )
+        indices = array("q", range(keep_len))
+        indices.extend(keep_len + p for p in path)
+        if indices.itemsize == 8:
+            idx = torch.frombuffer(indices, dtype=torch.long).to(self.device)  # The tensor keeps the buffer alive.
+        else:
+            idx = torch.tensor(list(indices), device=self.device, dtype=torch.long)
         cache = state.cache
         try:
             layers = getattr(cache, "layers", None)

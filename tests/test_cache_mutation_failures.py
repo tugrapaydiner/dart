@@ -3,6 +3,7 @@ from __future__ import annotations
 import pytest
 import torch
 
+from dart.models import target as target_module
 from dart.verification.state_checks import _cache_pairs, _reference_forward
 from dart.verification.synthetic import _synthetic_models
 from tests.test_replay_predictions import execution as execution
@@ -103,7 +104,8 @@ def test_bad_mutation_arguments_are_rejected_without_changing_live_cache(models,
     torch.testing.assert_close(target.forward_block(state, [11])[-1], expected, atol=2e-6, rtol=2e-5)
 
 
-def test_index_allocation_failure_leaves_the_unmodified_cache_usable(models, monkeypatch):
+@pytest.mark.parametrize("stage", ["buffer", "tensor", "transfer"])
+def test_index_allocation_failure_leaves_the_unmodified_cache_usable(models, monkeypatch, stage):
     target, reference = models
     state, _ = target.prefill([5, 6, 7])
     error = RuntimeError('index allocation failed')
@@ -112,7 +114,12 @@ def test_index_allocation_failure_leaves_the_unmodified_cache_usable(models, mon
         raise error
 
     with monkeypatch.context() as fault:
-        fault.setattr(torch, 'tensor', fail)
+        if stage == "buffer":
+            fault.setattr(target_module, "array", fail)
+        elif stage == "tensor":
+            fault.setattr(torch, "frombuffer", fail)
+        else:
+            fault.setattr(torch.Tensor, "to", fail)
         with pytest.raises(RuntimeError) as caught:
             target.gather_tree_tail(state, 1, [1])
         assert caught.value is error
