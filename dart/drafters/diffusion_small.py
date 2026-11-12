@@ -113,6 +113,7 @@ class DiffusionDrafter:
     """Draft lane wrapping the canvas model with denoising + reconciliation."""
 
     name = "diffusion"
+    uses_canvas = True
 
     def __init__(
         self,
@@ -236,3 +237,9 @@ class DiffusionDrafter:
         self._warm = None
         self._used_warm = False
         self._context = []
+
+    def seed_request(self, seed: int) -> None:
+        self.gen.manual_seed(seed)
+
+    def finish_request(self) -> None:
+        self.reset()

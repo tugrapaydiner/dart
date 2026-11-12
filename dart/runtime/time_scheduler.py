@@ -7,19 +7,31 @@ from dart.runtime.types import DecodeAction, DecodeState, VerifyResult
 
 
 class TimeScheduler(HeuristicScheduler):
-    """Choose lanes by measured time per committed token, with periodic probes."""
+    """Choose lanes by measured time per committed token, with periodic probes.
+
+    ``max_probe_rounds`` caps initial and retry draft probes per request. None
+    keeps probing; zero disables it. Target refreshes and using a measured
+    winner do not spend the budget. Selections count even if execution falls
+    back or fails. A finite cap may miss a later improvement in an unplayed arm.
+    After exhaustion, baseline refreshes leave at least one round for a winner.
+    This bounds exploration rounds, not elapsed time or total drafting rounds.
+    """
 
     requires_round_timing = True
+    requires_free_memory = False  # Uses observed lane KV, not device free memory.
 
     @property
     def requires_entropy(self) -> bool:
         return self.config.entropy_gate_threshold != float("inf")
 
     def __init__(self, config: SchedulerConfig, *, retry_interval: int = 16,
-                 warmup_rounds: int = 2, min_time_saving: float = 0.05) -> None:
+                 warmup_rounds: int = 2, min_time_saving: float = 0.05,
+                 max_probe_rounds: int | None = None) -> None:
         for name, value in (("retry_interval", retry_interval), ("warmup_rounds", warmup_rounds)):
             if type(value) is not int or value < 1:
                 raise ValueError(f"{name} must be an integer >= 1")
+        if max_probe_rounds is not None and (type(max_probe_rounds) is not int or max_probe_rounds < 0):
+            raise ValueError("max_probe_rounds must be a nonnegative integer or None")
         if (isinstance(min_time_saving, bool) or not isinstance(min_time_saving, (int, float))
                 or not math.isfinite(min_time_saving) or not 0 <= min_time_saving < 1):
             raise ValueError("min_time_saving must be finite and in [0, 1)")
@@ -33,6 +45,7 @@ class TimeScheduler(HeuristicScheduler):
         self.retry_interval = retry_interval
         self.warmup_rounds = warmup_rounds
         self.min_time_saving = min_time_saving
+        self.max_probe_rounds = max_probe_rounds
         self.reset()
 
     def reset(self) -> None:
@@ -43,6 +56,8 @@ class TimeScheduler(HeuristicScheduler):
         self.last_played: dict[str, int] = {}
         self.kv_gb: dict[str, float] = {}
         self.decisions = 0
+        self.probe_rounds = 0
+        self._last_arm: tuple[str, str] | None = None  # (key, lane) of the latest decision
 
     def observe(self, lane: str, result: VerifyResult, *, round_ms: float,
                 kv_gb: float = 0.0, **_timing) -> None:
@@ -53,41 +68,123 @@ class TimeScheduler(HeuristicScheduler):
                 or not math.isfinite(kv_gb) or kv_gb < 0):
             raise ValueError("kv_gb must be finite and >= 0")
         super().observe(lane, result)
+        key = self._last_arm[0] if self._last_arm is not None and self._last_arm[1] == lane else lane
         alpha = self.config.ewma_alpha
         for values, value in ((self.round_ms, round_ms), (self.committed_tokens, len(result.committed))):
-            values[lane] = (1 - alpha) * values.get(lane, value) + alpha * value
-        self.counts[lane] = self.counts.get(lane, 0) + 1
-        self.last_played[lane] = self.decisions
-        self.kv_gb[lane] = kv_gb
+            values[key] = (1 - alpha) * values.get(key, value) + alpha * value
+        self.counts[key] = self.counts.get(key, 0) + 1
+        self.last_played[key] = self.decisions
+        self.kv_gb[key] = kv_gb
 
-    def _choose_lane(self, allowed) -> str:
-        lanes = [lane for lane in dict.fromkeys(self.config.available_lanes)
-                 if lane != "target_only" and (allowed is None or lane in allowed)
-                 and self.kv_gb.get(lane, 0.0) <= self.config.max_gpu_kv_gb]
+    def _candidates(self, allowed, state: DecodeState) -> dict[str, tuple[str, int, str | None]]:
+        """Map each drafting arm's key to its (lane, draft length, verifier); None keeps the engine's."""
+        return {lane: (lane, self.config.draft_len, None) for lane in dict.fromkeys(self.config.available_lanes)
+                if lane != "target_only" and (allowed is None or lane in allowed)}
+
+    def _choose_arm(self, allowed, state: DecodeState) -> tuple[str, str, int, str | None]:
+        arms = {key: arm for key, arm in self._candidates(allowed, state).items()
+                if self.kv_gb.get(key, 0.0) <= self.config.max_gpu_kv_gb}
+        baseline = ("target_only", "target_only", 0, None)
         if self.counts.get("target_only", 0) < self.warmup_rounds:
-            return "target_only"
-        for lane in lanes:
-            if lane not in self.counts:
-                return lane
-        stale = [lane for lane in ["target_only", *lanes]
-                 if self.decisions - self.last_played[lane] >= self.retry_interval]
+            return baseline
+        can_probe = self.max_probe_rounds is None or self.probe_rounds < self.max_probe_rounds
+        if can_probe:
+            for key, arm in arms.items():
+                if key not in self.counts:
+                    self.probe_rounds += 1
+                    return (key, *arm)
+        else:
+            arms = {key: arm for key, arm in arms.items() if key in self.counts}
+        refresh_interval = self.retry_interval if can_probe else max(2, self.retry_interval)
+        stale = [key for key in ["target_only", *arms]
+                 if (key == "target_only" or can_probe)
+                 and self.decisions - self.last_played[key] >= refresh_interval]
         if stale:
-            return min(stale, key=self.last_played.get)  # Refresh the baseline too.
-        baseline = self.round_ms["target_only"] / self.committed_tokens["target_only"]
-        costs = {lane: self.round_ms[lane] / self.committed_tokens[lane] for lane in lanes}
-        useful = [lane for lane in lanes if costs[lane] < baseline * (1 - self.min_time_saving)]
-        return min(useful, key=costs.get) if useful else "target_only"
+            key = min(stale, key=self.last_played.get)  # Refresh the baseline too.
+            if key == "target_only":
+                return baseline
+            self.probe_rounds += 1
+            return (key, *arms[key])
+        target_cost = self.round_ms["target_only"] / self.committed_tokens["target_only"]
+        costs = {key: self.round_ms[key] / self.committed_tokens[key] for key in arms}
+        useful = [key for key in arms if costs[key] < target_cost * (1 - self.min_time_saving)]
+        if not useful:
+            return baseline
+        key = min(useful, key=costs.get)
+        return (key, *arms[key])
+
+    def _draft_sizes(self, lane: str, draft_len: int, state: DecodeState) -> tuple[int, int]:
+        return entropy_gated(draft_len, self.config.canvas_len if lane == "diffusion" else 0, state, self.config)
 
     def choose_action(self, state: DecodeState, allowed=None) -> DecodeAction:
         self.decisions += 1
-        lane = self._choose_lane(allowed)
+        key, lane, draft_len, verifier = self._choose_arm(allowed, state)
+        self._last_arm = (key, lane)
         config = self.config
-        draft_len, canvas_len = entropy_gated(
-            config.draft_len if lane != "target_only" else 0,
-            config.canvas_len if lane == "diffusion" else 0, state, config,
-        )
+        draft_len, canvas_len = self._draft_sizes(lane, draft_len, state)
         return DecodeAction(
             lane=lane, draft_len=draft_len, canvas_len=canvas_len, kv_bits=config.kv_bits,
             verify_every=1, denoise_steps=config.denoise_steps if lane == "diffusion" else 0,
-            exact_mode=state.exact_required,
+            exact_mode=state.exact_required, verifier=verifier,
         )
+
+
+class CostTableScheduler(TimeScheduler):
+    """Choose (lane, draft length, verifier) arms by measured time per committed token.
+
+    Every lane is paired with each length in ``draft_lengths``; statistics are
+    kept per arm under ``"lane:length"`` keys. With a ``verifiers`` menu such as
+    ``("block", "tree")`` each length is also paired with each verifier, under
+    ``"lane:length:verifier"`` keys. Target-only steps remain the baseline an arm
+    must beat by ``min_time_saving``. Diffusion arms use the selected length as
+    their canvas budget too. Lengths are gated and clipped to the round budget
+    before forming keys, so equivalent choices share one cost estimate. Tree
+    budgets also respect the request's node cap. All arms share the request's
+    probe budget.
+    """
+
+    requires_free_memory = False
+
+    def __init__(self, config: SchedulerConfig, *, draft_lengths: tuple[int, ...] = (2, 4, 8),
+                 verifiers: tuple[str, ...] | None = None, **options) -> None:
+        if (not isinstance(draft_lengths, tuple) or not draft_lengths
+                or len(set(draft_lengths)) != len(draft_lengths)
+                or any(type(length) is not int or not 1 <= length <= 64 for length in draft_lengths)):
+            raise ValueError("draft_lengths must be a tuple of distinct integers from 1 to 64")
+        if verifiers is not None and (not isinstance(verifiers, tuple) or not verifiers
+                                      or len(set(verifiers)) != len(verifiers)
+                                      or any(name not in ("block", "tree") for name in verifiers)):
+            raise ValueError("verifiers must be a tuple of distinct names from 'block' and 'tree'")
+        self.draft_lengths = draft_lengths
+        self.verifiers = verifiers
+        super().__init__(config, **options)
+
+    def choose_action(self, state: DecodeState, allowed=None) -> DecodeAction:
+        for name in ("max_draft_tokens", "max_tree_nodes"):
+            limit = getattr(state, name)
+            if limit is not None and (type(limit) is not int or limit < 0):
+                raise ValueError(f"{name} must be a nonnegative integer or None")
+        return super().choose_action(state, allowed=allowed)
+
+    def _draft_sizes(self, lane: str, draft_len: int, state: DecodeState) -> tuple[int, int]:
+        return draft_len, draft_len if lane == "diffusion" else 0  # Candidates are already gated and bounded.
+
+    def _candidates(self, allowed, state: DecodeState) -> dict[str, tuple[str, int, str | None]]:
+        lanes = super()._candidates(allowed, state)
+        arms = {}
+        for lane in lanes:
+            for requested in self.draft_lengths:
+                length, _ = entropy_gated(requested, 0, state, self.config)
+                if state.max_draft_tokens is not None:
+                    length = min(length, state.max_draft_tokens)
+                if length <= 0:
+                    continue
+                for verifier in self.verifiers or (None,):
+                    size = length
+                    if (verifier or state.default_verifier) == "tree" and state.max_tree_nodes is not None:
+                        size = min(size, state.max_tree_nodes)
+                    if size <= 0:
+                        continue
+                    key = f"{lane}:{size}" + (f":{verifier}" if verifier is not None else "")
+                    arms[key] = (lane, size, verifier)
+        return arms

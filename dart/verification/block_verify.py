@@ -42,8 +42,21 @@ def verify_block_greedy(
     k = len(draft_tokens)
     base_len = state.seq_len  # cache length before this round
 
-    logits = target.forward_block(state, pending_block + list(draft_tokens))
-    preds = torch.argmax(logits, dim=-1).tolist()  # preds[i] follows input[i]
+    tokens = pending_block + list(draft_tokens)
+    for index, token in enumerate(draft_tokens):
+        if type(token) is int and token in target.eos_token_ids:
+            config = getattr(getattr(target, "model", None), "config", None)
+            vocab_size = getattr(config, "vocab_size", None)
+            if type(vocab_size) is int and all(
+                type(value) is int and 0 <= value < vocab_size for value in draft_tokens[index:]
+            ):
+                tokens = pending_block + list(draft_tokens[:index])  # EOS and its tail need no forward.
+            break  # Let normal admission reject invalid suffixes.
+    if not compute_entropy and getattr(target, "capture_predictions", False):
+        preds = target.forward_predictions(state, tokens)
+    else:
+        logits = target.forward_block(state, tokens)
+        preds = torch.argmax(logits, dim=-1).tolist()  # preds[i] follows input[i]
 
     # Divergence audit of unverified pending tokens (approx mode only).
     divergence = sum(

@@ -16,7 +16,7 @@ from contextlib import ExitStack, contextmanager
 from pathlib import Path
 
 import torch
-from transformers import GenerationConfig
+from transformers import GenerationConfig, LlamaForCausalLM, StaticCache
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
@@ -175,15 +175,7 @@ def _state_dict_fits(module: torch.nn.Module, state: dict) -> bool:
     )
 
 
-def build_hf_method(
-    target, max_new_tokens: int, record_hidden: bool | None = None, *,
-    prompt_lookup_num_tokens: int | None = None, max_matching_ngram_size: int = 4,
-):
-    if prompt_lookup_num_tokens is not None:
-        for name, value in (("prompt_lookup_num_tokens", prompt_lookup_num_tokens),
-                            ("max_matching_ngram_size", max_matching_ngram_size)):
-            if type(value) is not int or value < 1:
-                raise ValueError(f"{name} must be a positive integer")
+def hf_generation_settings(target, max_new_tokens: int, record_hidden: bool | None = None) -> dict:
     eos = sorted(target.eos_token_ids)
     pad = getattr(target.model.config, "pad_token_id", None)
     settings = GenerationConfig().to_dict()
@@ -195,12 +187,37 @@ def build_hf_method(
         eos_token_id=eos or None, pad_token_id=pad if pad is not None else (eos[0] if eos else 0),
         output_hidden_states=target.record_hidden if record_hidden is None else record_hidden,
     )
+    return settings
+
+
+def build_hf_method(
+    target, max_new_tokens: int, record_hidden: bool | None = None, *,
+    prompt_lookup_num_tokens: int | None = None, max_matching_ngram_size: int = 4,
+    static_capacity: int | None = None,
+):
+    if static_capacity is not None:
+        if not isinstance(target.model, LlamaForCausalLM) or target.dtype != torch.float32:
+            raise ValueError("HF static control requires a float32 Llama target")
+        if target.model.config._attn_implementation not in ("eager", "sdpa"):
+            raise ValueError("HF static control requires eager or sdpa attention")
+        if type(static_capacity) is not int or not 1 <= static_capacity <= target.model.config.max_position_embeddings:
+            raise ValueError("static_capacity must be a positive integer within the model context limit")
+        if prompt_lookup_num_tokens is not None:
+            raise ValueError("HF static control supports greedy generation without prompt lookup")
+    if prompt_lookup_num_tokens is not None:
+        for name, value in (("prompt_lookup_num_tokens", prompt_lookup_num_tokens),
+                            ("max_matching_ngram_size", max_matching_ngram_size)):
+            if type(value) is not int or value < 1:
+                raise ValueError(f"{name} must be a positive integer")
+    settings = hf_generation_settings(target, max_new_tokens, record_hidden)
     if prompt_lookup_num_tokens is not None:
         settings.update(prompt_lookup_num_tokens=prompt_lookup_num_tokens,
                         max_matching_ngram_size=max_matching_ngram_size)
+    if static_capacity is not None:
+        settings.update(disable_compile=True, cache_implementation=None)
 
     replay_generate = None
-    if getattr(target, "uses_replay_cache", False):
+    if static_capacity is None and getattr(target, "uses_replay_cache", False):
         from benchmarks.hf_replay import build_replay_generate
 
         replay_generate = build_replay_generate(target, settings)
@@ -208,6 +225,16 @@ def build_hf_method(
     @torch.inference_mode()
     def generate(prompt):
         target.validate_generation(len(prompt), max_new_tokens)
+        if static_capacity is not None:
+            if getattr(target, "uses_replay_cache", False):
+                target.validate_prompt(prompt)
+            if len(prompt) + max_new_tokens > static_capacity:
+                raise ValueError("prompt and output budget exceed static_capacity")
+            if any(type(token) is not int or not 0 <= token < target.model.config.vocab_size for token in prompt):
+                raise ValueError("prompt must contain integer token ids within the model vocabulary")
+            if max_new_tokens == 0:
+                text = target.tokenizer.decode([], skip_special_tokens=False) if target.tokenizer else None
+                return GenerationOutput([], text, {})
         if prompt_lookup_num_tokens is not None and prompt[-1] in target.eos_token_ids:
             raise ValueError("HF prompt lookup requires a prompt that does not end in EOS")
         if prompt_lookup_num_tokens is not None and max_new_tokens > 1:
@@ -216,7 +243,10 @@ def build_hf_method(
             output = replay_generate(prompt)
         else:
             ids = torch.tensor([prompt], device=target.device)
-            output = target.model.generate(ids, attention_mask=torch.ones_like(ids), **settings)  # Every prompt token is real input.
+            cache = {}
+            if static_capacity is not None:
+                cache["past_key_values"] = StaticCache(config=target.model.config, max_cache_len=static_capacity)
+            output = target.model.generate(ids, attention_mask=torch.ones_like(ids), **settings, **cache)  # Every prompt token is real input.
         token_ids = output[0, len(prompt):].tolist()
         text = target.tokenizer.decode(token_ids, skip_special_tokens=False) if target.tokenizer else None
         return GenerationOutput(token_ids, text, {})
@@ -368,7 +398,9 @@ def main() -> None:
                 if forwards:
                     row["accepted_tokens_per_diffusion_forward"] = report.draft_tokens_accepted / forwards
             if hasattr(drafter, "kv_stats"):
-                row["kv_stats"] = drafter.kv_stats()
+                row["kv_stats"] = getattr(drafter, "last_kv_stats", None)
+                if row["kv_stats"] is None:
+                    row["kv_stats"] = drafter.kv_stats()
             results[name] = row
         methods = {"hf_greedy": build_hf_method(target, args.max_new, record_hidden=False), "target_greedy": build_target_method(target, args.max_new)}
         methods.update({name: (lambda prompt, e=engine: e.generate(prompt, cfg)) for name, engine in engines.items()})

@@ -17,7 +17,22 @@ from dart.runtime.types import VerifyResult
 
 @runtime_checkable
 class Drafter(Protocol):
-    """Protocol implemented by every draft lane."""
+    """Protocol implemented by every draft lane.
+
+    The engine also uses these optional members when a drafter defines them:
+
+      * ``propose_tree(committed, max_tokens)`` returns a DraftTree for tree rounds.
+      * ``propose_with_probs(committed, max_tokens)`` returns drafts and the rows
+        they were sampled from, for exact sampling.
+      * ``after_prefill()`` and ``after_verify(result)`` see rounds run by other lanes.
+      * ``finish_request()`` releases request data after execution, including
+        errors, without resetting statistics or the sampling generator.
+      * ``seed_request(seed)`` reseeds that generator when a request sets
+        DecodeConfig.seed, so seeded requests repeat exactly.
+      * ``close()`` releases resources an engine that owns the drafter closes.
+      * ``requires_entropy = False`` skips entropy work no observer needs.
+      * ``uses_canvas = True`` gives the lane DecodeConfig.canvas_len instead of draft_len.
+    """
 
     name: str
 
