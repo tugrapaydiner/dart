@@ -26,6 +26,8 @@ import torch
 from packaging.version import Version
 from torch import Tensor
 
+from dart.attention.verifier_mask import tree_mask
+
 try:
     from transformers import AutoModelForCausalLM, AutoTokenizer
     from transformers.cache_utils import DynamicCache
@@ -277,23 +279,15 @@ class TargetModel:
         kv_len = base_len + q_len
         depths: list[int] = []
         for i, p in enumerate(parent):
-            if p < -1 or p >= i:
+            if type(p) is not int or p < -1 or p >= i:
                 raise ValueError("tree parents must be -1 or a preceding index")
             depths.append(0 if p < 0 else depths[p] + 1)
         self._check_context_length(base_len + p_len + max(depths, default=-1) + 1)
 
-        allow = torch.zeros(q_len, kv_len, dtype=torch.bool, device=self.device)
-        allow[:, :base_len] = True  # everything sees the committed cache
-        for i in range(p_len):      # pending block: ordinary causal
-            allow[i, base_len : base_len + i + 1] = True
-        for i in range(n):
-            row = p_len + i
-            allow[row, base_len : base_len + p_len] = True  # full pending
-            allow[row, base_len + row] = True               # itself
-            j = parent[i]
-            while j >= 0:
-                allow[row, base_len + p_len + j] = True     # ancestors
-                j = parent[j]
+        mask_parents = [i - 1 for i in range(p_len)] + [
+            p_len - 1 if p < 0 else p_len + p for p in parent
+        ]  # The pending block is the common ancestor chain.
+        allow = tree_mask(mask_parents, base_len, device=self.device)
 
         mask = torch.zeros(
             (1, 1, q_len, kv_len), dtype=self.dtype, device=self.device
