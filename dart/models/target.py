@@ -174,7 +174,6 @@ class TargetModel:
         """Check prompt admission without executing the model."""
         ids = self._ids(prompt_ids)
         self.validate_generation(ids.size(1), 0)
-        self._check_vocabulary(ids)
 
     def _check_vocabulary(self, ids: Tensor) -> None:
         low, high = torch.aminmax(ids)
@@ -182,15 +181,21 @@ class TargetModel:
             raise ValueError("token id is outside the model vocabulary")
 
     def _ids(self, tokens: list[int] | Tensor) -> Tensor:
+        if isinstance(tokens, (list, tuple)) and tokens and all(type(token) is int for token in tokens):
+            if min(tokens) < 0 or max(tokens) >= self.model.config.vocab_size:
+                raise ValueError("token id is outside the model vocabulary")
+            return torch.tensor([tokens], device=self.device, dtype=torch.long)  # Check host IDs before transfer.
         if isinstance(tokens, Tensor):
-            t = tokens.to(device=self.device, dtype=torch.long)
+            t = tokens.to(dtype=torch.long)
         else:
-            t = torch.tensor(tokens, device=self.device, dtype=torch.long)
+            t = torch.tensor(tokens, device="cpu", dtype=torch.long)
         if t.dim() == 1:
             t = t.unsqueeze(0)
         if t.dim() != 2 or t.size(0) != 1:
             raise ValueError(f"expected [T] or [1, T] token ids, got {tuple(t.shape)}")
-        return t
+        if t.numel():
+            self._check_vocabulary(t)
+        return t.to(device=self.device)
 
     @torch.inference_mode()
     def prefill(
@@ -204,7 +209,6 @@ class TargetModel:
         input_ids = self._ids(prompt_ids)
         if input_ids.size(1) == 0:
             raise ValueError("prompt must contain at least one token")
-        self._check_vocabulary(input_ids)  # Out-of-range IDs assert inside CUDA embedding kernels.
         state = TargetState(cache=cache if cache is not None else DynamicCache())
         logits = self._forward(state, input_ids, last_logits_only=True)
         return state, logits[-1]
@@ -220,6 +224,8 @@ class TargetModel:
 
     def _forward(self, state: TargetState, input_ids: Tensor, *, last_logits_only: bool = False) -> Tensor:
         state._check_usable()
+        if input_ids.size(1) == 0:
+            raise ValueError("token block must contain at least one token")
         past_len = state.seq_len
         total_len = past_len + input_ids.size(1)
         self._check_context_length(total_len)
