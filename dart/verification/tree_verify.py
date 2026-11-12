@@ -141,11 +141,13 @@ def verify_tree_greedy(
     n = len(draft_tree)
     base_len = state.seq_len
 
-    if n == 0:
-        # No drafts: identical to a plain target step via the block path.
+    if n == 0 or (len(draft_tree.parent) == n and all(
+        type(parent) is int and parent == index - 1 for index, parent in enumerate(draft_tree.parent)
+    )):
+        # A chain needs no tree mask or cache gather.
         from dart.verification.block_verify import verify_block_greedy
 
-        return verify_block_greedy(target, state, pending_block, [], compute_entropy=compute_entropy)
+        return verify_block_greedy(target, state, pending_block, draft_tree.tokens, compute_entropy=compute_entropy)
 
     logits = target.forward_tree(
         state, pending_block, draft_tree.tokens, draft_tree.parent

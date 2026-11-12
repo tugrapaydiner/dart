@@ -116,8 +116,7 @@ def test_complete_tree_outputs_match_hf_after_compaction(models, mode):
     with DartEngine(target, Drafter(), verifier='tree') as engine:
         for _ in range(2):
             assert engine.generate([0, 5, 0, 6], DecodeConfig(max_new_tokens=11, draft_len=4)).token_ids == expected
-    assert paths
     if mode == 'other_branch':
         assert any(path and path[0] != 0 for path in paths)
     else:
-        assert all(path == list(range(len(path))) for path in paths)
+        assert paths == []  # Chains keep their causal cache without gathering.

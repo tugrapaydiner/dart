@@ -129,32 +129,46 @@ def test_sibling_attention_fault_is_detected(models, monkeypatch):
     assert any(failure.kind in {"committed", "cache_values", "cache_length"} for failure in result.failures)
 
 
-def test_execution_failure_is_reported_without_mutating_reference(models, monkeypatch):
+@pytest.mark.parametrize("branching", [False, True])
+def test_execution_failure_is_reported_without_mutating_reference(models, monkeypatch, branching):
     case = sample(models)
+    if branching:
+        tree = DraftTree.from_branches([list(case.drafts), [(case.drafts[0] + 1) % 211]])
+        case = replace(case, drafts=tuple(tree.tokens), parents=tuple(tree.parent))
 
     def fail(*args):
         raise RuntimeError("injected")
 
-    monkeypatch.setattr(models[0], "forward_tree", fail)
+    monkeypatch.setattr(models[0], "forward_tree" if branching else "forward_block", fail)
     result = check_verifier_state(*models, case)
     assert not result.passed and result.actual is None
     assert result.failures[0].kind == "exception"
     assert result.failures[0].detail == "RuntimeError: injected"
 
 
-def test_followup_fault_is_detected_after_a_correct_round(models, monkeypatch):
+@pytest.mark.parametrize("branching", [False, True])
+def test_followup_fault_is_detected_after_a_correct_round(models, monkeypatch, branching):
     target, _ = models
     case = sample(models)
+    if branching:
+        tree = DraftTree.from_branches([list(case.drafts), [(case.drafts[0] + 1) % 211]])
+        case = replace(case, drafts=tuple(tree.tokens), parents=tuple(tree.parent))
     forward = target.forward_block
+    injected = []
 
     def wrong_next(state, tokens):
-        logits = forward(state, tokens).clone()
+        logits = forward(state, tokens)
+        if len(tokens) != 1:
+            return logits  # Leave the verification block intact.
+        injected.append(True)
+        logits = logits.clone()
         index = (int(logits[-1].argmax()) + 1) % logits.shape[-1]
         logits[-1, index] = logits.max() + 1
         return logits
 
     monkeypatch.setattr(target, "forward_block", wrong_next)
     result = check_verifier_state(*models, case)
+    assert injected == [True]
     assert result.actual == result.expected and result.cache_length == result.expected_cache_length
     assert "followup_token" in {failure.kind for failure in result.failures}
 

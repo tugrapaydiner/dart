@@ -40,6 +40,14 @@ def target(monkeypatch):
     monkeypatch.setattr(TargetModel, "forward_tree",
                         lambda self, state, pending, tokens, parents: sizes.append(len(tokens))
                         or forward_tree(self, state, pending, tokens, parents))
+    forward_block = TargetModel.forward_block
+
+    def record_block(self, state, tokens):
+        if len(tokens) > 1:
+            sizes.append(len(tokens) - 1)  # Linear trees use causal blocks.
+        return forward_block(self, state, tokens)
+
+    monkeypatch.setattr(TargetModel, "forward_block", record_block)
     target.tree_sizes = sizes
     return target
 
