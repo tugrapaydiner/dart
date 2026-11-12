@@ -327,6 +327,7 @@ class CudaGraphTarget(TargetModel):
         self._layer_settings = self._settings_signature()
         self._model_tensors = tuple(tensor.detach() for tensor in (*self.model.parameters(), *self.model.buffers()))
         self._workspace = _Workspace(self.model, capacity)
+        self._workspace_dirty = False
         self._resident_cache = None
         self._resident_length = 0
         started = time.perf_counter()
@@ -432,10 +433,14 @@ class CudaGraphTarget(TargetModel):
         storage = cache._buffer.tensor if type(cache) is ReplayCache else cache.storage
         if cache.owner is not self._owner or storage.shape != self._workspace.storage.shape:
             raise ValueError("cache belongs to a different replay target")
+        if self._workspace_dirty:
+            self._resident_cache = None
+            self._workspace.storage.zero_()  # Failed work may leave NaNs in masked rows.
         resident = (type(cache) is ReplayCache and not cache._buffer.exposed
                     and self._resident_cache is not None and self._resident_cache() is cache
                     and cache.length <= self._resident_length)
         self._resident_cache = None  # Any failed workspace write requires a fresh restore.
+        self._workspace_dirty = True
         if not resident:
             self._workspace.storage[..., :cache.length, :].copy_(storage[..., :cache.length, :])
         return storage
@@ -478,6 +483,7 @@ class CudaGraphTarget(TargetModel):
                 raise
             self._resident_cache = weakref.ref(cache)
             self._resident_length = total
+            self._workspace_dirty = False
             return output
 
     def _forward(self, state, input_ids, *, last_logits_only=False, return_predictions=False):
@@ -510,6 +516,7 @@ class CudaGraphTarget(TargetModel):
             state.cache = cache
             self._resident_cache = weakref.ref(cache)
             self._resident_length = total_len
+            self._workspace_dirty = False
             return output
 
     def crop(self, state, length):
@@ -566,6 +573,7 @@ class CudaGraphTarget(TargetModel):
             self._blocks.clear()
             self._greedy_blocks.clear()
             self._workspace = None
+            self._workspace_dirty = False
             self._resident_cache = None
             self._resident_length = 0
             self._model_tensors = ()
