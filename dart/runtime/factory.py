@@ -297,7 +297,7 @@ def _engine_for_target(cfg, target, cleanup):
         else HeuristicScheduler
     )
     timing_options = {
-        key: sched_cfg[key] for key in ("retry_interval", "warmup_rounds", "min_time_saving")
+        key: sched_cfg[key] for key in ("retry_interval", "warmup_rounds", "min_time_saving", "max_probe_rounds")
         if key in sched_cfg
     } if sched_cls in (TimeScheduler, CostTableScheduler) else {}
     if sched_cls is CostTableScheduler:

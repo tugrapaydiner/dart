@@ -7,7 +7,15 @@ from dart.runtime.types import DecodeAction, DecodeState, VerifyResult
 
 
 class TimeScheduler(HeuristicScheduler):
-    """Choose lanes by measured time per committed token, with periodic probes."""
+    """Choose lanes by measured time per committed token, with periodic probes.
+
+    ``max_probe_rounds`` caps initial and retry draft probes per request. None
+    keeps probing; zero disables it. Target refreshes and using a measured
+    winner do not spend the budget. Selections count even if execution falls
+    back or fails. A finite cap may miss a later improvement in an unplayed arm.
+    After exhaustion, baseline refreshes leave at least one round for a winner.
+    This bounds exploration rounds, not elapsed time or total drafting rounds.
+    """
 
     requires_round_timing = True
     requires_free_memory = False  # Uses observed lane KV, not device free memory.
@@ -17,10 +25,13 @@ class TimeScheduler(HeuristicScheduler):
         return self.config.entropy_gate_threshold != float("inf")
 
     def __init__(self, config: SchedulerConfig, *, retry_interval: int = 16,
-                 warmup_rounds: int = 2, min_time_saving: float = 0.05) -> None:
+                 warmup_rounds: int = 2, min_time_saving: float = 0.05,
+                 max_probe_rounds: int | None = None) -> None:
         for name, value in (("retry_interval", retry_interval), ("warmup_rounds", warmup_rounds)):
             if type(value) is not int or value < 1:
                 raise ValueError(f"{name} must be an integer >= 1")
+        if max_probe_rounds is not None and (type(max_probe_rounds) is not int or max_probe_rounds < 0):
+            raise ValueError("max_probe_rounds must be a nonnegative integer or None")
         if (isinstance(min_time_saving, bool) or not isinstance(min_time_saving, (int, float))
                 or not math.isfinite(min_time_saving) or not 0 <= min_time_saving < 1):
             raise ValueError("min_time_saving must be finite and in [0, 1)")
@@ -34,6 +45,7 @@ class TimeScheduler(HeuristicScheduler):
         self.retry_interval = retry_interval
         self.warmup_rounds = warmup_rounds
         self.min_time_saving = min_time_saving
+        self.max_probe_rounds = max_probe_rounds
         self.reset()
 
     def reset(self) -> None:
@@ -44,6 +56,7 @@ class TimeScheduler(HeuristicScheduler):
         self.last_played: dict[str, int] = {}
         self.kv_gb: dict[str, float] = {}
         self.decisions = 0
+        self.probe_rounds = 0
         self._last_arm: tuple[str, str] | None = None  # (key, lane) of the latest decision
 
     def observe(self, lane: str, result: VerifyResult, *, round_ms: float,
@@ -74,14 +87,24 @@ class TimeScheduler(HeuristicScheduler):
         baseline = ("target_only", "target_only", 0, None)
         if self.counts.get("target_only", 0) < self.warmup_rounds:
             return baseline
-        for key, arm in arms.items():
-            if key not in self.counts:
-                return (key, *arm)
+        can_probe = self.max_probe_rounds is None or self.probe_rounds < self.max_probe_rounds
+        if can_probe:
+            for key, arm in arms.items():
+                if key not in self.counts:
+                    self.probe_rounds += 1
+                    return (key, *arm)
+        else:
+            arms = {key: arm for key, arm in arms.items() if key in self.counts}
+        refresh_interval = self.retry_interval if can_probe else max(2, self.retry_interval)
         stale = [key for key in ["target_only", *arms]
-                 if self.decisions - self.last_played[key] >= self.retry_interval]
+                 if (key == "target_only" or can_probe)
+                 and self.decisions - self.last_played[key] >= refresh_interval]
         if stale:
             key = min(stale, key=self.last_played.get)  # Refresh the baseline too.
-            return baseline if key == "target_only" else (key, *arms[key])
+            if key == "target_only":
+                return baseline
+            self.probe_rounds += 1
+            return (key, *arms[key])
         target_cost = self.round_ms["target_only"] / self.committed_tokens["target_only"]
         costs = {key: self.round_ms[key] / self.committed_tokens[key] for key in arms}
         useful = [key for key in arms if costs[key] < target_cost * (1 - self.min_time_saving)]
@@ -116,7 +139,8 @@ class CostTableScheduler(TimeScheduler):
     must beat by ``min_time_saving``. Diffusion arms use the selected length as
     their canvas budget too. Lengths are gated and clipped to the round budget
     before forming keys, so equivalent choices share one cost estimate. Tree
-    budgets also respect the request's node cap.
+    budgets also respect the request's node cap. All arms share the request's
+    probe budget.
     """
 
     requires_free_memory = False
