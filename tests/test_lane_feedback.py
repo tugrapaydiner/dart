@@ -151,5 +151,5 @@ def test_missing_lane_feedback_still_describes_target_fallback(models, policy):
         output = engine.generate([5, 7, 9], DecodeConfig(max_new_tokens=8))
     assert output.token_ids == expected
     assert scheduler.counts == {'target_only': len(output.rounds)}
-    assert scheduler.probe_rounds == 1
+    assert scheduler.probe_rounds == 0
     assert {row.lane for row in output.rounds} == {'target_only'}

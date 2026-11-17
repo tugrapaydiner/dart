@@ -194,6 +194,7 @@ class DartEngine:
                 return self._null, 0, self.verifier_name, self._null.name
             n = config.canvas_len if getattr(d, "uses_canvas", False) else config.draft_len
             return d, n, self.verifier_name, d.name
+        allowed = set(self.lanes) if allowed is None else allowed.intersection(self.lanes)
         free_gb = float("inf")
         if type(self.scheduler).__dict__.get("requires_free_memory") is not False:  # Subclasses opt out themselves.
             free_gb = self._gpu_free_gb(self.target.device)
