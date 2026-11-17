@@ -4,6 +4,7 @@ import random
 
 import pytest
 import torch
+from torch.overrides import TorchFunctionMode
 
 from dart.attention.verifier_mask import tree_mask
 from tests.test_sampling_devices import DEVICES
@@ -43,6 +44,25 @@ def test_tree_mask_matches_ancestor_oracle(device, prefix, nodes, shape):
     assert torch.equal(tree_mask(parents, prefix, device=device).cpu(), expected_mask(parents, prefix))
 
 
+@pytest.mark.parametrize("device", DEVICES)
+@pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16, torch.float32, torch.float64])
+def test_floating_tree_mask_matches_ancestor_oracle(device, dtype):
+    for parents, prefix in [([], 0), ([], 5), ([-1], 9), ([-1, -1, 0, 1, 2], 0), ([-1, 0, 0, 2, -1], 1008)]:
+        visibility = expected_mask(parents, prefix)
+        expected = torch.zeros(visibility.shape, dtype=dtype).masked_fill_(~visibility, torch.finfo(dtype).min)
+        actual = tree_mask(parents, prefix, device=device, dtype=dtype)
+        assert actual.device.type == torch.device(device).type and actual.dtype == dtype
+        assert torch.equal(actual.cpu(), expected)
+        actual.fill_(1)
+        assert torch.equal(tree_mask(parents, prefix, device=device, dtype=dtype).cpu(), expected)
+
+
+@pytest.mark.parametrize("dtype", [torch.int64, torch.complex64])
+def test_tree_mask_rejects_unsupported_dtype(dtype):
+    with pytest.raises(ValueError, match="dtype"):
+        tree_mask([-1], 3, dtype=dtype)
+
+
 @pytest.mark.parametrize("parent", [[-2], [-1, -2]])
 def test_tree_mask_rejects_negative_parent(parent):
     with pytest.raises(ValueError, match="parents"):
@@ -54,7 +74,8 @@ def test_tree_mask_rejects_non_topological_parent_before_allocation(monkeypatch,
     def fail(*args, **kwargs):
         pytest.fail("invalid parent reached tensor allocation")
 
-    monkeypatch.setattr(torch, "ones", fail)
+    monkeypatch.setattr(torch, "full", fail)
+    monkeypatch.setattr(torch, "tensor", fail)
     with pytest.raises(ValueError, match="parents"):
         tree_mask(parent, 3)
 
@@ -111,3 +132,24 @@ def test_tree_forward_preserves_pending_causality_and_branch_isolation(tiny_targ
         list(range(base, base + len(pending))) + [base + len(pending) + depth for depth in depths]
     ]
     assert state.seq_len == base
+
+
+@pytest.mark.parametrize("prefix,pending,parents", [(23, [11, 13, 17], [-1, 0, 0, 2, -1]), (1008, [11], [-1] * 15)])
+def test_tree_forward_avoids_boolean_prefix(tiny_target, monkeypatch, prefix, pending, parents):
+    state, _ = tiny_target.prefill([5] * prefix)
+    rows = len(pending) + len(parents)
+    shape = (rows, prefix + rows)
+    boolean_prefixes = []
+
+    class TrackMasks(TorchFunctionMode):
+        def __torch_function__(self, func, types, args=(), kwargs=None):
+            result = func(*args, **(kwargs or {}))
+            if isinstance(result, torch.Tensor) and result.dtype == torch.bool and result.shape[-2:] == shape:
+                boolean_prefixes.append(func.__name__)
+            return result
+
+    monkeypatch.setattr(tiny_target, "_run_model", lambda state, **inputs: inputs["attention_mask"])
+    with TrackMasks():
+        mask = tiny_target.forward_tree(state, pending, [19] * len(parents), parents)
+    assert mask.shape == (1, 1, *shape) and mask.dtype == tiny_target.dtype
+    assert not boolean_prefixes

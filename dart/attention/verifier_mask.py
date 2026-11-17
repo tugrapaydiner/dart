@@ -25,25 +25,35 @@ def linear_block_mask(prefix_len: int, block_len: int, device: str = "cpu") -> T
     return k_pos <= q_pos
 
 
-def tree_mask(parent: list[int], prefix_len: int, device: str = "cpu") -> Tensor:
-    """Boolean attention mask for tree-structured drafts.
+def tree_mask(
+    parent: list[int], prefix_len: int, device: str = "cpu", *, dtype: torch.dtype = torch.bool,
+) -> Tensor:
+    """Attention mask for tree-structured drafts.
 
     ``parent[i]`` is the in-tree parent index of packed draft token i
     (-1 = attaches directly to the committed prefix).  Token i may attend
     to the full prefix and to its ancestor chain (and itself).
-    Parents must precede their children.
+    Parents must precede their children. By default, True marks visible
+    positions. A floating dtype uses zero for visible positions and the
+    dtype's minimum for blocked positions.
     """
     if type(prefix_len) is not int or prefix_len < 0:
         raise ValueError("prefix_len must be a nonnegative integer")
+    if dtype == torch.bool:
+        visible, blocked = True, False
+    elif isinstance(dtype, torch.dtype) and dtype.is_floating_point:
+        visible, blocked = 0.0, torch.finfo(dtype).min
+    else:
+        raise ValueError("tree mask dtype must be boolean or floating point")
     n = len(parent)
-    rows: list[list[bool]] = []
+    rows = []
     for i, p in enumerate(parent):
         if type(p) is not int or not -1 <= p < i:
             raise ValueError("tree parents must be -1 or a preceding index")
-        row = [False] * n if p < 0 else rows[p].copy()
-        row[i] = True
+        row = [blocked] * n if p < 0 else rows[p].copy()
+        row[i] = visible
         rows.append(row)
-    allow = torch.ones(n, prefix_len + n, dtype=torch.bool, device=device)
+    mask = torch.full((n, prefix_len + n), visible, dtype=dtype, device=device)
     if n > 1:
-        allow[:, prefix_len:] = torch.tensor(rows, dtype=torch.bool, device=device)  # One write for all ancestors.
-    return allow
+        mask[:, prefix_len:] = torch.tensor(rows, dtype=dtype, device=device)
+    return mask

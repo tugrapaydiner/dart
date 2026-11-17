@@ -294,12 +294,7 @@ class TargetModel:
         mask_parents = [i - 1 for i in range(p_len)] + [
             p_len - 1 if p < 0 else p_len + p for p in parent
         ]  # The pending block is the common ancestor chain.
-        allow = tree_mask(mask_parents, base_len, device=self.device)
-
-        mask = torch.zeros(
-            (1, 1, q_len, kv_len), dtype=self.dtype, device=self.device
-        )
-        mask.masked_fill_(~allow, torch.finfo(self.dtype).min)
+        mask = tree_mask(mask_parents, base_len, device=self.device, dtype=self.dtype).view(1, 1, q_len, kv_len)
 
         positions = list(range(base_len, base_len + p_len)) + [
             base_len + p_len + d for d in depths
