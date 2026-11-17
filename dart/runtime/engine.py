@@ -121,7 +121,7 @@ class DartEngine:
             self._closed = True
         with ExitStack() as stack:
             if self._owns_drafters:
-                for drafter in {id(d): d for d in self._all_drafters()}.values():
+                for drafter in self._all_drafters():
                     close = getattr(drafter, "close", None)
                     if close is not None:
                         stack.callback(close)
@@ -150,7 +150,9 @@ class DartEngine:
         return engine_from_yaml(path)
 
     def _all_drafters(self) -> list[Drafter]:
-        return list(self.lanes.values()) if self.lanes is not None else [self.drafter]
+        if self.lanes is None:
+            return [self.drafter]
+        return list({id(d): d for d in self.lanes.values()}.values())  # Lane aliases share one lifecycle.
 
     def _synchronize_round(self) -> None:
         if torch.device(self.target.device).type == "cuda":
@@ -229,7 +231,7 @@ class DartEngine:
     def _seed_drafters(self, seed: int) -> None:
         """Give each drafter its own stream derived from the request seed."""
         seeds = torch.Generator().manual_seed(seed)
-        for drafter in {id(d): d for d in self._all_drafters()}.values():
+        for drafter in self._all_drafters():
             drafter_seed = int(torch.randint(2**62, (), generator=seeds))  # Drawn for every lane so seeds stay stable.
             seed_request = getattr(drafter, "seed_request", None)
             if seed_request is not None:
@@ -410,7 +412,7 @@ class DartEngine:
             target.validate_prompt(prompt)
             return self._output(config, metrics, run_id, t_start, target, [], [])
         cleanup.callback(setattr, target, "last_hidden_block", None)
-        for drafter in {id(d): d for d in self._all_drafters()}.values():
+        for drafter in self._all_drafters():
             finish = getattr(drafter, "finish_request", None)
             if finish is not None:
                 cleanup.callback(finish)
