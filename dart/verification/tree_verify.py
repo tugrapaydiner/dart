@@ -34,6 +34,7 @@ the suite validates the tiny reference target).  Greedy/exact mode only.
 
 from __future__ import annotations
 
+from collections.abc import Iterable
 from dataclasses import dataclass, field
 
 import torch
@@ -94,12 +95,18 @@ class DraftTree:
         return cls(list(tokens), [i - 1 for i in range(len(tokens))])
 
     @classmethod
-    def from_branches(cls, branches: list[list[int]]) -> "DraftTree":
+    def from_branches(cls, branches: Iterable[Iterable[int]], *, max_nodes: int | None = None) -> "DraftTree":
         """Pack independent candidate continuations, sharing common prefixes.
 
         Branches that start with the same tokens share nodes (a trie), so
         proposing [[a, b], [a, c]] costs three packed nodes, not four.
+        With a node limit, stop reading branches as soon as the tree is full.
         """
+        if max_nodes is not None:
+            if type(max_nodes) is not int or max_nodes < 0:
+                raise ValueError("max_nodes must be a nonnegative integer")
+            if max_nodes == 0:
+                return cls([], [])
         tokens: list[int] = []
         parent: list[int] = []
         # trie: (parent_idx, token) -> node_idx
@@ -112,6 +119,8 @@ class DraftTree:
                 if idx is None:
                     tokens.append(int(tok))
                     parent.append(p)
+                    if len(tokens) == max_nodes:
+                        return cls(tokens, parent)
                     idx = len(tokens) - 1
                     seen[key] = idx
                 p = idx

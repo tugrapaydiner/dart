@@ -14,6 +14,8 @@ the single verify pass can accept whichever one the target picks.
 
 from __future__ import annotations
 
+from collections.abc import Iterator
+
 from dart.runtime.types import VerifyResult
 from dart.verification.tree_verify import DraftTree
 
@@ -48,9 +50,11 @@ class NGramDrafter:
 
     def _continuations(
         self, committed: list[int], max_tokens: int, limit: int
-    ) -> list[list[int]]:
+    ) -> Iterator[list[int]]:
         """Up to ``limit`` distinct continuations of the current suffix,
         longest n-gram first, most recent occurrence first within an n."""
+        if max_tokens <= 0:
+            return
         seq_len = len(committed)
         scan_from = 0 if self.max_scan is None else max(0, seq_len - self.max_scan)
         candidates = committed[scan_from:seq_len - 1]
@@ -70,23 +74,18 @@ class NGramDrafter:
                     cont = committed[start + n : start + n + max_tokens]
                     if cont and cont not in found:
                         found.append(cont)
+                        yield cont
                         if len(found) >= limit:
-                            return found
+                            return
             if found:
                 break  # branches from one n keep the recency semantics clean
-        return found
 
     def propose(self, committed: list[int], max_tokens: int) -> list[int]:
-        if max_tokens <= 0:
-            return []
-        found = self._continuations(committed, max_tokens, limit=1)
-        return found[0] if found else []
+        return next(self._continuations(committed, max_tokens, limit=1), [])
 
-    def propose_tree(self, committed: list[int], max_tokens: int) -> DraftTree:
-        if max_tokens <= 0:
-            return DraftTree([], [])
+    def propose_tree(self, committed: list[int], max_tokens: int, *, max_nodes: int | None = None) -> DraftTree:
         branches = self._continuations(committed, max_tokens, self.tree_width)
-        return DraftTree.from_branches(branches)
+        return DraftTree.from_branches(branches, max_nodes=max_nodes)
 
     def observe(self, result: VerifyResult) -> None:
         pass

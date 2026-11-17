@@ -1,6 +1,9 @@
 from __future__ import annotations
 
+from functools import wraps
+
 import pytest
+import torch
 
 from benchmarks.run_bench import build_hf_method
 from dart.drafters.ar_draft import ARDrafter
@@ -9,7 +12,58 @@ from dart.runtime.engine import DartEngine
 from dart.runtime.scheduler import SchedulerConfig
 from dart.runtime.time_scheduler import CostTableScheduler
 from dart.runtime.types import DecodeConfig, DecodeState, VerifyResult
+from dart.verification.tree_verify import DraftTree
 from tests.conftest import build_tiny_target
+
+
+@pytest.mark.parametrize("width", [3, 32])
+def test_ngram_builds_only_retained_nodes(width, monkeypatch):
+    target = build_tiny_target()
+    with torch.no_grad():
+        target.model.lm_head.weight.zero_()
+    suffix = [5, 6, 7, 0]
+    prompt = []
+    for index in range(width):
+        prompt.extend(suffix + [10 + index] + [50] * 7)
+    prompt.extend(suffix[:-1])  # The first greedy token completes the suffix.
+    config = DecodeConfig(max_new_tokens=10, draft_len=8, max_tree_nodes=15)
+    expected = build_hf_method(target, 10)(prompt).token_ids
+    sizes = []
+    initialize = DraftTree.__post_init__
+
+    def record(tree):
+        initialize(tree)
+        sizes.append(len(tree))
+
+    monkeypatch.setattr(DraftTree, "__post_init__", record)
+    with DartEngine(target, NGramDrafter(tree_width=width), verifier="tree") as engine:
+        output = engine.generate(prompt, config)
+    assert output.token_ids == expected
+    assert output.rounds[0].n_draft_proposed == 15
+    assert max(sizes) == 15
+
+
+def test_replaced_tree_hook_keeps_its_call_signature():
+    target = build_tiny_target()
+    target.eos_token_ids = frozenset()
+    drafter = NGramDrafter()
+    calls = []
+
+    def bounded(committed, depth, *, max_nodes):
+        calls.append(max_nodes)
+        drafter.propose_tree = legacy
+        return DraftTree.chain([])
+
+    @wraps(bounded)
+    def legacy(committed, depth):
+        calls.append(None)
+        return DraftTree.chain([])
+
+    drafter.propose_tree = bounded
+    with DartEngine(target, drafter, verifier="tree") as engine:
+        output = engine.generate([7, 8], DecodeConfig(max_new_tokens=5, draft_len=2, max_tree_nodes=3))
+    assert output.token_ids == target.greedy_generate([7, 8], 5)
+    assert calls == [3, None, None]
 
 
 @pytest.mark.parametrize("cap", [0, 1, 3])

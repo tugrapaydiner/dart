@@ -22,6 +22,7 @@ class Drafter(Protocol):
     The engine also uses these optional members when a drafter defines them:
 
       * ``propose_tree(committed, max_tokens)`` returns a DraftTree for tree rounds.
+        Declare a ``max_nodes`` keyword to limit the tree while building it.
       * ``propose_with_probs(committed, max_tokens)`` returns drafts and the rows
         they were sampled from, for exact sampling.
       * ``after_prefill()`` and ``after_verify(result)`` see rounds run by other lanes.

@@ -25,7 +25,7 @@ import time
 import uuid
 from contextlib import ExitStack, closing
 from functools import partial
-from inspect import unwrap
+from inspect import Parameter, signature, unwrap
 from typing import Callable, Optional
 
 import torch
@@ -60,6 +60,14 @@ _VERIFIERS: dict[str, VerifyFn] = {
     "reference": verify_greedy_reference,
     "tree": verify_tree_greedy,
 }
+
+
+def _accepts_node_limit(propose) -> bool:
+    try:
+        limit = signature(propose, follow_wrapped=False).parameters.get("max_nodes")
+    except (TypeError, ValueError):
+        return False
+    return limit is not None and limit.kind in (Parameter.KEYWORD_ONLY, Parameter.POSITIONAL_OR_KEYWORD)
 
 
 class DartEngine:
@@ -278,7 +286,7 @@ class DartEngine:
             fn = partial(fn, compute_entropy=False)
         return fn
 
-    def _round_drafts(self, drafter, committed, per_round, verifier, sampling, config):
+    def _round_drafts(self, drafter, committed, per_round, verifier, sampling, config, tree_limits=None):
         """Return (drafts, draft_probs) for one round, clamped to its budget."""
         if verifier != "tree":
             drafts, draft_probs = self._propose(drafter, committed, per_round, sampling)
@@ -293,7 +301,18 @@ class DartEngine:
         if per_round <= 0:
             drafts = DraftTree.chain([])
         elif hasattr(drafter, "propose_tree"):
-            drafts = drafter.propose_tree(committed, per_round)
+            propose = drafter.propose_tree
+            method = getattr(propose, "__func__", propose)
+            if tree_limits is None:
+                tree_limits = {}
+            cached = tree_limits.get(id(drafter))
+            if cached is None or cached[0] is not method:
+                cached = (method, _accepts_node_limit(propose))
+                tree_limits[id(drafter)] = cached
+            if cached[1]:
+                drafts = propose(committed, per_round, max_nodes=config.max_tree_nodes)
+            else:
+                drafts = propose(committed, per_round)
         else:
             drafts = DraftTree.chain(list(drafter.propose(committed, per_round))[:per_round])
         if not isinstance(drafts, DraftTree):
@@ -376,6 +395,7 @@ class DartEngine:
         scheduler_entropy = self.scheduler is not None and bool(getattr(self.scheduler, "requires_entropy", True))
         generator = None
         verify_fns: dict[tuple[str, bool], VerifyFn] = {}
+        tree_limits: dict[int, tuple[object, bool]] = {}
         if sampling:
             generator = torch.Generator(device=self.target.device)
             generator.manual_seed(config.seed if config.seed is not None else 0)
@@ -479,7 +499,9 @@ class DartEngine:
 
                 t0 = time.perf_counter()
                 per_round = min(draft_len, max_draft)
-                drafts, draft_probs = self._round_drafts(drafter, committed_seq, per_round, verifier, sampling, config)
+                drafts, draft_probs = self._round_drafts(
+                    drafter, committed_seq, per_round, verifier, sampling, config, tree_limits,
+                )
                 t1 = time.perf_counter()
 
                 skip_verify = (
