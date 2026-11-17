@@ -452,7 +452,7 @@ class DartEngine:
             # length in the scheduler (docs/design.md §10).  Seeded
             # from the prompt's last-token distribution.
             ent_ewma = 0.0
-            if needs_entropy and not sampling:
+            if needs_entropy and not sampling and not finished and len(generated) < config.max_new_tokens:
                 d0 = torch.softmax(logits.float(), dim=-1)
                 ent_ewma = float(-(d0 * d0.clamp_min(1e-12).log()).sum())
 

@@ -12,6 +12,8 @@ from dart.runtime.scheduler import HeuristicScheduler, SchedulerConfig
 from dart.runtime.time_scheduler import TimeScheduler
 from dart.runtime.types import DecodeConfig
 from dart.verification.block_verify import verify_block_greedy
+from dart.verification.differential import GenerationCase, hf_decoder
+from dart.verification.synthetic import _synthetic_models
 from dart.verification.tree_verify import verify_tree_greedy
 from tests.conftest import build_tiny_target, random_prompt
 
@@ -82,6 +84,55 @@ class RecordingDrafter:
 
     def observe(self, result):
         self.entropies.append(result.entropy)
+
+
+@pytest.mark.parametrize('verifier,mode', [('block', 'exact'), ('tree', 'exact'),
+                                         ('reference', 'exact'), ('block', 'approx')])
+@pytest.mark.parametrize('consumer', ['drafter', 'scheduler'])
+@pytest.mark.parametrize('terminal', ['budget', 'eos'])
+def test_terminal_requests_do_not_compute_entropy(verifier, mode, consumer, terminal):
+    target, reference = _synthetic_models(17)
+    target.eos_token_ids = frozenset()
+    reference.config.eos_token_id = reference.generation_config.eos_token_id = None
+    prompt = (5, 7, 9)
+    first = hf_decoder(reference)(GenerationCase('first', prompt, 1))[0]
+    budget = 1 if terminal == 'budget' else 8
+    if terminal == 'eos':
+        target.eos_token_ids = frozenset([first])
+        reference.config.eos_token_id = reference.generation_config.eos_token_id = first
+    expected = hf_decoder(reference)(GenerationCase('terminal', prompt, budget))
+    drafter = RecordingDrafter()
+    options = {'drafter': drafter}
+    if consumer == 'scheduler':
+        drafter.requires_entropy = False
+        scheduler = HeuristicScheduler(SchedulerConfig(available_lanes=[drafter.name]))
+        options = {'lanes': {drafter.name: drafter}, 'scheduler': scheduler}
+    with DartEngine(target, verifier=verifier, **options) as engine:
+        with patch.object(torch, 'softmax', side_effect=AssertionError('unused terminal entropy')):
+            actual = engine.generate(list(prompt), DecodeConfig(mode=mode, max_new_tokens=budget))
+    assert actual.token_ids == expected == [first]
+    assert actual.rounds == [] and drafter.entropies == []
+    assert target.last_hidden_block is None
+
+
+@pytest.mark.parametrize('terminal', ['budget', 'eos'])
+def test_terminal_sampling_still_computes_its_distribution(terminal):
+    target, _ = _synthetic_models(17)
+    target.eos_token_ids = frozenset()
+    prompt, seed, temperature = [5, 7, 9], 29, .7
+    _, logits = target.prefill(prompt)
+    probabilities = torch.softmax(logits / temperature, -1)
+    expected = int(torch.multinomial(probabilities, 1, generator=torch.Generator().manual_seed(seed)))
+    budget = 1 if terminal == 'budget' else 8
+    if terminal == 'eos':
+        target.eos_token_ids = frozenset([expected])
+    drafter = RecordingDrafter()
+    with DartEngine(target, drafter) as engine:
+        with patch.object(torch, 'softmax', wraps=torch.softmax) as softmax:
+            output = engine.generate(prompt, DecodeConfig(mode='exact_sampling', max_new_tokens=budget,
+                                                          temperature=temperature, seed=seed))
+    assert output.token_ids == [expected] and output.rounds == []
+    assert softmax.call_count == 1 and drafter.entropies == []
 
 
 @pytest.mark.parametrize("verifier", ["block", "tree"])
