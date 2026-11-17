@@ -46,8 +46,9 @@ def test_timed_policy_skips_unused_memory_query_without_changing_actions(policy,
                                 acceptance_ewma=dict(reference.acceptance_ewma), kv_transfer_ms=0.0,
                                 target_step_ms=0.0, max_draft_tokens=4, max_tree_nodes=15, default_verifier="block")
             expected = reference.choose_action(state)
-            drafter, length, verifier = engine._pick_lane(DecodeConfig(prompt_kind="code", max_tree_nodes=15),
-                                                         8, index, max_draft_tokens=4)
+            drafter, length, verifier, lane = engine._pick_lane(DecodeConfig(prompt_kind="code", max_tree_nodes=15),
+                                                               8, index, max_draft_tokens=4)
+            assert lane == expected.lane
             assert (drafter.name, length, verifier) == (expected.lane, expected.draft_len, expected.verifier or "block")
             result = VerifyResult([7, 8], 2, 1, False, False)
             for item in (scheduler, reference):

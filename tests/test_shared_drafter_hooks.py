@@ -92,7 +92,7 @@ def test_shared_lanes_receive_one_hook_per_request_and_round(models, verifier, b
             for drafter, seed in zip((first, second), expected_seeds):
                 calls = [('seed', seed), ('prefill', None)]
                 for index, step in enumerate(result.rounds):
-                    kind = 'observe' if step.lane == drafter.name else 'feedback'
+                    kind = 'observe' if lanes.get(step.lane) is drafter else 'feedback'
                     calls.append((kind, (expected[index + 1],)))
                 assert drafter.calls == calls + [('finish', None)]
     assert first.calls[-1] == second.calls[-1] == ('close', None)

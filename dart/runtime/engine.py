@@ -185,15 +185,15 @@ class DartEngine:
         entropy_ewma: float = 0.0,
         max_draft_tokens: int | None = None,
     ):
-        """Return (drafter, per-round draft budget, verifier name) for this round."""
+        """Return (drafter, draft budget, verifier, lane key) for this round."""
         allowed = set(config.allowed_lanes) if config.allowed_lanes is not None else None
         if self.scheduler is None:
             d = self.drafter
             # Honor allowed_lanes: a disallowed single drafter -> target-only step.
             if allowed is not None and d.name not in allowed and d.name != "target_only":
-                return self._null, 0, self.verifier_name
+                return self._null, 0, self.verifier_name, self._null.name
             n = config.canvas_len if getattr(d, "uses_canvas", False) else config.draft_len
-            return d, n, self.verifier_name
+            return d, n, self.verifier_name, d.name
         free_gb = float("inf")
         if type(self.scheduler).__dict__.get("requires_free_memory") is not False:  # Subclasses opt out themselves.
             free_gb = self._gpu_free_gb(self.target.device)
@@ -215,7 +215,8 @@ class DartEngine:
         action = self.scheduler.choose_action(s, allowed=allowed)
         d = self.lanes.get(action.lane, self._null)
         n = action.canvas_len if action.canvas_len > 0 else action.draft_len
-        return d, n, action.verifier or self.verifier_name
+        lane = action.lane if action.lane in self.lanes else self._null.name  # Report actual fallbacks.
+        return d, n, action.verifier or self.verifier_name, lane
 
     def _check_round_verifier(self, verifier: str, config: DecodeConfig) -> None:
         """Reject a round's verifier before it drafts or touches request state."""
@@ -470,7 +471,7 @@ class DartEngine:
                     max_draft = min(max_draft, max_block - len(pending_block))
                 max_draft = max(0, max_draft)
                 committed_seq = prompt + generated
-                drafter, draft_len, verifier = self._pick_lane(
+                drafter, draft_len, verifier, lane = self._pick_lane(
                     config, len(prompt), len(generated), entropy_ewma=ent_ewma, max_draft_tokens=max_draft,
                 )
                 self._check_round_verifier(verifier, config)
@@ -500,7 +501,7 @@ class DartEngine:
                     pending_block.extend(kept)
                     unverified_tokens += len(kept)
                     rec = RoundRecord(
-                        round_idx=round_idx, lane=drafter.name,
+                        round_idx=round_idx, lane=lane,
                         n_draft_proposed=0, n_draft_accepted=0,
                         n_committed=len(kept),
                         draft_ms=(t1 - t0) * 1000.0, verify_ms=0.0, verifier="none",
@@ -534,7 +535,7 @@ class DartEngine:
                             other.after_verify(result)
                     if self.scheduler is not None and not timed_scheduler:
                         self.scheduler.observe(
-                            drafter.name, result,
+                            lane, result,
                             draft_ms=(t1 - t0) * 1000.0,
                             verify_ms=(t2 - t1) * 1000.0,
                             kv_gb=self._drafter_kv_gb(drafter),
@@ -545,7 +546,7 @@ class DartEngine:
                     ent_ewma = 0.7 * ent_ewma + 0.3 * result.entropy
                     finished = result.finished
                     rec = RoundRecord(
-                        round_idx=round_idx, lane=drafter.name,
+                        round_idx=round_idx, lane=lane,
                         n_draft_proposed=result.n_draft_proposed,
                         n_draft_accepted=result.n_draft_accepted,
                         n_committed=len(result.committed),
@@ -570,7 +571,7 @@ class DartEngine:
                     kv_gb = self._drafter_kv_gb(drafter)
                     self._synchronize_round()
                     self.scheduler.observe(
-                        drafter.name, result,
+                        lane, result,
                         draft_ms=rec.draft_ms, verify_ms=rec.verify_ms, kv_gb=kv_gb,
                         round_ms=(time.perf_counter() - round_start) * 1000.0,
                     )  # Includes loop work; the feedback update itself is outside the timer.
