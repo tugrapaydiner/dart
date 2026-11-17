@@ -25,12 +25,18 @@ def profile_methods(
     engines = engines or {}
     if reference not in methods or not prompts or type(repeats) is not int or repeats < 1:
         raise ValueError("profiling needs a reference, prompts, and repeats >= 1")
-    if any(engine.target is not target or engine.verifier_name != "block" for engine in engines.values()):
-        raise ValueError("profiling requires block engines sharing the target")
+    if any(engine.target is not target for engine in engines.values()):
+        raise ValueError("profiling requires engines sharing the target")
 
     def stamp():
         synchronize(target.device)
         return time.perf_counter()
+
+    def timed_resolver(resolve, timer):
+        @wraps(resolve)
+        def wrapped(*args, **kwargs):
+            return timer(resolve(*args, **kwargs), "verify_ms")
+        return wrapped
 
     expected = [list(tokens(methods[reference](prompt))) for prompt in prompts]
     samples = []
@@ -63,8 +69,8 @@ def profile_methods(
                     stack.callback(target.model.register_forward_hook(after_forward).remove)
                     engine = engines.get(name)
                     if engine is not None:
-                        stack.enter_context(patch.object(engine, "_propose", timed(engine._propose, "draft_ms")))
-                        stack.enter_context(patch.object(engine, "verify", timed(engine.verify, "verify_ms")))
+                        stack.enter_context(patch.object(engine, "_round_drafts", timed(engine._round_drafts, "draft_ms")))
+                        stack.enter_context(patch.object(engine, "_resolve_verifier", timed_resolver(engine._resolve_verifier, timed)))
                     start = stamp()
                     output = method(prompt)
                     end = stamp()
@@ -95,6 +101,7 @@ def profile_methods(
         "scope": "separate diagnostic requests with synchronized phase barriers; excluded from headline latency",
         "prefill_scope": "first target model forward, including cache construction inside the model",
         "decode_scope": "everything after that forward, including first-token selection and output decoding",
-        "draft_verify_scope": "engine proposal and verification calls; subsets of decode time, null for baselines without an engine",
+        "draft_verify_scope": "engine draft construction and verification calls; subsets of decode time, null for baselines without an engine",
+        "policy_scope": "phase barriers can change adaptive decisions; these requests are separate from headline timing",
         "repeats": repeats, "samples": samples, "summary": summary,
     }

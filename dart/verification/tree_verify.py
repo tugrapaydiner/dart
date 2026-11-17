@@ -34,6 +34,7 @@ the suite validates the tiny reference target).  Greedy/exact mode only.
 
 from __future__ import annotations
 
+from collections.abc import Iterable
 from dataclasses import dataclass, field
 
 import torch
@@ -82,18 +83,30 @@ class DraftTree:
             [-1 if self.parent[i] < 0 else remap[self.parent[i]] for i in kept],
         )
 
+    def limit(self, max_nodes: int) -> "DraftTree":
+        """Keep the first ``max_nodes`` packed nodes; parents precede children."""
+        if len(self.tokens) <= max_nodes:
+            return self
+        return DraftTree(self.tokens[:max_nodes], self.parent[:max_nodes])
+
     @classmethod
     def chain(cls, tokens: list[int]) -> "DraftTree":
         """A linear block as a degenerate tree (parent = previous node)."""
         return cls(list(tokens), [i - 1 for i in range(len(tokens))])
 
     @classmethod
-    def from_branches(cls, branches: list[list[int]]) -> "DraftTree":
+    def from_branches(cls, branches: Iterable[Iterable[int]], *, max_nodes: int | None = None) -> "DraftTree":
         """Pack independent candidate continuations, sharing common prefixes.
 
         Branches that start with the same tokens share nodes (a trie), so
         proposing [[a, b], [a, c]] costs three packed nodes, not four.
+        With a node limit, stop reading branches as soon as the tree is full.
         """
+        if max_nodes is not None:
+            if type(max_nodes) is not int or max_nodes < 0:
+                raise ValueError("max_nodes must be a nonnegative integer")
+            if max_nodes == 0:
+                return cls([], [])
         tokens: list[int] = []
         parent: list[int] = []
         # trie: (parent_idx, token) -> node_idx
@@ -106,10 +119,40 @@ class DraftTree:
                 if idx is None:
                     tokens.append(int(tok))
                     parent.append(p)
+                    if len(tokens) == max_nodes:
+                        return cls(tokens, parent)
                     idx = len(tokens) - 1
                     seen[key] = idx
                 p = idx
         return cls(tokens, parent)
+
+
+def _live_tree_rows(target, tree: DraftTree, context_len: int):
+    eos = target.eos_token_ids
+    if not eos or not any(type(token) is int and token in eos for token in tree.tokens):
+        return None
+    config = getattr(getattr(target, "model", None), "config", None)
+    vocab = getattr(config, "vocab_size", None)
+    if type(vocab) is not int or len(tree.parent) != len(tree.tokens) or any(
+        type(token) is not int or not 0 <= token < vocab for token in tree.tokens
+    ):
+        return None  # Keep normal admission for unknown or invalid inputs.
+    depths = []
+    for index, parent in enumerate(tree.parent):
+        if type(parent) is not int or not -1 <= parent < index:
+            return None
+        depths.append(0 if parent < 0 else depths[parent] + 1)
+    limit = getattr(config, "max_position_embeddings", None)
+    if limit is not None and (type(limit) is not int or context_len + max(depths) + 1 > limit):
+        return None
+    tokens, parents, slots = [], [], {}
+    for index, (token, parent) in enumerate(zip(tree.tokens, tree.parent)):
+        if token in eos or (parent >= 0 and parent not in slots):
+            continue  # EOS and its descendants never supply a decision row.
+        slots[index] = len(tokens)
+        tokens.append(token)
+        parents.append(-1 if parent < 0 else slots[parent])
+    return tokens, parents, slots
 
 
 @torch.inference_mode()
@@ -118,10 +161,14 @@ def verify_tree_greedy(
     state: TargetState,
     pending: int | list[int],
     draft_tree: "DraftTree | list[int]",
+    *,
+    compute_entropy: bool = True,
 ) -> VerifyResult:
     """Greedy tree verification.  Same state contract as the block verifier:
     on entry the cache covers everything before the pending block; on exit
-    it covers all committed tokens except the new pending one."""
+    it covers all committed tokens except the new pending one.
+    Set compute_entropy=False when no consumer needs that signal.
+    """
     if not isinstance(draft_tree, DraftTree):
         draft_tree = DraftTree.chain(list(draft_tree))
     pending_block = [pending] if isinstance(pending, int) else list(pending)
@@ -131,15 +178,17 @@ def verify_tree_greedy(
     n = len(draft_tree)
     base_len = state.seq_len
 
-    if n == 0:
-        # No drafts: identical to a plain target step via the block path.
+    if n == 0 or (len(draft_tree.parent) == n and all(
+        type(parent) is int and parent == index - 1 for index, parent in enumerate(draft_tree.parent)
+    )):
+        # A chain needs no tree mask or cache gather.
         from dart.verification.block_verify import verify_block_greedy
 
-        return verify_block_greedy(target, state, pending_block, [])
+        return verify_block_greedy(target, state, pending_block, draft_tree.tokens, compute_entropy=compute_entropy)
 
-    logits = target.forward_tree(
-        state, pending_block, draft_tree.tokens, draft_tree.parent
-    )
+    live = _live_tree_rows(target, draft_tree, base_len + p_len)
+    tokens, parents, slots = (draft_tree.tokens, draft_tree.parent, None) if live is None else live
+    logits = target.forward_tree(state, pending_block, tokens, parents)
     preds = torch.argmax(logits, dim=-1).tolist()
 
     # Divergence audit of unverified pending tokens (approx-mode metadata;
@@ -173,7 +222,7 @@ def verify_tree_greedy(
             accepted_eos = True
             break
         cur_parent = nxt
-        cur_row = p_len + nxt
+        cur_row = p_len + (nxt if slots is None else slots[nxt])
 
     m = len(path)
     if accepted_eos:
@@ -183,7 +232,7 @@ def verify_tree_greedy(
         committed = [draft_tree.tokens[i] for i in path] + [int(correction)]
         finished = committed[-1] in target.eos_token_ids
 
-    if accepted_eos:
+    if accepted_eos or not compute_entropy:
         entropy = 0.0
     else:
         dist = torch.softmax(logits[cur_row].float(), dim=-1)
@@ -192,7 +241,10 @@ def verify_tree_greedy(
     # Keep the accepted path's KV entries, drop every other packed node,
     # then align with the block verifier's postcondition (the final
     # committed token is the new pending one and is never in cache).
-    target.gather_tree_tail(state, base_len + p_len, path)
+    kept_path = path[:-1] if accepted_eos else path  # EOS stays pending.
+    if slots is not None:
+        kept_path = [slots[index] for index in kept_path]
+    target.gather_tree_tail(state, base_len + p_len, kept_path)
     target.crop(state, base_len + p_len - 1 + len(committed))
 
     return VerifyResult(

@@ -39,15 +39,21 @@ def wall_timer() -> Iterator[list[float]]:
         out[0] = (time.perf_counter() - start) * 1000.0
 
 
-def gpu_memory_gb() -> float:
+def gpu_memory_gb(device: str | torch.device | None = None) -> float:
+    """Peak process allocation on one CUDA device; zero for other devices."""
+    if device is not None and torch.device(device).type != "cuda":
+        return 0.0
     if torch.cuda.is_available():
-        return torch.cuda.max_memory_allocated() / 1e9
+        return torch.cuda.max_memory_allocated(device) / 1e9
     return 0.0
 
 
-def reset_gpu_memory_stats() -> None:
+def reset_gpu_memory_stats(device: str | torch.device | None = None) -> None:
+    """Reset one CUDA device's peak; None selects the current CUDA device."""
+    if device is not None and torch.device(device).type != "cuda":
+        return
     if torch.cuda.is_available():
-        torch.cuda.reset_peak_memory_stats()
+        torch.cuda.reset_peak_memory_stats(device)
 
 
 @dataclass
@@ -57,6 +63,7 @@ class DecodeMetrics:
     mode: str = "exact"
     target_model: str = ""
     lanes_used: set[str] = field(default_factory=set)
+    verifiers_used: set[str] = field(default_factory=set)
     tokens_generated: int = 0
     draft_tokens_proposed: int = 0
     draft_tokens_accepted: int = 0
@@ -70,6 +77,8 @@ class DecodeMetrics:
     def record_round(self, rec: RoundRecord) -> None:
         self.rounds += 1
         self.lanes_used.add(rec.lane)
+        if rec.verifier != "none":
+            self.verifiers_used.add(rec.verifier)
         self.tokens_generated += rec.n_committed
         self.draft_tokens_proposed += rec.n_draft_proposed
         self.draft_tokens_accepted += rec.n_draft_accepted
@@ -95,6 +104,7 @@ class DecodeMetrics:
             "mode": self.mode,
             "target_model": self.target_model,
             "lanes_used": sorted(self.lanes_used),
+            "verifiers_used": sorted(self.verifiers_used),
             "tokens_generated": self.tokens_generated,
             "draft_tokens_proposed": self.draft_tokens_proposed,
             "draft_tokens_accepted": self.draft_tokens_accepted,

@@ -63,3 +63,58 @@ def test_lookup_honors_scan_boundary_and_reused_mutable_inputs():
     sequence.append(3)
     assert drafter.propose(sequence, 2) == []
     assert drafter.propose([1, 2, 7, 1, 2], 2) == [7, 1]
+
+
+@pytest.mark.parametrize("cap", [0, 1, 3, 5, 8, 15, 25])
+def test_bounded_lookup_keeps_the_first_packed_nodes(cap):
+    rng = random.Random(37)
+    drafter = NGramDrafter(tree_width=12)
+    for sequence in ([rng.randrange(4) for _ in range(96)] for _ in range(20)):
+        for depth in (0, 1, 4, 8):
+            branches = reference_branches(sequence, depth, 1, 4, None, 12)
+            expected = DraftTree.from_branches(branches).limit(cap)
+            assert drafter.propose_tree(sequence, depth, max_nodes=cap) == expected
+
+
+def test_bounded_packing_stops_at_the_last_retained_token():
+    def final_branch():
+        yield from (1, 4, 5)
+        pytest.fail("read past the last retained token")
+
+    def branches():
+        yield [1, 2, 3]
+        yield [1, 2, 3]
+        yield final_branch()
+        pytest.fail("read past the last retained branch")
+
+    assert DraftTree.from_branches(branches(), max_nodes=5) == DraftTree([1, 2, 3, 4, 5], [-1, 0, 1, 0, 3])
+    assert DraftTree.from_branches(branches(), max_nodes=0) == DraftTree([], [])
+
+
+def test_bounded_lookup_stops_searching_older_matches():
+    reads = []
+
+    class History(list):
+        def __getitem__(self, key):
+            if isinstance(key, slice) and key.start is not None and key.stop == key.start + 8:
+                reads.append(key.start)
+            return super().__getitem__(key)
+
+    sequence = History()
+    suffix = [1, 2, 3, 4]
+    for token in range(10, 42):
+        sequence.extend(suffix + [token] * 8)
+    sequence.extend(suffix)
+    drafter = NGramDrafter(tree_width=32)
+    assert len(drafter.propose_tree(sequence, 8, max_nodes=15)) == 15
+    assert reads == [len(sequence) - 12, len(sequence) - 24]
+
+
+@pytest.mark.parametrize("cap", [-1, True, 1.5])
+def test_bounded_packing_rejects_invalid_caps_before_lookup(cap):
+    def branches():
+        pytest.fail("read a branch before validating the cap")
+        yield []
+
+    with pytest.raises(ValueError, match="max_nodes"):
+        DraftTree.from_branches(branches(), max_nodes=cap)

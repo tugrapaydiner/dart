@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import threading
 import time
+import weakref
+from contextlib import ExitStack
 from importlib.metadata import version
 
 import torch
@@ -13,15 +15,55 @@ from transformers.cache_utils import DynamicCache
 
 from dart.models.target import TargetModel, TargetState
 
+_LAYER_SETTINGS = frozenset({"variance_epsilon", "normalized_shape", "scaling", "attention_scaling",
+                             "attention_dropout", "head_dim", "num_key_value_groups", "rope_type"})
+
+
+def _setting_value(value):
+    if type(value) in (bool, int, float, str, type(None)):
+        return type(value), value
+    if type(value) in (tuple, list) and all(type(item) is int for item in value):
+        return type(value), tuple(value)
+    return type(value), id(value)  # Do not compare tensor settings on the device.
+
+
+def _same_setting(value, saved):
+    kind, expected = saved
+    if type(value) is not kind:
+        return False
+    if kind in (bool, int, float, str, type(None)):
+        return value == expected
+    if kind in (tuple, list):
+        return all(type(item) is int for item in value) and tuple(value) == expected
+    return id(value) == expected
+
+
+class _CacheStorage:
+    def __init__(self, tensor):
+        self.tensor = tensor
+        self.exposed = True
+
 
 class ReplayCache(DynamicCache):
-    """A request-owned KV snapshot; only its valid prefix can be read."""
+    """A request-owned KV snapshot; only its valid prefix can be read.
+
+    Reading storage keeps later calls on the copying path so mutable views work.
+    """
 
     def __init__(self, storage: torch.Tensor, length: int, owner: object):
         super().__init__()
-        self.storage = storage
+        self._buffer = _CacheStorage(storage)
         self.length = length
         self.owner = owner
+
+    @property
+    def storage(self):
+        self._buffer.exposed = True  # A caller may keep and edit this view later.
+        return self._buffer.tensor
+
+    @storage.setter
+    def storage(self, value):
+        self._buffer = _CacheStorage(value)
 
     @classmethod
     def from_dynamic(cls, cache: DynamicCache, capacity: int, owner: object):
@@ -42,7 +84,9 @@ class ReplayCache(DynamicCache):
         for index, layer in enumerate(cache.layers):
             storage[index, 0, ..., :length, :].copy_(layer.keys)
             storage[index, 1, ..., :length, :].copy_(layer.values)
-        return cls(storage, length, owner)
+        result = cls(storage, length, owner)
+        result._buffer.exposed = False
+        return result
 
     @property
     def is_compileable(self):
@@ -85,8 +129,46 @@ class _Workspace:
         return a, b
 
 
+class _CaptureStreamPool:
+    def __init__(self, device):
+        self.device = device
+        self.available = []
+        self.active = set()
+        self.lock = threading.Lock()
+
+    def acquire(self):
+        with self.lock:
+            stream = self.available.pop() if self.available else torch.cuda.Stream(device=self.device)
+            if stream.cuda_stream in self.active:
+                raise RuntimeError("capture stream is already in use")
+            self.active.add(stream.cuda_stream)
+            return stream
+
+    def release(self, stream):
+        with self.lock:
+            self.active.remove(stream.cuda_stream)
+            if len(self.available) < 16:
+                self.available.append(stream)
+
+
+_capture_stream_pools = threading.local()
+
+
+def _capture_pool(device):
+    if not hasattr(_capture_stream_pools, "devices"):
+        _capture_stream_pools.devices = {}
+    device = torch.device(device)
+    if device not in _capture_stream_pools.devices:
+        _capture_stream_pools.devices[device] = _CaptureStreamPool(device)
+    return _capture_stream_pools.devices[device]
+
+
 class _ReplayBlock:
-    def __init__(self, model, workspace, length, capture):
+    def __init__(self, model, workspace, length, capture, *, capture_predictions=False):
+        self._closed = False
+        self._capture_stream = self._capture_pool = None
+        self._replay_stream = None
+        self.graph = None
         self.forward_model = model.forward
         self.workspace = workspace
         device = workspace.storage.device
@@ -94,87 +176,183 @@ class _ReplayBlock:
         self.start = torch.zeros((), dtype=torch.long, device=device)
         self.steps = torch.arange(length, device=device)
         self.columns = torch.arange(workspace.storage.shape[-2], device=device)
-        self.graph = None
         self.output = None
+        self.capture_predictions = capture_predictions
+        self.predictions = None
         if capture:
-            stream = torch.cuda.Stream(device=device)
-            stream.wait_stream(torch.cuda.current_stream(device))
-            with torch.cuda.stream(stream):
-                for _ in range(3):
-                    self.forward()
-            torch.cuda.current_stream(device).wait_stream(stream)
-            torch.cuda.synchronize(device)
-            self.graph = torch.cuda.CUDAGraph()
-            with torch.cuda.device(device), torch.cuda.graph(self.graph, stream=stream):
-                self.output = self.forward()
-            torch.cuda.synchronize(device)
+            self._replay_stream = torch.cuda.current_stream(device)
+            self._capture_pool = _capture_pool(device)
+            self._capture_stream = self._capture_pool.acquire()
+            try:
+                stream = self._capture_stream
+                stream.wait_stream(self._replay_stream)
+                with torch.cuda.stream(stream):
+                    for _ in range(3):
+                        self.forward()
+                torch.cuda.current_stream(device).wait_stream(stream)
+                torch.cuda.synchronize(device)
+                self.graph = torch.cuda.CUDAGraph()
+                with torch.cuda.device(device), torch.cuda.graph(self.graph, stream=stream):
+                    self.output = self.forward()
+                torch.cuda.synchronize(device)
+            except BaseException:
+                self.close()
+                raise
 
     def forward(self):
         positions = self.steps + self.start
         self.workspace.positions = positions
         mask = self.workspace.storage.new_zeros((1, 1, self.ids.shape[1], self.columns.numel()))
         mask.masked_fill_(self.columns[None, :] > positions[:, None], torch.finfo(mask.dtype).min)
-        return self.forward_model(input_ids=self.ids, position_ids=positions[None], attention_mask=mask,
-                                  past_key_values=self.workspace, use_cache=True, output_hidden_states=False).logits
+        logits = self.forward_model(input_ids=self.ids, position_ids=positions[None], attention_mask=mask,
+                                    past_key_values=self.workspace, use_cache=True, output_hidden_states=False).logits
+        if self.capture_predictions:
+            self.predictions = logits.argmax(dim=-1)
+        return logits
 
     def run(self):
+        if self._closed:
+            raise RuntimeError("replay block is closed")
         if self.graph is None:
             return self.forward()
         self.graph.replay()
         return self.output
 
+    def close(self):
+        self._closed = True
+        if self._replay_stream is not None:
+            self._replay_stream.synchronize()
+        if self._capture_stream is not None:
+            self._capture_stream.synchronize()
+        if self.graph is not None:
+            self.graph.reset()  # Destroy graph references before reusing its stream.
+            self.graph = None
+        if self._capture_stream is not None:
+            self._capture_pool.release(self._capture_stream)
+            self._capture_stream = self._capture_pool = None
+        self._replay_stream = None
+        self.output = self.predictions = self.workspace = self.forward_model = None
+        self.ids = self.start = self.steps = self.columns = None
+
+    def __del__(self):
+        try:
+            self.close()
+        except BaseException:
+            pass  # Failed cleanup must not recycle the stream.
+
+
+class _GreedyBlock(_ReplayBlock):
+    def __init__(self, model, workspace, count, capture):
+        self.count = count
+        super().__init__(model, workspace, 1, capture, capture_predictions=True)
+
+    def forward(self):
+        tokens, predictions = self.ids, []
+        for step in range(self.count):
+            positions = (self.start + step).reshape(1)
+            self.workspace.positions = positions
+            mask = self.workspace.storage.new_zeros((1, 1, 1, self.columns.numel()))
+            mask.masked_fill_(self.columns > positions, torch.finfo(mask.dtype).min)
+            logits = self.forward_model(input_ids=tokens, position_ids=positions[None], attention_mask=mask,
+                                        past_key_values=self.workspace, use_cache=True, output_hidden_states=False).logits
+            tokens = logits.argmax(dim=-1)
+            predictions.append(tokens)
+        return torch.cat(predictions, dim=1)
+
+
+def _validate_greedy_chunks(sizes, capture_predictions):
+    if (not isinstance(sizes, tuple) or any(type(n) is not int or not 2 <= n <= 8 for n in sizes)
+            or len(set(sizes)) != len(sizes)):
+        raise ValueError("greedy chunk sizes must be distinct integers from 2 to 8")
+    if sizes and not capture_predictions:
+        raise ValueError("greedy chunks require capture_predictions=True")
+
 
 class CudaGraphTarget(TargetModel):
     """Opt-in FP32 Llama replay for transformers >= 5.16.1.
 
-    Construction includes warmup and capture; prepare with no other CUDA work
+    Graph construction includes warmup and capture; prepare with no other CUDA work
     running in the process. Calls use the preparation stream and serialize
     workspace access. Each state and returned logit tensor owns its data.
-    ``replay=False`` runs the same static-cache path without graph capture.
+    ``replay=False`` runs the static-cache path on CPU or CUDA without graph capture.
+    ``capture_predictions=True`` also prepares argmax for entropy-free greedy calls.
+    ``greedy_chunk_sizes=(2, 4)`` optionally groups greedy steps before returning IDs.
+    Chunks keep the same model work; EOS can leave unused steps in the last chunk.
     """
 
     uses_replay_cache = True
 
     @torch.inference_mode()
-    def __init__(self, target: TargetModel, *, max_block_tokens=5, capacity=None, replay=True):
+    def __init__(self, target: TargetModel, *, max_block_tokens=5, capacity=None, replay=True,
+                 capture_predictions=False, greedy_chunk_sizes=()):
         if type(replay) is not bool:
             raise ValueError("replay must be a boolean")
-        if torch.device(target.device).type != "cuda" or target.dtype != torch.float32:
+        if type(capture_predictions) is not bool:
+            raise ValueError("capture_predictions must be a boolean")
+        _validate_greedy_chunks(greedy_chunk_sizes, capture_predictions)
+        device = torch.device(target.device).type
+        if replay and (device != "cuda" or target.dtype != torch.float32):
             raise ValueError("CUDA replay requires a float32 CUDA target")
+        if device not in {"cpu", "cuda"} or target.dtype != torch.float32:
+            raise ValueError("static execution requires a float32 CPU or CUDA target")
         if not isinstance(target.model, LlamaForCausalLM) or Version(version("transformers")) < Version("5.16.1"):
-            raise ValueError("CUDA replay requires LlamaForCausalLM and transformers >= 5.16.1")
+            raise ValueError("static cache execution requires LlamaForCausalLM and transformers >= 5.16.1")
         config = target.model.config
         rope = getattr(config, "rope_parameters", None) or getattr(config, "rope_scaling", None) or {}
         if target.record_hidden or config._attn_implementation != "eager" or rope.get("rope_type", "default") != "default":
-            raise ValueError("CUDA replay requires eager attention, default RoPE and no hidden-state recording")
+            raise ValueError("static cache execution requires eager attention, default RoPE and no hidden-state recording")
         capacity = config.max_position_embeddings if capacity is None else capacity
         if type(capacity) is not int or not 1 <= capacity <= min(4096, config.max_position_embeddings):
             raise ValueError("replay capacity must be within the model context and at most 4096")
         if type(max_block_tokens) is not int or not 1 <= max_block_tokens <= min(16, capacity):
             raise ValueError("max_block_tokens must be an integer from 1 to min(16, capacity)")
+        if max(greedy_chunk_sizes, default=0) > capacity or max_block_tokens + len(greedy_chunk_sizes) > 16:
+            raise ValueError("greedy chunks exceed capacity or the 16 prepared block limit")
         if len({parameter.device for parameter in target.model.parameters()}) != 1 or any(
-            parameter.dtype != torch.float32 or parameter.device.type != "cuda" for parameter in target.model.parameters()
+            parameter.dtype != torch.float32 or parameter.device.type != device for parameter in target.model.parameters()
         ):
-            raise ValueError("replay model parameters must all use float32 on one CUDA device")
+            raise ValueError(f"replay model parameters must all use float32 on one {device.upper()} device")
         super().__init__(target.model, target.tokenizer, device=target.device, dtype=target.dtype)
         self.eos_token_ids = target.eos_token_ids
         self.capacity = capacity
         self.max_block_tokens = max_block_tokens
+        self._capture_predictions = capture_predictions
+        self._greedy_chunk_sizes = greedy_chunk_sizes
         self.execution_backend = "cuda_graph" if replay else "static"
         self._owner = object()
         self._lock = threading.RLock()
         self._closed = False
-        self._stream = torch.cuda.current_stream(next(self.model.parameters()).device)
+        self._stream = torch.cuda.current_stream(next(self.model.parameters()).device) if device == "cuda" else None
         self._model_signature = self._signature()
+        self._layer_settings = self._settings_signature()
         self._model_tensors = tuple(tensor.detach() for tensor in (*self.model.parameters(), *self.model.buffers()))
         self._workspace = _Workspace(self.model, capacity)
+        self._workspace_dirty = False
+        self._resident_cache = None
+        self._resident_length = 0
         started = time.perf_counter()
-        self._blocks = {length: _ReplayBlock(self.model, self._workspace, length, replay)
-                        for length in range(1, max_block_tokens + 1)}
+        self._blocks, self._greedy_blocks = {}, {}
+        try:
+            for length in range(1, max_block_tokens + 1):
+                self._blocks[length] = _ReplayBlock(self.model, self._workspace, length, replay,
+                                                    capture_predictions=capture_predictions)
+            for count in greedy_chunk_sizes:
+                self._greedy_blocks[count] = _GreedyBlock(self.model, self._workspace, count, replay)
+        except BaseException:
+            self.close()
+            raise
         self.setup_ms = (time.perf_counter() - started) * 1000
 
+    @property
+    def capture_predictions(self):
+        return self._capture_predictions
+
+    @property
+    def greedy_chunk_sizes(self):
+        return self._greedy_chunk_sizes
+
     def _signature(self):
-        pending, seen, tensors = [self.model], set(), []
+        pending, seen, tensors, layers = [self.model], set(), [], []
         while pending:
             module = pending.pop()
             if module is None or module in seen:
@@ -183,18 +361,34 @@ class CudaGraphTarget(TargetModel):
             pending.extend(module._modules.values())
             tensors.extend(tensor for tensor in (*module._parameters.values(), *module._buffers.values())
                            if tensor is not None)  # Check live registrations without building parameter names.
-        return tuple((tensor.data_ptr(), tensor.device, tensor.dtype, tuple(tensor.shape), tensor.stride())
-                     for tensor in tensors)
+            layers.append((module, type(module), module.training))
+        storage = tuple((tensor.data_ptr(), tensor.device, tensor.dtype, tuple(tensor.shape), tensor.stride())
+                        for tensor in tensors)
+        return storage, tuple(layers)
+
+    def _settings_signature(self):
+        return tuple((module.__dict__, name, _setting_value(module.__dict__[name]))
+                     for module in self.model.modules() for name in sorted(module.__dict__.keys() & _LAYER_SETTINGS))
 
     def _check_ready(self):
         if self._closed:
             raise RuntimeError("replay target is closed")
-        if torch.cuda.current_stream(self._stream.device) != self._stream:
+        if self._stream is not None and torch.cuda.current_stream(self._stream.device) != self._stream:
             raise ValueError("use the CUDA stream that prepared the replay target")
         if self.record_hidden or self.model.training or self.model.config._attn_implementation != "eager":
             raise ValueError("replay requires unchanged inference settings")
-        if self._signature() != self._model_signature:
+        signature = self._signature()
+        if signature[0] != self._model_signature[0]:
             raise ValueError("model tensor storage changed; prepare a new replay target")
+        if signature[1] != self._model_signature[1] or any(
+            not _same_setting(attributes.get(name), saved) for attributes, name, saved in self._layer_settings
+        ):
+            raise ValueError("model layer settings changed; prepare a new replay target")
+
+    @property
+    def context_limit(self):
+        limit = super().context_limit
+        return self.capacity if limit is None else min(limit, self.capacity)
 
     def _check_context_length(self, length):
         super()._check_context_length(length)
@@ -223,31 +417,106 @@ class CudaGraphTarget(TargetModel):
             raise ValueError("replay prefill creates its own request cache")
         return super().prefill(prompt_ids)
 
-    def _forward(self, state, input_ids, *, last_logits_only=False):
+    def validate_prompt(self, prompt_ids):
         with self._lock:
             self._check_ready()
+            super().validate_prompt(prompt_ids)
+
+    @torch.inference_mode()
+    def forward_predictions(self, state, tokens):
+        """Return owned next-token IDs from a prepared greedy block."""
+        if not self.capture_predictions:
+            raise ValueError("prepare the target with capture_predictions=True")
+        return self._forward(state, self._ids(tokens), return_predictions=True)
+
+    def _restore_prefix(self, cache):
+        storage = cache._buffer.tensor if type(cache) is ReplayCache else cache.storage
+        if cache.owner is not self._owner or storage.shape != self._workspace.storage.shape:
+            raise ValueError("cache belongs to a different replay target")
+        if self._workspace_dirty:
+            self._resident_cache = None
+            self._workspace.storage.zero_()  # Failed work may leave NaNs in masked rows.
+        resident = (type(cache) is ReplayCache and not cache._buffer.exposed
+                    and self._resident_cache is not None and self._resident_cache() is cache
+                    and cache.length <= self._resident_length)
+        self._resident_cache = None  # Any failed workspace write requires a fresh restore.
+        self._workspace_dirty = True
+        if not resident:
+            self._workspace.storage[..., :cache.length, :].copy_(storage[..., :cache.length, :])
+        return storage
+
+    @torch.inference_mode()
+    def forward_greedy(self, state, pending, count):
+        """Run a prepared greedy chunk; return owned IDs through the first EOS."""
+        with self._lock:
+            self._check_ready()
+            state._check_usable()
+            if type(count) is not int or (count != 1 and count not in self._greedy_blocks):
+                raise ValueError("greedy chunk count was not prepared")
+            if type(pending) is not int or pending in self.eos_token_ids:
+                raise ValueError("pending token must be a non-EOS integer")
+            if state.seq_len <= 0:
+                raise ValueError("greedy chunks require a nonempty prefix")
+            if count == 1:
+                return self.forward_predictions(state, [pending])
+            ids = self._ids([pending])
+            self._check_context_length(state.seq_len + count)
+            cache = state.cache
+            if not isinstance(cache, ReplayCache):
+                cache = ReplayCache.from_dynamic(cache, self.capacity, self._owner)
+            block = self._greedy_blocks[count]
+            storage = self._restore_prefix(cache)
+            block.ids.copy_(ids)
+            block.start.fill_(cache.length)
+            output = block.run()[0].tolist()
+            for index, token in enumerate(output):
+                if token in self.eos_token_ids:
+                    output = output[:index + 1]
+                    break
+            total = cache.length + len(output)
+            try:
+                storage[..., cache.length:total, :].copy_(self._workspace.storage[..., cache.length:total, :])
+                cache.length = total
+                state.cache = cache
+            except BaseException:
+                state._failed = True
+                raise
+            self._resident_cache = weakref.ref(cache)
+            self._resident_length = total
+            self._workspace_dirty = False
+            return output
+
+    def _forward(self, state, input_ids, *, last_logits_only=False, return_predictions=False):
+        with self._lock:
+            self._check_ready()
+            state._check_usable()
             total_len = state.seq_len + input_ids.shape[1]
             self._check_context_length(total_len)
             if not isinstance(state.cache, ReplayCache) and state.seq_len == 0:
                 if type(state.cache) is not DynamicCache:
                     raise ValueError("replay requires a full DynamicCache")
-                return super()._forward(state, input_ids, last_logits_only=last_logits_only)
+                logits = super()._forward(state, input_ids, last_logits_only=last_logits_only)
+                return logits.argmax(dim=-1).tolist() if return_predictions else logits
             if input_ids.shape[1] not in self._blocks:
                 raise ValueError(f"block exceeds prepared replay size {self.max_block_tokens}")
             cache = state.cache
             if not isinstance(cache, ReplayCache):
                 cache = ReplayCache.from_dynamic(cache, self.capacity, self._owner)
-            if cache.owner is not self._owner or cache.storage.shape != self._workspace.storage.shape:
-                raise ValueError("cache belongs to a different replay target")
             block = self._blocks[input_ids.shape[1]]
-            self._workspace.storage[..., :cache.length, :].copy_(cache.storage[..., :cache.length, :])
+            storage = self._restore_prefix(cache)
             block.ids.copy_(input_ids)
             block.start.fill_(cache.length)
             logits = block.run()
-            cache.storage[..., cache.length:total_len, :].copy_(self._workspace.storage[..., cache.length:total_len, :])
-            output = logits[0].float().clone()  # Later replays must not overwrite a caller's logits.
+            storage[..., cache.length:total_len, :].copy_(self._workspace.storage[..., cache.length:total_len, :])
+            if return_predictions:
+                output = block.predictions[0].tolist()  # Copy before another call can replay this workspace.
+            else:
+                output = logits[0].float().clone()  # Later replays must not overwrite a caller's logits.
             cache.length = total_len
             state.cache = cache
+            self._resident_cache = weakref.ref(cache)
+            self._resident_length = total_len
+            self._workspace_dirty = False
             return output
 
     def crop(self, state, length):
@@ -267,22 +536,116 @@ class CudaGraphTarget(TargetModel):
     def greedy_generate(self, prompt_ids, max_new_tokens):
         ids = self._ids(prompt_ids)
         self.validate_generation(ids.shape[1], max_new_tokens)
+        if max_new_tokens == 0:
+            self.validate_prompt(ids)
+            return []
         state = TargetState(DynamicCache())
         logits = self._forward(state, ids, last_logits_only=True)[-1]
         generated = []
         token = int(logits.argmax().item())
+        if self._greedy_blocks:
+            generated.append(token)
+            while len(generated) < max_new_tokens and generated[-1] not in self.eos_token_ids:
+                remaining = max_new_tokens - len(generated)
+                count = max([1, *(n for n in self._greedy_blocks if n <= remaining)])
+                generated.extend(self.forward_greedy(state, generated[-1], count))
+            return generated
         for _ in range(max_new_tokens):
             generated.append(token)
             if token in self.eos_token_ids or len(generated) == max_new_tokens:
                 break
-            token = int(self.forward_block(state, [token])[-1].argmax().item())
+            if self.capture_predictions:
+                token = self.forward_predictions(state, [token])[0]
+            else:
+                token = int(self.forward_block(state, [token])[-1].argmax().item())
         return generated
 
     def close(self):
         with self._lock:
-            if not self._closed:
+            if self._closed and self._workspace is None:
+                return
+            self._closed = True
+            if self._stream is not None:
                 self._stream.synchronize()
-                self._blocks.clear()
-                self._workspace = None
-                self._model_tensors = ()
-                self._closed = True
+            with ExitStack() as cleanup:
+                for block in (*self._blocks.values(), *self._greedy_blocks.values()):
+                    cleanup.callback(block.close)
+            self._blocks.clear()
+            self._greedy_blocks.clear()
+            self._workspace = None
+            self._workspace_dirty = False
+            self._resident_cache = None
+            self._resident_length = 0
+            self._model_tensors = ()
+            self._model_signature = ()
+            self._layer_settings = ()
+
+
+class CapacityBuckets:
+    """Prepared replay targets of several capacities sharing one model.
+
+    Each request runs on the smallest capacity that holds its prompt and output
+    budget. Up to four buckets and sixteen prepared blocks are allowed in total.
+    """
+
+    uses_replay_cache = True
+    record_hidden = False
+
+    def __init__(self, target: TargetModel, capacities, *, max_block_tokens=5, replay=True,
+                 capture_predictions=False, greedy_chunk_sizes=()):
+        if (not isinstance(capacities, tuple) or not 1 <= len(capacities) <= 4
+                or len(set(capacities)) != len(capacities) or any(type(c) is not int for c in capacities)):
+            raise ValueError("capacities must be a tuple of one to four distinct integers")
+        _validate_greedy_chunks(greedy_chunk_sizes, capture_predictions)
+        if type(max_block_tokens) is int and len(capacities) * (max_block_tokens + len(greedy_chunk_sizes)) > 16:
+            raise ValueError("capacity buckets allow at most 16 prepared blocks in total")
+        with ExitStack() as cleanup:
+            buckets = []
+            for capacity in sorted(capacities):
+                bucket = CudaGraphTarget(target, max_block_tokens=max_block_tokens, capacity=capacity,
+                                         replay=replay, capture_predictions=capture_predictions,
+                                         greedy_chunk_sizes=greedy_chunk_sizes)
+                cleanup.callback(bucket.close)
+                buckets.append(bucket)
+            cleanup.pop_all()
+        self.buckets = tuple(buckets)
+        largest = self.buckets[-1]
+        self.model, self.tokenizer, self.device, self.dtype = largest.model, largest.tokenizer, largest.device, largest.dtype
+        self.eos_token_ids = largest.eos_token_ids
+        self.max_block_tokens = max_block_tokens
+        self.capture_predictions = capture_predictions
+        self.greedy_chunk_sizes = greedy_chunk_sizes
+        self.execution_backend = largest.execution_backend
+        self.setup_ms = sum(bucket.setup_ms for bucket in self.buckets)
+        self.last_hidden_block = None
+
+    @property
+    def capacities(self):
+        return tuple(bucket.capacity for bucket in self.buckets)
+
+    @property
+    def context_limit(self):
+        return self.buckets[-1].context_limit
+
+    def for_request(self, prompt_len, max_new_tokens):
+        """Return the smallest bucket that holds the prompt and output budget."""
+        largest = self.buckets[-1]
+        if largest._closed:
+            raise RuntimeError("replay target is closed")
+        largest.validate_generation(prompt_len, max_new_tokens)
+        return next(bucket for bucket in self.buckets if bucket.capacity >= prompt_len + max_new_tokens)
+
+    def validate_generation(self, prompt_len, max_new_tokens):
+        self.for_request(prompt_len, max_new_tokens)
+
+    def validate_prompt(self, prompt_ids):
+        self.buckets[-1].validate_prompt(prompt_ids)
+
+    def greedy_generate(self, prompt_ids, max_new_tokens):
+        prompt_len = self.buckets[-1]._ids(prompt_ids).shape[1]
+        return self.for_request(prompt_len, max_new_tokens).greedy_generate(prompt_ids, max_new_tokens)
+
+    def close(self):
+        with ExitStack() as cleanup:
+            for bucket in self.buckets:
+                cleanup.callback(bucket.close)

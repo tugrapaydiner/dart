@@ -47,6 +47,7 @@ class CompressedKVDrafter(ARDrafter):
         self._committed_ids: list[int] = []
         self._entropy: Optional[list[float]] = None
         self._entropy_len = -1
+        self.last_kv_stats: dict = {}
 
     # ---- PrecisionPolicy metadata provider (docs/design.md §9.4) ------ #
     def token_id_at(self, pos: int) -> Optional[int]:
@@ -86,3 +87,12 @@ class CompressedKVDrafter(ARDrafter):
         if self._state is None or not isinstance(self._state.cache, QuantizedKVCache):
             return {}
         return self._state.cache.stats()
+
+    def finish_request(self) -> None:
+        try:
+            self.last_kv_stats = self.kv_stats()
+        finally:
+            super().finish_request()
+            self._committed_ids = []
+            self._entropy = None
+            self._entropy_len = -1

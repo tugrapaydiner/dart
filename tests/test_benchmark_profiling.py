@@ -33,14 +33,15 @@ def test_phase_timers_wait_for_device_and_restore_engine(monkeypatch):
 
     monkeypatch.setattr(profiling, "synchronize", synchronize)
     target = SimpleNamespace(device="cuda", model=Model())
-    engine = SimpleNamespace(target=target, verifier_name="block", _propose=lambda: enqueue(0.03), verify=lambda: target.model(0.02))
+    engine = SimpleNamespace(target=target, _round_drafts=lambda: enqueue(0.03), verify=lambda: target.model(0.02))
+    engine._resolve_verifier = lambda *args: engine.verify
     original = dict(vars(engine))
 
     def method(prompt):
         clock[0] += 0.005
         target.model(0.01)
-        engine._propose()
-        engine.verify()
+        engine._round_drafts()
+        engine._resolve_verifier("block", False)()
         clock[0] += 0.004
         return [7]
 
@@ -66,7 +67,7 @@ def test_real_phases_preserve_complete_output_and_do_not_overlap(device, early_e
             "hf_greedy": run_bench.build_hf_method(target, 5),
             "ngram": lambda p: engine.generate(p, cfg),
         }, [prompt], target, {"ngram": engine}, repeats=1)
-        assert "_propose" not in vars(engine)
+        assert "_round_drafts" not in vars(engine) and "_resolve_verifier" not in vars(engine)
         assert engine.generate(prompt, cfg).token_ids == target.greedy_generate(prompt, 5)
     assert len({row["output_hash"] for row in report["samples"]}) == 1
     for row in report["samples"]:
