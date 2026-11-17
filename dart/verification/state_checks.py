@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import math
+from collections.abc import Mapping
 from dataclasses import dataclass
 
 import torch
@@ -171,7 +172,7 @@ def _inspect_tree_rows(target, reference_model, case, *, atol, rtol):
     return failures, checked
 
 
-def _round_expectation(target, reference_model, case, verifier):
+def _round_parameters(target, reference_model, case, verifier):
     if target.model is reference_model:
         raise ValueError("use a separate reference model")
     if target.model.training or reference_model.training:
@@ -197,6 +198,11 @@ def _round_expectation(target, reference_model, case, verifier):
     eos = frozenset(() if eos is None else [eos] if isinstance(eos, int) else eos)
     if target.eos_token_ids != eos:
         raise ValueError("reference and target EOS settings differ")
+    return lookahead, eos
+
+
+def _round_expectation(target, reference_model, case, verifier):
+    lookahead, eos = _round_parameters(target, reference_model, case, verifier)
     continuation = hf_decoder(reference_model)(
         GenerationCase(case.name, (*case.prefix, case.pending), lookahead)
     )
@@ -214,6 +220,16 @@ def _result_failures(result, expected, accepted, draft_count, eos):
     if result.finished != (expected[-1] in eos):
         failures.append(CheckFailure("eos", detail="finished flag differs"))
     return failures
+
+
+def _validate_state_check(case, verifier, atol, rtol, inspect_tree):
+    if not case.prefix:
+        raise InvalidCheckCase("standalone round checks need a nonempty prefill prefix")
+    _validate_tolerances(atol, rtol)
+    if type(inspect_tree) is not bool or (inspect_tree and verifier != "tree"):
+        raise ValueError("inspect_tree must be boolean and requires the tree verifier")
+    if inspect_tree and len(case.drafts) > 32:
+        raise InvalidCheckCase("inspect_tree supports at most 32 draft nodes")
 
 
 @torch.inference_mode()
@@ -236,17 +252,59 @@ def check_verifier_state(
     inspect_tree checks every packed row in a separate pass, including rejected
     branches, with at most 32 draft nodes. Each reference branch is run separately.
     """
-    if not case.prefix:
-        raise InvalidCheckCase("standalone round checks need a nonempty prefill prefix")
-    _validate_tolerances(atol, rtol)
-    if type(inspect_tree) is not bool or (inspect_tree and verifier != "tree"):
-        raise ValueError("inspect_tree must be boolean and requires the tree verifier")
-    if inspect_tree and len(case.drafts) > 32:
-        raise InvalidCheckCase("inspect_tree supports at most 32 draft nodes")
+    _validate_state_check(case, verifier, atol, rtol, inspect_tree)
     expected, accepted = _round_expectation(target, reference_model, case, verifier)
     cached_tokens = (*case.prefix, case.pending, *expected[:-1])
     reference_cache = _reference_forward(reference_model, cached_tokens).past_key_values
     reference_next = _reference_forward(reference_model, (*cached_tokens, expected[-1]))
+    return _check_round_state(target, reference_model, case, verifier, expected, accepted,
+                              reference_cache, reference_next, atol, rtol, inspect_tree)
+
+
+@torch.inference_mode()
+def compare_verifier_states(
+    candidates: Mapping[str, object],
+    reference_model,
+    case: RoundCase,
+    *,
+    verifier: str = "tree",
+    atol: float = 2e-6,
+    rtol: float = 2e-5,
+    inspect_tree: bool = False,
+) -> dict[str, RoundCheck]:
+    """Check named implementations using one set of native round references.
+
+    Candidates run in mapping order with separate request states. They must use
+    matching weights and EOS settings, and must not modify the reference model.
+    All candidates are validated before inference. Native generation and the two
+    full-prefix cache forwards run once per call; nothing is cached across calls.
+    Optional packed-row inspections still run independently for each candidate.
+    Reference errors abort; candidate exceptions remain individual failures.
+    """
+    if not isinstance(candidates, Mapping):
+        raise ValueError("provide a mapping of named candidates")
+    candidates = dict(candidates)
+    if not candidates or any(not isinstance(name, str) or not name for name in candidates):
+        raise ValueError("provide at least one named candidate")
+    _validate_state_check(case, verifier, atol, rtol, inspect_tree)
+    for target in candidates.values():
+        _round_parameters(target, reference_model, case, verifier)
+    first = next(iter(candidates.values()))
+    expected, accepted = _round_expectation(first, reference_model, case, verifier)
+    cached_tokens = (*case.prefix, case.pending, *expected[:-1])
+    reference_cache = _reference_forward(reference_model, cached_tokens).past_key_values
+    reference_next = _reference_forward(reference_model, (*cached_tokens, expected[-1]))
+    results = {}
+    for name, target in candidates.items():
+        _round_parameters(target, reference_model, case, verifier)  # Recheck before each candidate runs.
+        results[name] = _check_round_state(target, reference_model, case, verifier, expected, accepted,
+                                           reference_cache, reference_next, atol, rtol, inspect_tree)
+    return results
+
+
+def _check_round_state(target, reference_model, case, verifier, expected, accepted,
+                       reference_cache, reference_next, atol, rtol, inspect_tree):
+    cached_tokens = (*case.prefix, case.pending, *expected[:-1])
     failures, checked = [], 0
     if inspect_tree:
         failures, checked = _inspect_tree_rows(target, reference_model, case, atol=atol, rtol=rtol)
