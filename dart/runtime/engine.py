@@ -371,11 +371,9 @@ class DartEngine:
         self._check_request(config)
         timed_scheduler = getattr(self.scheduler, "requires_round_timing", False)
         sampling = config.mode == "exact_sampling"
-        needs_entropy = (self.scheduler is not None and getattr(self.scheduler, "requires_entropy", True)) or any(
-            getattr(drafter, "requires_entropy", True) for drafter in self._all_drafters()
-        )
+        scheduler_entropy = self.scheduler is not None and bool(getattr(self.scheduler, "requires_entropy", True))
         generator = None
-        verify_fns: dict[str, VerifyFn] = {}
+        verify_fns: dict[tuple[str, bool], VerifyFn] = {}
         if sampling:
             generator = torch.Generator(device=self.target.device)
             generator.manual_seed(config.seed if config.seed is not None else 0)
@@ -385,12 +383,17 @@ class DartEngine:
                 temperature=config.temperature,
             )
 
-        def verifier_fn(name: str) -> VerifyFn:
+        def verifier_fn(name: str, drafter: Drafter) -> VerifyFn:
             if sampling:
                 return sampling_fn
-            if name not in verify_fns:
-                verify_fns[name] = self._resolve_verifier(name, needs_entropy)
-            return verify_fns[name]
+            needs_entropy = scheduler_entropy or bool(getattr(drafter, "requires_entropy", True)) or any(
+                hasattr(other, "after_verify") and getattr(other, "requires_entropy", True)
+                for other in self._all_drafters()
+            )
+            key = (name, needs_entropy)  # A lane switch can change which feedback is needed.
+            if key not in verify_fns:
+                verify_fns[key] = self._resolve_verifier(name, needs_entropy)
+            return verify_fns[key]
 
         run_id = uuid.uuid4().hex[:12]
         metrics = DecodeMetrics(
@@ -452,7 +455,7 @@ class DartEngine:
             # length in the scheduler (docs/design.md §10).  Seeded
             # from the prompt's last-token distribution.
             ent_ewma = 0.0
-            if needs_entropy and not sampling and not finished and len(generated) < config.max_new_tokens:
+            if scheduler_entropy and not sampling and not finished and len(generated) < config.max_new_tokens:
                 d0 = torch.softmax(logits.float(), dim=-1)
                 ent_ewma = float(-(d0 * d0.clamp_min(1e-12).log()).sum())
 
@@ -515,7 +518,7 @@ class DartEngine:
                         staged = move_cache(state.cache, self.target.device)
                         res_stats.moved_tensors += staged.moved_tensors
                         res_stats.moved_bytes += staged.moved_bytes
-                    verify_fn = verifier_fn(verifier)
+                    verify_fn = verifier_fn(verifier, drafter)
                     if sampling:
                         result = verify_fn(
                             target, state, pending_block, drafts,
