@@ -118,6 +118,34 @@ class DraftTree:
         return cls(tokens, parent)
 
 
+def _live_tree_rows(target, tree: DraftTree, context_len: int):
+    eos = target.eos_token_ids
+    if not eos or not any(type(token) is int and token in eos for token in tree.tokens):
+        return None
+    config = getattr(getattr(target, "model", None), "config", None)
+    vocab = getattr(config, "vocab_size", None)
+    if type(vocab) is not int or len(tree.parent) != len(tree.tokens) or any(
+        type(token) is not int or not 0 <= token < vocab for token in tree.tokens
+    ):
+        return None  # Keep normal admission for unknown or invalid inputs.
+    depths = []
+    for index, parent in enumerate(tree.parent):
+        if type(parent) is not int or not -1 <= parent < index:
+            return None
+        depths.append(0 if parent < 0 else depths[parent] + 1)
+    limit = getattr(config, "max_position_embeddings", None)
+    if limit is not None and (type(limit) is not int or context_len + max(depths) + 1 > limit):
+        return None
+    tokens, parents, slots = [], [], {}
+    for index, (token, parent) in enumerate(zip(tree.tokens, tree.parent)):
+        if token in eos or (parent >= 0 and parent not in slots):
+            continue  # EOS and its descendants never supply a decision row.
+        slots[index] = len(tokens)
+        tokens.append(token)
+        parents.append(-1 if parent < 0 else slots[parent])
+    return tokens, parents, slots
+
+
 @torch.inference_mode()
 def verify_tree_greedy(
     target: TargetModel,
@@ -149,9 +177,9 @@ def verify_tree_greedy(
 
         return verify_block_greedy(target, state, pending_block, draft_tree.tokens, compute_entropy=compute_entropy)
 
-    logits = target.forward_tree(
-        state, pending_block, draft_tree.tokens, draft_tree.parent
-    )
+    live = _live_tree_rows(target, draft_tree, base_len + p_len)
+    tokens, parents, slots = (draft_tree.tokens, draft_tree.parent, None) if live is None else live
+    logits = target.forward_tree(state, pending_block, tokens, parents)
     preds = torch.argmax(logits, dim=-1).tolist()
 
     # Divergence audit of unverified pending tokens (approx-mode metadata;
@@ -185,7 +213,7 @@ def verify_tree_greedy(
             accepted_eos = True
             break
         cur_parent = nxt
-        cur_row = p_len + nxt
+        cur_row = p_len + (nxt if slots is None else slots[nxt])
 
     m = len(path)
     if accepted_eos:
@@ -205,6 +233,8 @@ def verify_tree_greedy(
     # then align with the block verifier's postcondition (the final
     # committed token is the new pending one and is never in cache).
     kept_path = path[:-1] if accepted_eos else path  # EOS stays pending.
+    if slots is not None:
+        kept_path = [slots[index] for index in kept_path]
     target.gather_tree_tail(state, base_len + p_len, kept_path)
     target.crop(state, base_len + p_len - 1 + len(committed))
 
