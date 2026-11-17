@@ -54,6 +54,10 @@ def entropy_gated(draft_len: int, canvas: int, s: DecodeState, c: SchedulerConfi
 
 
 class HeuristicScheduler:
+    @property
+    def requires_entropy(self) -> bool:
+        return type(self) is not HeuristicScheduler or self.config.entropy_gate_threshold != float("inf")
+
     def __init__(self, config: SchedulerConfig) -> None:
         self.config = config
         self.acceptance_ewma: dict[str, float] = {}
@@ -150,6 +154,10 @@ class BanditScheduler:
     from observed rewards.  Like every scheduler decision, a bad arm costs
     speed, never exactness.
     """
+
+    @property
+    def requires_entropy(self) -> bool:
+        return type(self) is not BanditScheduler or self.config.entropy_gate_threshold != float("inf")
 
     def __init__(self, config: SchedulerConfig, ucb_c: float = 0.5,
                  rejection_penalty: float = 0.2) -> None:
