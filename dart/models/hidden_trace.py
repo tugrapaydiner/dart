@@ -34,6 +34,15 @@ class TeacherTrace:
 def collect_trace(
     target: TargetModel, prompt_ids: list[int], max_new_tokens: int
 ) -> TeacherTrace:
+    target.validate_generation(len(prompt_ids), max_new_tokens)
+    if max_new_tokens == 0:
+        target.validate_prompt(prompt_ids)
+        return TeacherTrace(
+            prompt_ids=list(prompt_ids),
+            continuation_ids=[],
+            logits=torch.empty((0, target.model.config.vocab_size), device=target.device, dtype=torch.float16),
+            entropy=torch.empty(0, device=target.device, dtype=torch.float32),
+        )
     state, logits = target.prefill(prompt_ids)
     rows: list[Tensor] = []
     hiddens: list[Tensor] = []
@@ -46,7 +55,7 @@ def collect_trace(
             hiddens.append(target.last_hidden_block[-1])
         tok = int(torch.argmax(next_logits).item())
         cont.append(tok)
-        if tok in target.eos_token_ids:
+        if tok in target.eos_token_ids or len(cont) == max_new_tokens:
             break
         step = target.forward_block(state, [tok])
         next_logits = step[-1]
