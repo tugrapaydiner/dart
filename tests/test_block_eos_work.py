@@ -8,6 +8,7 @@ from dart.verification.block_verify import verify_block_greedy
 from dart.verification.greedy import verify_greedy_reference
 from dart.verification.state_checks import _cache_failures, _reference_forward
 from dart.verification.synthetic import _synthetic_models
+from dart.verification.tree_verify import verify_tree_greedy
 
 
 class CountingTarget:
@@ -152,6 +153,48 @@ def test_invalid_suffix_after_eos_is_still_rejected(models, monkeypatch, bad):
     torch.testing.assert_close(actual, expected, atol=2e-6, rtol=2e-5)
 
 
+@pytest.mark.parametrize('verify', [verify_block_greedy, verify_tree_greedy])
+@pytest.mark.parametrize('pending,drafts', [([10], [2, 13, 14]), ([10, 11], [12, 2, 14])])
+@pytest.mark.parametrize('execution,limit', [
+    ('eager', 'context'), ('static', 'capacity'), ('static', 'width'),
+    ('predictions', 'capacity'), ('predictions', 'width'),
+])
+@torch.inference_mode()
+def test_eos_preserves_full_block_limits(models, verify, pending, drafts, execution, limit):
+    base, reference = models
+    prompt = [5, 7, 9]
+    full = pending + drafts
+    total = len(prompt) + len(full)
+    if execution == 'eager':
+        base.model.config.max_position_embeddings = total - 1
+        target = base
+    else:
+        target = CudaGraphTarget(
+            base, capacity=total - 1 if limit == 'capacity' else total,
+            max_block_tokens=len(full) - 1 if limit == 'width' else len(full),
+            replay=False, capture_predictions=execution == 'predictions',
+        )
+    try:
+        target.eos_token_ids = frozenset([2])
+        state, _ = target.prefill(prompt)
+        forward = target.forward_predictions if execution == 'predictions' else target.forward_block
+        reason = {'context': 'context limit', 'capacity': 'replay capacity', 'width': 'prepared replay size'}[limit]
+        with pytest.raises(ValueError, match=reason) as native:
+            forward(state, full)
+        with pytest.raises(ValueError) as error:
+            verify(target, state, pending, drafts, compute_entropy=execution != 'predictions')
+        assert str(error.value) == str(native.value)
+        assert state.seq_len == len(prompt) and not state._failed
+        expected = _reference_forward(reference, prompt)
+        assert not _cache_failures(state, expected.past_key_values, len(prompt), atol=2e-6, rtol=2e-5)
+        actual = target.forward_block(state, pending)[-1]
+        expected = _reference_forward(reference, prompt + pending).logits[0, -1]
+        torch.testing.assert_close(actual, expected, atol=2e-6, rtol=2e-5)
+    finally:
+        if target is not base:
+            target.close()
+
+
 @pytest.mark.parametrize('suffix', [[3.5], [True], [torch.tensor(4)]])
 @torch.inference_mode()
 def test_converted_suffix_keeps_existing_execution(models, monkeypatch, suffix):
@@ -167,3 +210,29 @@ def test_converted_suffix_keeps_existing_execution(models, monkeypatch, suffix):
     monkeypatch.setattr(target, 'forward_block', observe)
     verify_block_greedy(target, state, 10, [2] + suffix)
     assert len(calls) == 1 and len(calls[0]) == 3
+
+
+@pytest.mark.parametrize('context,width,rows', [(8, 5, 3), (None, None, 3), ('8', 5, 5), (8, True, 5)])
+def test_eos_shortcut_checks_the_complete_input(context, width, rows):
+    target = CountingTarget([13], False)
+    target.model.config.max_position_embeddings = context
+    target.max_block_tokens = width
+    pending, drafts = [10, 11], [12, 13, 14]
+    result = verify_block_greedy(target, SimpleNamespace(seq_len=3), pending, drafts)
+    assert target.calls == [(pending + drafts)[:rows]]
+    assert result.committed == [12, 13] and result.n_draft_proposed == 3
+    assert pending == [10, 11] and drafts == [12, 13, 14]
+
+
+@pytest.mark.parametrize('pending,drafts', [([67], [2, 13, 14]), ([10], [2, 13, 67])])
+def test_oversized_eos_block_preserves_token_error_precedence(models, pending, drafts):
+    target, _ = models
+    target.model.config.max_position_embeddings = 6
+    target.eos_token_ids = frozenset([2])
+    state, _ = target.prefill([5, 7, 9])
+    with pytest.raises(ValueError, match='outside the model vocabulary') as native:
+        target.forward_block(state, pending + drafts)
+    with pytest.raises(ValueError) as error:
+        verify_block_greedy(target, state, pending, drafts)
+    assert str(error.value) == str(native.value)
+    assert state.seq_len == 3 and not state._failed

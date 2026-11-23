@@ -35,23 +35,29 @@ def verify_block_greedy(
     compute_entropy: bool = True,
 ) -> VerifyResult:
     """Set compute_entropy=False when no consumer needs the entropy signal."""
-    pending_block = [pending] if isinstance(pending, int) else list(pending)
-    if not pending_block:
+    tokens = [pending] if isinstance(pending, int) else list(pending)
+    if not tokens:
         raise ValueError("pending block must contain at least one token")
-    p_len = len(pending_block)
+    p_len = len(tokens)
     k = len(draft_tokens)
     base_len = state.seq_len  # cache length before this round
 
-    tokens = pending_block + list(draft_tokens)
+    forward_drafts = draft_tokens
     for index, token in enumerate(draft_tokens):
         if type(token) is int and token in target.eos_token_ids:
             config = getattr(getattr(target, "model", None), "config", None)
             vocab_size = getattr(config, "vocab_size", None)
-            if type(vocab_size) is int and all(
+            context = getattr(target, "context_limit", getattr(config, "max_position_embeddings", None))
+            block = getattr(target, "max_block_tokens", None)
+            width = p_len + k
+            fits_context = context is None or (type(context) is int and base_len + width <= context)
+            fits_block = block is None or (type(block) is int and width <= block)
+            if fits_context and fits_block and type(vocab_size) is int and all(
                 type(value) is int and 0 <= value < vocab_size for value in draft_tokens[index:]
             ):
-                tokens = pending_block + list(draft_tokens[:index])  # EOS and its tail need no forward.
-            break  # Let normal admission reject invalid suffixes.
+                forward_drafts = draft_tokens[:index]  # EOS and its tail need no forward.
+            break  # The full forward handles bounds and invalid IDs.
+    tokens.extend(forward_drafts)
     if not compute_entropy and getattr(target, "capture_predictions", False):
         preds = target.forward_predictions(state, tokens)
     else:
@@ -60,7 +66,7 @@ def verify_block_greedy(
 
     # Divergence audit of unverified pending tokens (approx mode only).
     divergence = sum(
-        1 for j in range(1, p_len) if pending_block[j] != preds[j - 1]
+        1 for j in range(1, p_len) if tokens[j] != preds[j - 1]
     )
 
     off = p_len - 1  # preds[off + i] is the target's choice for drafts[i]
