@@ -16,6 +16,7 @@ from dart.models.rms_norm import enable_native_rms_norm
 from dart.models.target import TargetModel
 from dart.verification.differential import GenerationCase, hf_decoder
 from dart.verification.synthetic import synthetic_model_config
+from tests.conftest import hf_cache
 
 
 def models(kv=2, attention="eager"):
@@ -59,7 +60,7 @@ def test_reuse_matches_independent_outputs_and_live_cache(kv, attention, monkeyp
         assert control.cache_bytes == 2 * (2 * kv * 64 * 8 * 4 + 8)
 
         def observe(module, args, kwargs, output):
-            assert kwargs["past_key_values"] is output.past_key_values is control.cache
+            assert hf_cache(kwargs) is hf_cache(output) is control.cache
             live["lengths"] = [int(layer.cumulative_length) for layer in control.cache.layers]
             live["kv"] = [(layer.keys[..., :length, :].clone(), layer.values[..., :length, :].clone())
                           for layer, length in zip(control.cache.layers, live["lengths"])]
@@ -77,7 +78,7 @@ def test_reuse_matches_independent_outputs_and_live_cache(kv, attention, monkeyp
                     full = reference(torch.tensor([prompt + output.token_ids[:-1]]), use_cache=True)
                 length = len(prompt) + budget - 1
                 assert live["lengths"] == [length] * 2
-                for pair, layer in zip(live["kv"], full.past_key_values.layers):
+                for pair, layer in zip(live["kv"], hf_cache(full).layers):
                     for actual, wanted in zip(pair, (layer.keys, layer.values)):
                         torch.testing.assert_close(actual, wanted, rtol=2e-5, atol=2e-6)
                 assert_empty(control)

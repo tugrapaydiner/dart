@@ -277,7 +277,7 @@ class QuantizedKVCache(DynamicCache):
     # -------------------------------------------------------------- #
     # transformers Cache API (v4.40+ and v5 names)
     # -------------------------------------------------------------- #
-    def update(self, key_states, value_states, layer_idx, cache_kwargs=None):
+    def update(self, key_states, value_states, layer_idx, cache_kwargs=None, *, kwargs=None):
         self._ensure_layer(layer_idx)
         if self._kw[layer_idx] is None:
             self._kw[layer_idx] = key_states

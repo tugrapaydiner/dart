@@ -74,6 +74,21 @@ def test_quantized_kv_cache_ages_and_crops():
     assert k2.size(-2) == 6
 
 
+@pytest.mark.parametrize("keyword", ["cache_kwargs", "kwargs"])
+def test_quantized_cache_accepts_attention_metadata(keyword):
+    spec = QuantSpec(bits=4, sink_len=1, window_len=2)
+    reference, cache = QuantizedKVCache(spec), QuantizedKVCache(spec)
+    keys = torch.arange(48, dtype=torch.float32).reshape(1, 2, 3, 8)
+    values = keys.flip((-1,))
+    for step in range(2):
+        metadata = {"cache_position": torch.arange(3) + 3 * step}
+        expected = reference.update(keys + step, values - step, 0, metadata)
+        actual = cache.update(keys + step, values - step, 0, **{keyword: metadata})
+        for got, wanted in zip(actual, expected):
+            torch.testing.assert_close(got, wanted, rtol=0, atol=0)
+    assert cache.stats() == reference.stats()
+
+
 # ----------------------- precision policy (14.3) --------------------- #
 def test_precision_policy_rules_take_the_max():
     p = PrecisionPolicy(

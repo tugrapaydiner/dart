@@ -12,6 +12,7 @@ from benchmarks.run_bench import build_hf_method
 from dart.models.replay import CudaGraphTarget
 from dart.verification.differential import GenerationCase, hf_decoder
 from dart.verification.synthetic import _synthetic_models
+from tests.conftest import hf_cache
 
 
 @pytest.fixture
@@ -34,8 +35,8 @@ def test_native_static_outputs_capacity_and_request_lifetime(models, monkeypatch
     caches, tensors = [], []
 
     def observe(module, args, kwargs, output):
-        cache = kwargs["past_key_values"]
-        assert type(cache) is StaticCache and output.past_key_values is cache
+        cache = hf_cache(kwargs)
+        assert type(cache) is StaticCache and hf_cache(output) is cache
         if not caches or caches[-1]() is not cache:
             caches.append(weakref.ref(cache))
             for layer in cache.layers:
@@ -132,7 +133,7 @@ def test_failed_static_forward_does_not_poison_next_request(models, monkeypatch)
     forward, caches = layer.forward, []
 
     def fail(*args, **kwargs):
-        caches.append(weakref.ref(kwargs["past_key_values"]))
+        caches.append(weakref.ref(hf_cache(kwargs)))
         raise RuntimeError("later layer failed")
 
     method = build_hf_method(target, 5, static_capacity=16)
