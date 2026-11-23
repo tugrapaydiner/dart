@@ -19,7 +19,7 @@ from __future__ import annotations
 
 import torch
 
-from dart.attention.block_sparse import block_sparse_mask, score_blocks, select_blocks
+from dart.attention.block_sparse import score_blocks, select_block_ids
 from dart.drafters.ar_draft import ARDrafter
 from dart.models.target import TargetModel
 
@@ -54,12 +54,14 @@ class BlockSparseKVDrafter(ARDrafter):
         vecs = emb(ids).detach().float()  # [N, D] - lookup only, no forward
         recent = vecs[-self.recent_blocks * self.block_size :]
         scores = score_blocks(recent, vecs, self.block_size)
-        kept = select_blocks(
+        kept = select_block_ids(
             scores, top_k=self.top_k,
             always_first=self.sink_blocks, always_last=self.recent_blocks,
         )
-        mask = block_sparse_mask(n, self.block_size, kept, device=str(self.dm.device))
-        compacted = [committed[i] for i in range(n) if bool(mask[i])]
+        compacted = []
+        for block in kept:
+            start = block * self.block_size
+            compacted.extend(committed[start : start + self.block_size])
         return compacted, True
 
     @torch.inference_mode()
