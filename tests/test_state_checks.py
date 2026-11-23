@@ -86,21 +86,27 @@ def test_overlapping_packed_branches_keep_the_longest_match(models, monkeypatch,
             parent = len(tokens)
             tokens.append(token)
 
-    widths = []
-    forward = target.forward_tree
+    calls = []
+    tree_forward, block_forward = target.forward_tree, target.forward_block
 
-    def record(state, pending, tree_tokens, tree_parents):
-        widths.append(len(tree_tokens))
-        return forward(state, pending, tree_tokens, tree_parents)
+    def record_tree(state, pending, tree_tokens, tree_parents):
+        calls.append(("tree", len(pending) + len(tree_tokens)))
+        return tree_forward(state, pending, tree_tokens, tree_parents)
 
-    monkeypatch.setattr(target, "forward_tree", record)
+    def record_block(state, tokens):
+        calls.append(("block", len(tokens)))
+        return block_forward(state, tokens)
+
+    monkeypatch.setattr(target, "forward_tree", record_tree)
+    monkeypatch.setattr(target, "forward_block", record_block)
     case = replace(case, drafts=tuple(tokens), parents=tuple(parents))
     result = check_verifier_state(target, reference, case, inspect_tree=True)
     expected = (a, b, c) if stop else (a, b, c, bonus)
     assert result.expected == result.actual == expected
     assert result.passed, result.failures
     assert result.tree_rows_checked == len(tokens) + 1
-    assert widths == [len(tokens), len(tokens) - 1 - int(stop)]  # Raw row check, then actual verification.
+    verifier = "block" if shared_root and stop else "tree"
+    assert calls == [("tree", len(tokens) + 1), (verifier, len(tokens) - int(stop)), ("block", 1)]
 
 
 @pytest.mark.parametrize("position", [0, 1, 2, 3])

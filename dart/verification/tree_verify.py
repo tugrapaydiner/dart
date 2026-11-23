@@ -188,9 +188,10 @@ def _live_tree_rows(target, tree: DraftTree, context_len: int):
         if type(parent) is not int or not -1 <= parent < index:
             return None
         depths.append(0 if parent < 0 else depths[parent] + 1)
-    limit = getattr(config, "max_position_embeddings", None)
-    if limit is not None and (type(limit) is not int or context_len + max(depths) + 1 > limit):
-        return None
+    length = context_len + max(depths) + 1
+    for limit in (getattr(config, "max_position_embeddings", None), getattr(target, "context_limit", None)):
+        if limit is not None and (type(limit) is not int or length > limit):
+            return None
     tokens, parents, slots = [], [], {}
     for index, (token, parent) in enumerate(zip(tree.tokens, tree.parent)):
         if token in eos or (parent >= 0 and parent not in slots):
@@ -199,6 +200,13 @@ def _live_tree_rows(target, tree: DraftTree, context_len: int):
         tokens.append(token)
         parents.append(-1 if parent < 0 else slots[parent])
     return tokens, parents, slots
+
+
+def _fits_causal_block(target, pending_len: int, parents: list[int]) -> bool:
+    limit = getattr(target, "max_block_tokens", None)
+    if limit is not None and (type(limit) is not int or pending_len + len(parents) > limit):
+        return False
+    return callable(getattr(target, "forward_block", None)) and all(p == i - 1 for i, p in enumerate(parents))
 
 
 @torch.inference_mode()
@@ -239,9 +247,15 @@ def verify_tree_greedy(
 
     live = _live_tree_rows(target, draft_tree, base_len + p_len)
     tokens, parents, slots = (draft_tree.tokens, draft_tree.parent, None) if live is None else live
-    logits = target.forward_tree(state, pending_block, tokens, parents)
-    path_only = logits.device.type == "cpu" and logits.size(-1) >= 32_000 and torch.get_num_threads() == 1
-    preds = torch.argmax(logits[:p_len] if path_only else logits, dim=-1).tolist()  # Keep parallel reductions batched.
+    causal = live is not None and _fits_causal_block(target, p_len, parents)
+    path_only = False
+    if causal and not compute_entropy and getattr(target, "capture_predictions", False):
+        preds = target.forward_predictions(state, pending_block + tokens)
+    else:
+        logits = (target.forward_block(state, pending_block + tokens) if causal
+                  else target.forward_tree(state, pending_block, tokens, parents))
+        path_only = logits.device.type == "cpu" and logits.size(-1) >= 32_000 and torch.get_num_threads() == 1
+        preds = torch.argmax(logits[:p_len] if path_only else logits, dim=-1).tolist()
 
     # Divergence audit of unverified pending tokens (approx-mode metadata;
     # 0 in exact mode by construction) - matches the block verifier.
@@ -294,10 +308,11 @@ def verify_tree_greedy(
     # Keep the accepted path's KV entries, drop every other packed node,
     # then align with the block verifier's postcondition (the final
     # committed token is the new pending one and is never in cache).
-    kept_path = path[:-1] if accepted_eos else path  # EOS stays pending.
-    if slots is not None:
-        kept_path = [slots[index] for index in kept_path]
-    target.gather_tree_tail(state, base_len + p_len, kept_path)
+    if not causal:  # A causal block keeps a contiguous prefix.
+        kept_path = path[:-1] if accepted_eos else path  # EOS stays pending.
+        if slots is not None:
+            kept_path = [slots[index] for index in kept_path]
+        target.gather_tree_tail(state, base_len + p_len, kept_path)
     target.crop(state, base_len + p_len - 1 + len(committed))
 
     return VerifyResult(

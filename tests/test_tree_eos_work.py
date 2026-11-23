@@ -1,9 +1,11 @@
+from contextlib import closing
 from copy import deepcopy
 from types import SimpleNamespace
 
 import pytest
 import torch
 
+from dart.models.replay import CudaGraphTarget
 from dart.verification.greedy import verify_greedy_reference
 from dart.verification.state_checks import _cache_failures, _reference_forward
 from dart.verification.synthetic import _synthetic_models
@@ -36,9 +38,12 @@ def test_terminal_rows_are_not_executed(tokens, parents, eos, live, live_parents
     assert actual.all_accepted == (actual.n_draft_accepted == len(tokens))
     assert actual.pending_divergence == expected.pending_divergence
     assert state.seq_len == expected_state.seq_len and tree == original
-    assert target.trees == [(live, live_parents)]
+    causal = live_parents == [i - 1 for i in range(len(live))]
+    assert target.trees == ([] if causal else [(live, live_parents)])
     assert target.calls == [pending + live]
-    assert len(target.gathers) == 1
+    assert len(target.gathers) == (0 if causal else 1)
+    if causal:
+        assert actual.hidden_index == len(pending) + len(expected.committed) - 2
     if not entropy or (actual.finished and actual.n_draft_accepted == len(actual.committed)):
         assert actual.entropy == 0
     else:
@@ -81,13 +86,18 @@ def test_pruned_tree_matches_native_cache_hidden_and_followup(models, monkeypatc
     original = deepcopy(tree)
     expected = oracle[:min(eos_index + 1, 5 if mismatch is None else mismatch + 1)]
     state, _ = target.prefill(prompt)
-    calls, forward = [], target.forward_tree
+    calls, forward, block = [], target.forward_tree, target.forward_block
+
+    def record_block(state, tokens):
+        calls.append((list(tokens[len(pending):]), None))
+        return block(state, tokens)
 
     def record(state, pending, tokens, parents):
         calls.append((list(tokens), list(parents)))
         return forward(state, pending, tokens, parents)
 
     monkeypatch.setattr(target, 'forward_tree', record)
+    monkeypatch.setattr(target, 'forward_block', record_block)
     result = verify_tree_greedy(target, state, pending, tree, compute_entropy=entropy)
     assert result.committed == expected and result.finished == (expected[-1] == eos)
     assert result.n_draft_proposed == len(original) and tree == original
@@ -205,6 +215,7 @@ def test_cpu_tree_prediction_rows(monkeypatch, prediction_threads, vocab, pendin
         return argmax(rows, *args, **kwargs)
 
     monkeypatch.setattr(target, 'forward_tree', forward)
+    monkeypatch.setattr(target, 'forward_block', lambda state, ids: forward(state, [], ids, []))
     monkeypatch.setattr(torch, 'argmax', record)
     result = verify_tree_greedy(target, state, pending, tree, compute_entropy=False)
 
@@ -217,3 +228,94 @@ def test_cpu_tree_prediction_rows(monkeypatch, prediction_threads, vocab, pendin
     assert result.finished == (committed[-1] in eos)
     assert result.pending_divergence == sum(b != a + 1 for a, b in zip(pending, pending[1:]))
     assert state.seq_len == 3 + len(pending) + len(committed) - 1
+
+
+@pytest.mark.parametrize('layout', ['accepted', 'correction', 'bonus', 'empty'])
+@pytest.mark.parametrize('compact,entropy', [(False, True), (True, False), (True, True)])
+@torch.inference_mode()
+def test_pruned_static_block_matches_native(models, monkeypatch, layout, compact, entropy):
+    base, reference = models
+    prompt, pending = [5, 7, 9], [4, 6]
+    oracle = []
+    for _ in range(3):
+        logits = _reference_forward(reference, prompt + pending + oracle).logits
+        oracle.append(int(logits[0, -1].argmax()))
+    first, second, _ = oracle
+    assert first != second
+    dead, miss = [token for token in range(67) if token not in oracle][:2]
+    eos = {dead, second}
+    branches, expected, accepted = [[dead, 7], [first, miss]], oracle[:2], 1
+    if layout == 'accepted':
+        branches.append([first, second, 8])
+        accepted = 2
+    elif layout == 'bonus':
+        eos = {dead}
+        branches, expected, accepted = [[dead, 7], [first, second]], oracle, 2
+    elif layout == 'empty':
+        eos = {dead, first}
+        branches, expected, accepted = [[dead, 7], [first, 8]], oracle[:1], 1
+    tree = DraftTree.from_branches(branches)
+    with closing(CudaGraphTarget(base, capacity=32, max_block_tokens=4, replay=False,
+                                 capture_predictions=compact)) as target:
+        target.eos_token_ids = frozenset(eos)
+        state, _ = target.prefill(prompt)
+        calls = []
+        forward, predict = target.forward_block, target.forward_predictions
+
+        def block(state, tokens):
+            calls.append(('block', list(tokens)))
+            return forward(state, tokens)
+
+        def predictions(state, tokens):
+            calls.append(('predictions', list(tokens)))
+            return predict(state, tokens)
+
+        monkeypatch.setattr(target, 'forward_block', block)
+        monkeypatch.setattr(target, 'forward_predictions', predictions)
+        result = verify_tree_greedy(target, state, pending, tree, compute_entropy=entropy)
+        live = [] if layout == 'empty' else branches[1]
+        assert calls == [('predictions' if compact and not entropy else 'block', pending + live)]
+        assert result.committed == expected and result.finished == (expected[-1] in eos)
+        assert result.n_draft_proposed == len(tree) and result.n_draft_accepted == accepted
+        assert not result.all_accepted and result.hidden_index == len(pending) + len(expected) - 2
+        retained = prompt + pending + expected[:-1]
+        native = _reference_forward(reference, retained)
+        assert not _cache_failures(state, native.past_key_values, len(retained), atol=2e-6, rtol=2e-5)
+        if entropy and layout in ('correction', 'bonus'):
+            prob = native.logits[0, -1].float().softmax(-1)
+            assert result.entropy == pytest.approx(float(-(prob * prob.log()).sum()), abs=2e-6)
+        else:
+            assert result.entropy == 0
+        next_logits = forward(state, expected[-1:])[-1]
+        next_ref = _reference_forward(reference, retained + expected[-1:])
+        torch.testing.assert_close(next_logits, next_ref.logits[0, -1], atol=2e-6, rtol=2e-5)
+        assert not _cache_failures(state, next_ref.past_key_values, len(retained) + 1, atol=2e-6, rtol=2e-5)
+
+
+@pytest.mark.parametrize('constraint', ['narrow', 'tree_only', 'context'])
+def test_pruned_block_limit_preserves_tree_admission(monkeypatch, constraint):
+    target = TreeTarget([50], False)
+    state = SimpleNamespace(seq_len=3)
+    tree = DraftTree.from_branches([[50, 53, 54], [11, 12]])
+    target.model.config.max_position_embeddings = 64
+    if constraint == 'narrow':
+        target.max_block_tokens = 2
+    elif constraint == 'tree_only':
+        monkeypatch.setattr(target, 'forward_block', None)
+    else:
+        target.context_limit = 6
+
+    def packed(state, pending, tokens, parents):
+        target.trees.append((list(tokens), list(parents)))
+        if constraint == 'context' and 50 in tokens:
+            raise ValueError('exceeds target context')
+        return CountingTarget.forward_block(target, state, pending + tokens)
+
+    monkeypatch.setattr(target, 'forward_tree', packed)
+    if constraint == 'context':
+        with pytest.raises(ValueError, match='exceeds target context'):
+            verify_tree_greedy(target, state, 10, tree)
+        assert target.trees == [(tree.tokens, tree.parent)] and state.seq_len == 3
+    else:
+        result = verify_tree_greedy(target, state, 10, tree)
+        assert result.committed == [11, 12, 13] and target.trees == [([11, 12], [-1, 0])]
