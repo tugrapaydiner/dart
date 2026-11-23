@@ -174,6 +174,134 @@ def test_compressed_kv_precision_policy_stays_exact():
     assert out.token_ids == base  # fine-grained KV precision, still byte-exact
 
 
+@torch.inference_mode()
+def _prompt_entropies(target, tokens):
+    ids = torch.tensor([tokens])
+    logits = target.model(ids, attention_mask=torch.ones_like(ids), use_cache=False).logits[0]
+    return [0.0] + torch.distributions.Categorical(logits=logits).entropy().tolist()
+
+
+@pytest.mark.parametrize("sampled", [False, True])
+def test_compressed_entropy_follows_evicted_positions(monkeypatch, sampled):
+    from dart.drafters.compressed_kv import CompressedKVDrafter
+    from tests.conftest import build_tiny_target, random_prompt
+
+    target = build_tiny_target()
+    tokens = random_prompt(73, 12)
+    expected = _prompt_entropies(target, tokens)
+    threshold = (min(expected[1:8]) + max(expected[1:8])) / 2
+    policy = PrecisionPolicy(default_bits=3, sink_len=0, high_entropy_threshold=threshold, high_entropy_bits=7)
+    lane = CompressedKVDrafter(target, QuantSpec(window_len=4, policy=policy))
+    calls = []
+    original = target.all_logits
+
+    def score(ids):
+        calls.append(len(ids))
+        return original(ids)
+
+    monkeypatch.setattr(target, "all_logits", score)
+    propose = lane.propose_with_probs if sampled else lane.propose
+    for n in range(6, 13):
+        propose(tokens[:n], 1)
+        bits = [7 if entropy >= threshold else 3 for entropy in expected[:n-4]]
+        for store in lane._state.cache._kq + lane._state.cache._vq:
+            assert store.bits_per_token.tolist() == bits
+        assert lane.entropy_at(n-5) == pytest.approx(expected[n-5], abs=2e-5)
+    assert set(bits) == {3, 7}
+    assert calls == [6, 12]
+
+
+@pytest.mark.parametrize("sampled", [False, True])
+def test_compressed_entropy_waits_for_a_committed_row(monkeypatch, sampled):
+    from dart.drafters.compressed_kv import CompressedKVDrafter
+    from tests.conftest import build_tiny_target, random_prompt
+
+    target = build_tiny_target()
+    target.record_hidden = True
+    policy = PrecisionPolicy(sink_len=0, high_entropy_threshold=1.0)
+    lane = CompressedKVDrafter(target, QuantSpec(window_len=32, policy=policy))
+    original = target.all_logits
+    calls = []
+
+    def score(ids):
+        calls.append(list(ids))
+        return original(ids)
+
+    monkeypatch.setattr(target, "all_logits", score)
+    propose = lane.propose_with_probs if sampled else lane.propose
+    ids = random_prompt(32, 6)
+    first = list(ids)
+    propose(ids, 2)
+    hidden = target.last_hidden_block
+    assert (lane.entropy_at(-1), lane.entropy_at(0), lane.entropy_at(len(ids))) == (None, 0.0, None)
+    assert calls == []
+    assert lane.entropy_at(3) == pytest.approx(_prompt_entropies(target, first)[3], abs=2e-5)
+    assert target.last_hidden_block is hidden
+    ids[0] = (ids[0] + 1) % target.model.config.vocab_size
+    assert lane.token_id_at(0) == first[0]
+    for context in (ids, ids[:4]):
+        propose(context, 1)
+        assert lane.entropy_at(2) == pytest.approx(_prompt_entropies(target, context)[2], abs=2e-5)
+        assert lane.token_id_at(0) == context[0]
+    assert calls == [first, ids, ids[:4]]
+    lane.finish_request()
+    assert lane.token_id_at(0) is None and lane.entropy_at(0) is None
+
+
+@pytest.mark.parametrize("threshold", [1.0, float("inf")])
+def test_compressed_entropy_matches_sampled_distribution(threshold):
+    from types import SimpleNamespace
+
+    from dart.drafters.compressed_kv import CompressedKVDrafter
+    from tests.conftest import build_tiny_target, random_prompt
+
+    target = build_tiny_target()
+    tokens = random_prompt(88, 8)
+    entropies = _prompt_entropies(target, tokens)
+    policy = PrecisionPolicy(default_bits=3, sink_len=0, syntax_token_ids=frozenset({tokens[0]}),
+                             syntax_bits=8, high_entropy_threshold=threshold, high_entropy_bits=6)
+    spec = QuantSpec(window_len=2, policy=policy)
+    meta = SimpleNamespace(token_id_at=tokens.__getitem__, entropy_at=entropies.__getitem__)
+    reference = QuantizedKVCache(spec, meta=meta)
+    _, logits = target.prefill(tokens, cache=reference)
+    probs = torch.softmax(logits / 0.8, -1)
+    rng = torch.Generator().manual_seed(17)
+
+    lane = CompressedKVDrafter(target, spec)
+    lane.sample_temperature = 0.8
+    lane.seed_request(17)
+    drafts, rows = lane.propose_with_probs(tokens, 1)
+    assert drafts == [int(torch.multinomial(probs, 1, generator=rng))]
+    torch.testing.assert_close(rows[0], probs, rtol=0, atol=0)
+    for got, want in zip(lane._state.cache._kq + lane._state.cache._vq, reference._kq + reference._vq, strict=True):
+        assert torch.equal(got.bits_per_token, want.bits_per_token)
+        assert torch.equal(got.q, want.q)
+
+
+def test_compressed_entropy_failed_read_keeps_hidden_state(monkeypatch):
+    from dart.drafters.compressed_kv import CompressedKVDrafter
+    from tests.conftest import build_tiny_target, random_prompt
+
+    target = build_tiny_target()
+    target.record_hidden = True
+    policy = PrecisionPolicy(high_entropy_threshold=1.0)
+    lane = CompressedKVDrafter(target, QuantSpec(window_len=16, policy=policy))
+    ids = random_prompt(48, 6)
+    lane.propose(ids, 1)
+    hidden = target.last_hidden_block
+
+    def fail(tokens):
+        target.last_hidden_block = None
+        raise RuntimeError("entropy unavailable")
+
+    with monkeypatch.context() as scoped:
+        scoped.setattr(target, "all_logits", fail)
+        with pytest.raises(RuntimeError, match="entropy unavailable"):
+            lane.entropy_at(2)
+    assert target.last_hidden_block is hidden
+    assert lane.entropy_at(2) == pytest.approx(_prompt_entropies(target, ids)[2], abs=2e-5)
+
+
 # --------------------------- token drop ------------------------------ #
 def test_compact_sequence():
     spec = TokenDropSpec(sink_len=3, window_len=4)
