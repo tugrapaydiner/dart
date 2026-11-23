@@ -1,6 +1,9 @@
 from __future__ import annotations
 
+from itertools import product
+
 import pytest
+import torch
 
 from dart.drafters.ngram import NGramDrafter
 from dart.models.target import TargetModel
@@ -96,3 +99,138 @@ def test_limit_keeps_a_valid_packing_prefix():
 def test_rejects_invalid_node_caps(value):
     with pytest.raises(ValueError, match="max_tree_nodes"):
         DecodeConfig(max_tree_nodes=value)
+
+
+class PackedLane:
+    name = "packed"
+    requires_entropy = False
+
+    def __init__(self, tree):
+        self.tree = tree
+
+    def propose_tree(self, committed, max_tokens):
+        return self.tree
+
+    def observe(self, result):
+        pass
+
+
+def test_current_tree_depth_at_the_request_context_limit(target):
+    target.model.config.max_position_embeddings = 24
+    with torch.no_grad():
+        target.model.lm_head.weight.zero_()
+    prompt = [5] * 20
+    expected = target.greedy_generate(prompt, 4)
+    parents = [-1] * 9
+    tree = DraftTree([0] * 9, parents)
+    with DartEngine(target, PackedLane(tree), verifier="tree") as engine:
+        for layout in ([-1] * 9, list(range(-1, 8)), [-1] * 9):
+            parents[:] = layout
+            output = engine.generate(prompt, DecodeConfig(max_new_tokens=4, draft_len=8))
+            assert output.token_ids == expected
+            assert sum(step.n_committed for step in output.rounds) == 3
+            if layout[1] == 0:
+                assert output.rounds[0].n_draft_proposed == 2
+
+
+@pytest.mark.parametrize("edit", ["deepen", "flatten", "append", "returned_depths"])
+def test_current_tree_depths_follow_the_parent_list(edit):
+    tree = DraftTree([11, 12, 13, 14], [-1, 0, -1, 2])
+    if edit == "deepen":
+        tree.parent[:] = [-1, 0, 1, 2]
+    elif edit == "flatten":
+        tree.parent[:] = [-1] * 4
+    elif edit == "append":
+        tree.tokens.append(15)
+        tree.parent.append(3)
+    else:
+        tree.depths[:] = [9] * 4
+    depths = []
+    for parent in tree.parent:
+        depths.append(0 if parent < 0 else depths[parent] + 1)
+    assert tree.depths == depths
+    roots = tree.truncate(1)
+    assert roots.tokens == [token for token, depth in zip(tree.tokens, depths) if depth == 0]
+    assert roots.parent == [-1] * len(roots)
+
+
+def test_bounded_tree_stops_after_the_last_eligible_slot(target, monkeypatch):
+    parents = [p for start in range(0, 768, 3) for p in (-1, start, start + 1)]
+    tree = DraftTree([7] * len(parents), parents)
+    visited = []
+
+    class Observed(list):
+        def __iter__(self):
+            for i, value in enumerate(super().__iter__()):
+                visited.append(i)
+                yield value
+
+        def __getitem__(self, key):
+            if isinstance(key, int):
+                visited.append(key)
+            return super().__getitem__(key)
+
+    tree.parent = Observed(parents)
+    sizes = []
+    initialize = DraftTree.__post_init__
+
+    def record(candidate):
+        sizes.append(len(candidate))
+        initialize(candidate)
+
+    monkeypatch.setattr(DraftTree, "__post_init__", record)
+    lane = PackedLane(tree)
+    config = DecodeConfig(max_new_tokens=4, draft_len=2, max_tree_nodes=5)
+    with DartEngine(target, lane, verifier="tree") as engine:
+        result, _ = engine._round_drafts(lane, [1, 2], 2, "tree", False, config)
+    assert result.parent == [-1, 0, -1, 2, -1]
+    assert max(sizes) <= 5
+    assert visited and max(visited) <= 6
+
+
+def test_bounded_tree_matches_independent_parent_walks(target):
+    lane = PackedLane(None)
+    with DartEngine(target, lane, verifier="tree") as engine:
+        for parents in product(*(range(-1, i) for i in range(5))):
+            tree = DraftTree(list(range(5)), list(parents))
+            lane.tree = tree
+            depths = []
+            for i in range(5):
+                depth, parent = 0, parents[i]
+                while parent >= 0:
+                    depth, parent = depth + 1, parents[parent]
+                depths.append(depth)
+            for depth, cap in product((1, 2, 5), (0, 1, 3, 5, 8)):
+                config = DecodeConfig(draft_len=depth, max_tree_nodes=cap)
+                actual, _ = engine._round_drafts(lane, [7], depth, "tree", False, config)
+                keep = [i for i in range(5) if depths[i] < depth][:cap]
+                assert actual.tokens == keep
+                assert actual.parent == [-1 if parents[i] < 0 else keep.index(parents[i]) for i in keep]
+                if len(keep) == 5:
+                    assert actual is tree
+
+
+@pytest.mark.parametrize("depth", [1, 8])
+@pytest.mark.parametrize("parents", [[-1, 2, 0], [-1, False, 1], [-1, 0]])
+def test_current_tree_invalid_links_are_rejected(depth, parents):
+    tree = DraftTree.chain([3, 5, 7])
+    tree.parent[:] = parents
+    with pytest.raises(ValueError, match="preceding index|equal length"):
+        _ = tree.depths
+    with pytest.raises(ValueError, match="preceding index|equal length"):
+        tree.truncate(depth)
+
+
+def test_bounded_tree_keeps_subclass_truncation_hooks(target):
+    calls = []
+
+    class CustomTree(DraftTree):
+        def truncate(self, max_tokens):
+            calls.append(max_tokens)
+            return DraftTree.chain([11] * max_tokens)
+
+    lane = PackedLane(CustomTree([7], [-1]))
+    config = DecodeConfig(draft_len=7, max_tree_nodes=3)
+    with DartEngine(target, lane, verifier="tree") as engine:
+        tree, _ = engine._round_drafts(lane, [5], 7, "tree", False, config)
+    assert calls == [3] and tree.tokens == [11] * 3

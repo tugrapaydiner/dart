@@ -35,12 +35,17 @@ the suite validates the tiny reference target).  Greedy/exact mode only.
 from __future__ import annotations
 
 from collections.abc import Iterable
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 
 import torch
 
 from dart.models.target import TargetModel, TargetState
 from dart.runtime.types import VerifyResult
+
+
+def _check_parent(index: int, parent: int) -> None:
+    if type(parent) is not int or not -1 <= parent < index:
+        raise ValueError(f"node {index}: parent {parent} must be -1 or a preceding index")
 
 
 @dataclass
@@ -51,37 +56,57 @@ class DraftTree:
 
     tokens: list[int]
     parent: list[int]
-    _depths: list[int] = field(default_factory=list, repr=False)
 
     def __post_init__(self) -> None:
+        self._check_size()
+        for index, parent in enumerate(self.parent):
+            _check_parent(index, parent)
+
+    def _check_size(self) -> None:
         if len(self.tokens) != len(self.parent):
             raise ValueError("tokens and parent must have equal length")
-        for i, p in enumerate(self.parent):
-            if p >= i or p < -1:
-                raise ValueError(
-                    f"node {i}: parent {p} must be -1 or a preceding index"
-                )
-        d: list[int] = []
-        for p in self.parent:
-            d.append(0 if p < 0 else d[p] + 1)
-        self._depths = d
 
     def __len__(self) -> int:
         return len(self.tokens)
 
     @property
     def depths(self) -> list[int]:
-        return self._depths
+        self._check_size()
+        depths: list[int] = []
+        for index, parent in enumerate(self.parent):
+            _check_parent(index, parent)
+            depths.append(0 if parent < 0 else depths[parent] + 1)
+        return depths
 
-    def truncate(self, max_tokens: int) -> "DraftTree":
-        if not self.tokens or max(self._depths) < max_tokens:
+    def truncate(self, max_tokens: int, *, max_nodes: int | None = None) -> "DraftTree":
+        """Keep nodes within the depth budget, in packing order, up to the node limit."""
+        self._check_size()
+        if max_nodes is not None and (type(max_nodes) is not int or max_nodes < 0):
+            raise ValueError("max_nodes must be a nonnegative integer")
+        count = len(self) if max_nodes is None else min(len(self), max_nodes)
+        if max_tokens >= count:
+            if count == len(self):
+                for index, parent in enumerate(self.parent):
+                    _check_parent(index, parent)
+            return self.limit(count)  # A path cannot be longer than the number of kept nodes.
+        if max_tokens <= 0:
+            return DraftTree([], []) if self.tokens else self
+
+        slots = {-1: (-1, 0)}  # Packed parent and depth of its children.
+        parents = []
+        for index, parent in enumerate(self.parent):
+            _check_parent(index, parent)
+            kept_parent = slots.get(parent)
+            if kept_parent is None or not kept_parent[1] < max_tokens:
+                continue
+            new_parent, depth = kept_parent
+            slots[index] = (len(parents), depth + 1)
+            parents.append(new_parent)
+            if len(parents) == count:
+                break
+        if len(parents) == len(self):
             return self
-        kept = [i for i, depth in enumerate(self._depths) if depth < max_tokens]
-        remap = {old: new for new, old in enumerate(kept)}
-        return DraftTree(
-            [self.tokens[i] for i in kept],
-            [-1 if self.parent[i] < 0 else remap[self.parent[i]] for i in kept],
-        )
+        return DraftTree([self.tokens[i] for i in slots if i != -1], parents)
 
     def limit(self, max_nodes: int) -> "DraftTree":
         """Keep the first ``max_nodes`` packed nodes; parents precede children."""

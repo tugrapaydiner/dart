@@ -319,8 +319,10 @@ class DartEngine:
                 drafts = propose(committed, per_round, max_nodes=config.max_tree_nodes)
             else:
                 drafts = propose(committed, per_round)
+            if type(drafts) is DraftTree:
+                return drafts.truncate(per_round, max_nodes=config.max_tree_nodes), None
             if isinstance(drafts, DraftTree):
-                return drafts.truncate(per_round).limit(config.max_tree_nodes), None
+                return drafts.truncate(per_round).limit(config.max_tree_nodes), None  # Keep subclass hooks.
         else:
             drafts = drafter.propose(committed, per_round)
         return DraftTree.chain(_draft_prefix(drafts, per_round)), None
