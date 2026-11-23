@@ -23,9 +23,12 @@ from __future__ import annotations
 
 import time
 import uuid
+from collections.abc import Iterable
 from contextlib import ExitStack, closing
 from functools import partial
 from inspect import Parameter, signature, unwrap
+from itertools import islice
+from sys import maxsize
 from typing import Callable, Optional
 
 import torch
@@ -68,6 +71,12 @@ def _accepts_node_limit(propose) -> bool:
     except (TypeError, ValueError):
         return False
     return limit is not None and limit.kind in (Parameter.KEYWORD_ONLY, Parameter.POSITIONAL_OR_KEYWORD)
+
+
+def _draft_prefix(tokens: Iterable[int], budget: int) -> list[int]:
+    if type(tokens) is list:
+        return tokens[:budget]
+    return list(islice(tokens, min(budget, maxsize)))
 
 
 class DartEngine:
@@ -260,8 +269,9 @@ class DartEngine:
             return [], None
         if sampling and hasattr(drafter, "propose_with_probs"):
             drafts, probs = drafter.propose_with_probs(committed, budget)
-            return list(drafts), probs
-        return list(drafter.propose(committed, budget)), None
+        else:
+            drafts, probs = drafter.propose(committed, budget), None
+        return _draft_prefix(drafts, budget), probs
 
     def _check_request(self, config: DecodeConfig) -> None:
         """Reject mode, verifier and residency combinations before any execution."""
@@ -289,18 +299,14 @@ class DartEngine:
     def _round_drafts(self, drafter, committed, per_round, verifier, sampling, config, tree_limits=None):
         """Return (drafts, draft_probs) for one round, clamped to its budget."""
         if verifier != "tree":
-            drafts, draft_probs = self._propose(drafter, committed, per_round, sampling)
-            # Clamp to the round budget even if a drafter over-returns:
-            # tokens past the budget would be verified (wasted target
-            # compute) only to be truncated at the end.
-            return (drafts[:per_round] if per_round > 0 else []), draft_probs
+            return self._propose(drafter, committed, per_round, sampling)
         # Tree-capable drafters propose several candidate branches;
         # plain drafters degrade to a chain, for which tree and
         # block verification coincide decision-for-decision.
         per_round = min(per_round, config.max_tree_nodes)  # No retained path can exceed the node cap.
         if per_round <= 0:
-            drafts = DraftTree.chain([])
-        elif hasattr(drafter, "propose_tree"):
+            return DraftTree.chain([]), None
+        if hasattr(drafter, "propose_tree"):
             propose = drafter.propose_tree
             method = getattr(propose, "__func__", propose)
             if tree_limits is None:
@@ -313,11 +319,11 @@ class DartEngine:
                 drafts = propose(committed, per_round, max_nodes=config.max_tree_nodes)
             else:
                 drafts = propose(committed, per_round)
+            if isinstance(drafts, DraftTree):
+                return drafts.truncate(per_round).limit(config.max_tree_nodes), None
         else:
-            drafts = DraftTree.chain(list(drafter.propose(committed, per_round))[:per_round])
-        if not isinstance(drafts, DraftTree):
-            drafts = DraftTree.chain(list(drafts))
-        return drafts.truncate(per_round).limit(config.max_tree_nodes), None
+            drafts = drafter.propose(committed, per_round)
+        return DraftTree.chain(_draft_prefix(drafts, per_round)), None
 
     def _output(self, config, metrics, run_id, start, target, generated, rounds, *, unverified_tokens=0,
                 divergence_total=0, trailing_unverified=0, res_stats=None, kv_gb=0.0) -> GenerationOutput:

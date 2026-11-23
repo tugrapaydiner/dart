@@ -10,6 +10,7 @@ diffused, or simply wrong.
 
 from __future__ import annotations
 
+from collections.abc import Iterable
 from typing import Protocol, runtime_checkable
 
 from dart.runtime.types import VerifyResult
@@ -37,11 +38,11 @@ class Drafter(Protocol):
 
     name: str
 
-    def propose(self, committed: list[int], max_tokens: int) -> list[int]:
+    def propose(self, committed: list[int], max_tokens: int) -> Iterable[int]:
         """Propose up to ``max_tokens`` continuation tokens for ``committed``.
 
-        Returning fewer tokens (or none) is always legal; the engine falls
-        back to a plain target step.
+        The engine reads at most max_tokens items. Returning an empty
+        iterable falls back to a plain target step.
         """
         ...
 
