@@ -248,17 +248,26 @@ class TargetModel:
             state,
             input_ids=input_ids,
             attention_mask=attention_mask,
+            last_logits_only=last_logits_only,
             **logits_options,
         )
 
-    def _run_model(self, state: TargetState, **kwargs) -> Tensor:
+    def _run_model(self, state: TargetState, *, last_logits_only: bool = False, **kwargs) -> Tensor:
         try:
             out = self.model(past_key_values=state.cache, use_cache=True,
                              output_hidden_states=self.record_hidden, **kwargs)
             state.cache = out.past_key_values  # Some models return a new cache.
             if self.record_hidden:
                 self.last_hidden_block = out.hidden_states[-1][0].detach()
-            return out.logits[0].float()
+            rows = out.logits[0]
+            if last_logits_only:
+                rows = rows[-1:]
+                if rows.dtype == torch.float32 and (
+                    type(rows) is not Tensor or rows.layout != torch.strided
+                    or rows.untyped_storage().nbytes() > rows.nbytes
+                ):
+                    return rows.clone()  # A single row can still share the full prompt buffer.
+            return rows.float()
         except BaseException:
             state._failed = True
             self.last_hidden_block = None

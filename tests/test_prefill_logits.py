@@ -15,6 +15,50 @@ from tests.conftest import build_tiny_target, random_prompt
 from tests.test_sampling_devices import DEVICES
 
 
+@pytest.mark.parametrize("dtype", [torch.float32, torch.bfloat16])
+@pytest.mark.parametrize("length,full", [(1, True), (7, True), (7, False)])
+def test_prefill_row_storage(dtype, length, full):
+    target = TargetModel(build_tiny_target().model, dtype=dtype)
+    outputs = []
+
+    def capture(_model, _args, output):
+        outputs.append(output.logits)
+
+    with target.model.register_forward_hook(capture), patch.object(target, "_last_prefill_logits", not full):
+        state, logits = target.prefill(random_prompt(603, length))
+    raw, = outputs
+    assert raw.shape[1] == (length if full else 1) and state.seq_len == length
+    last = raw[0, -1]
+    assert logits.dtype == torch.float32 and torch.equal(logits, last.float())
+    assert logits.untyped_storage().nbytes() == logits.numel() * logits.element_size()
+    if raw.dtype == torch.float32:
+        assert (logits.data_ptr() == last.data_ptr()) == (raw.shape[1] == 1)
+
+
+@pytest.mark.parametrize("first_slot", [False, True])
+def test_prefill_detaches_a_single_row_view_of_a_larger_buffer(first_slot):
+    target = build_tiny_target()
+    prompt = [7, 8, 9, 10]
+    views = []
+
+    def project_one(_model, _args, output):
+        raw = output.logits
+        assert raw.shape[1] == len(prompt)
+        if first_slot:
+            raw[:, :1].copy_(raw[:, -1:])
+            output.logits = raw[:, :1]
+        else:
+            output.logits = raw[:, -1:]
+        views.append(output.logits)
+
+    with target.model.register_forward_hook(project_one), patch.object(target, "_last_prefill_logits", False):
+        state, logits = target.prefill(prompt)
+    view, = views
+    assert state.seq_len == len(prompt) and torch.equal(logits, view[0, 0])
+    assert view.untyped_storage().nbytes() > logits.numel() * logits.element_size()
+    assert logits.untyped_storage().nbytes() == logits.numel() * logits.element_size()
+
+
 @pytest.mark.parametrize("device", DEVICES)
 @pytest.mark.parametrize("dtype", [torch.float32, torch.bfloat16])
 def test_prefill_projection_keeps_hidden_states_cache_and_verification_logits(device, dtype):
