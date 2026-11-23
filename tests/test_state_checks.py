@@ -64,6 +64,45 @@ def test_shared_prefix_and_sibling_order_preserve_state(models, reverse):
     assert len(tree.tokens) < sum(map(len, branches))
 
 
+@pytest.mark.parametrize("shared_root", [False, True])
+@pytest.mark.parametrize("reverse", [False, True])
+@pytest.mark.parametrize("stop", [False, True])
+def test_overlapping_packed_branches_keep_the_longest_match(models, monkeypatch, shared_root, reverse, stop):
+    target, reference = models
+    case = sample(models)
+    a, b, c, bonus = case.drafts
+    wrong = next(token for token in range(reference.config.vocab_size) if token not in case.drafts)
+    if stop:
+        assert c not in (a, b)
+        target.eos_token_ids = frozenset({c})
+        reference.generation_config.eos_token_id = c
+
+    tokens, parents = ([a], [-1]) if shared_root else ([], [])
+    branches = [[b, wrong], [b, c]] if shared_root else [[a, wrong], [a, b, c]]
+    for branch in reversed(branches) if reverse else branches:
+        parent = 0 if shared_root else -1
+        for token in branch:
+            parents.append(parent)
+            parent = len(tokens)
+            tokens.append(token)
+
+    widths = []
+    forward = target.forward_tree
+
+    def record(state, pending, tree_tokens, tree_parents):
+        widths.append(len(tree_tokens))
+        return forward(state, pending, tree_tokens, tree_parents)
+
+    monkeypatch.setattr(target, "forward_tree", record)
+    case = replace(case, drafts=tuple(tokens), parents=tuple(parents))
+    result = check_verifier_state(target, reference, case, inspect_tree=True)
+    expected = (a, b, c) if stop else (a, b, c, bonus)
+    assert result.expected == result.actual == expected
+    assert result.passed, result.failures
+    assert result.tree_rows_checked == len(tokens) + 1
+    assert widths == [len(tokens), len(tokens) - 1 - int(stop)]  # Raw row check, then actual verification.
+
+
 @pytest.mark.parametrize("position", [0, 1, 2, 3])
 @pytest.mark.parametrize("verifier", ["block", "tree"])
 def test_eos_removes_last_accepted_token_from_cache(models, position, verifier):

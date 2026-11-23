@@ -127,6 +127,21 @@ class DraftTree:
         return cls(tokens, parent)
 
 
+def _merge_tree_prefixes(tree: DraftTree) -> DraftTree:
+    if len(tree.parent) != len(tree.tokens):
+        return tree
+    edges = {}
+    slots = []
+    for index, (parent, token) in enumerate(zip(tree.parent, tree.tokens)):
+        if type(parent) is not int or not -1 <= parent < index or type(token) is not int:
+            return tree  # Keep the target's normal input checks.
+        parent = slots[parent] if parent >= 0 else -1
+        slots.append(edges.setdefault((parent, token), len(edges)))
+    if len(edges) == len(tree):
+        return tree
+    return DraftTree([token for _, token in edges], [parent for parent, _ in edges])
+
+
 def _live_tree_rows(target, tree: DraftTree, context_len: int):
     eos = target.eos_token_ids
     if not eos or not any(type(token) is int and token in eos for token in tree.tokens):
@@ -186,6 +201,7 @@ def verify_tree_greedy(
 
         return verify_block_greedy(target, state, pending_block, draft_tree.tokens, compute_entropy=compute_entropy)
 
+    draft_tree = _merge_tree_prefixes(draft_tree)  # Keep the original proposal count.
     live = _live_tree_rows(target, draft_tree, base_len + p_len)
     tokens, parents, slots = (draft_tree.tokens, draft_tree.parent, None) if live is None else live
     logits = target.forward_tree(state, pending_block, tokens, parents)

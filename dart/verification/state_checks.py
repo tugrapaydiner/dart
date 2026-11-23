@@ -57,16 +57,15 @@ class RoundCheck:
         return not self.failures
 
 
-def _expected_path(case, continuation, eos):
-    committed, accepted, parent = [], 0, -1
+def _expected_path(drafts, parents, continuation, eos):
+    committed, accepted, frontier = [], 0, {-1}
     for token in continuation:
         committed.append(token)
-        matches = [index for index, (draft, ancestor) in enumerate(zip(case.drafts, case.parents))
-                   if ancestor == parent and draft == token]
-        if not matches:
+        frontier = {index for index, (draft, parent) in enumerate(zip(drafts, parents))
+                    if parent in frontier and draft == token}
+        if not frontier:
             break
         accepted += 1
-        parent = matches[0]
         if token in eos:
             break
     return tuple(committed), accepted
@@ -206,7 +205,7 @@ def _round_expectation(target, reference_model, case, verifier):
     continuation = hf_decoder(reference_model)(
         GenerationCase(case.name, (*case.prefix, case.pending), lookahead)
     )
-    return _expected_path(case, continuation, eos)
+    return _expected_path(case.drafts, case.parents, continuation, eos)
 
 
 def _result_failures(result, expected, accepted, draft_count, eos):

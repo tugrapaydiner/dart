@@ -21,6 +21,7 @@ from dart.verification.differential import (
     hf_decoder,
     run_differential,
 )
+from dart.verification.state_checks import _expected_path
 from dart.verification.state_sequences import (
     StateOperation,
     StateSequenceCheck,
@@ -199,18 +200,6 @@ def _reference_drafts(operations, seed):
             ids.append(out[-1])
         return out
 
-    def accepted(tokens, parents, cont):
-        children = {}
-        for index, parent in enumerate(parents):
-            children.setdefault(parent, []).append(index)
-        committed, node = [], -1
-        while True:
-            want = cont[len(committed)]
-            node = next((c for c in children.get(node, []) if tokens[c] == want), None)
-            if node is None or want == 2:  # A miss commits the correction; EOS ends the round.
-                return committed + [want]
-            committed.append(want)
-
     def wrong(token):
         return (token + 1) % VOCAB_SIZE
 
@@ -241,7 +230,7 @@ def _reference_drafts(operations, seed):
                 drafts[path[0]] = wrong(drafts[path[0]])
             blocks, trees = blocks + (action == "block"), trees + (action == "tree")
             operation = replace(operation, tokens=(pending, *drafts))
-            committed = accepted(drafts, parents, cont)
+            committed, _ = _expected_path(drafts, parents, cont, {2})
             prefixes[request] = (*prefixes[request], pending, *committed[:-1])
         elif action == "prefill":
             prefixes[request] = operation.tokens
