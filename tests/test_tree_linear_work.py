@@ -73,11 +73,14 @@ def models():
         torch.set_num_threads(previous)
 
 
+@pytest.mark.parametrize('duplicate', [False, True], ids=['linear', 'overlapping'])
 @pytest.mark.parametrize('rejection', range(5))
 @pytest.mark.parametrize('eos_index', [None, 0, 2])
 @pytest.mark.parametrize('entropy', [False, True])
 @torch.inference_mode()
-def test_chain_matches_native_outputs_cache_hidden_and_continuation(models, monkeypatch, rejection, eos_index, entropy):
+def test_chain_matches_native_outputs_cache_hidden_and_continuation(
+    models, monkeypatch, rejection, eos_index, entropy, duplicate,
+):
     target, reference = models
     target.record_hidden = True
     prompt = [5, 7, 9]
@@ -103,8 +106,10 @@ def test_chain_matches_native_outputs_cache_hidden_and_continuation(models, monk
     monkeypatch.setattr(target, 'forward_block', record)
     monkeypatch.setattr(target, 'forward_tree', lambda *args: pytest.fail('linear tree used a tree mask'))
     monkeypatch.setattr(target, 'gather_tree_tail', lambda *args: pytest.fail('linear tree gathered KV'))
-    result = verify_tree_greedy(target, state, oracle[0], DraftTree.chain(drafts), compute_entropy=entropy)
-    assert result.committed == expected and result.n_draft_proposed == 4
+    tree = DraftTree(drafts[:1] + drafts, [-1, -1, 1, 2, 3]) if duplicate else DraftTree.chain(drafts)
+    result = verify_tree_greedy(target, state, oracle[0], tree, compute_entropy=entropy)
+    assert result.committed == expected and result.n_draft_proposed == len(tree)
+    assert result.all_accepted is (result.n_draft_accepted == len(tree))
     assert result.finished is (expected[-1] in target.eos_token_ids)
     assert len(rows) == 1
     live = prompt + [oracle[0]] + expected[:-1]
@@ -155,8 +160,9 @@ def test_invalid_ids_after_eos_remain_rejected(models, monkeypatch, bad):
 
 
 @pytest.mark.parametrize('compact,entropy', [(False, True), (True, False), (True, True)])
+@pytest.mark.parametrize('duplicate', [False, True], ids=['linear', 'overlapping'])
 @torch.inference_mode()
-def test_linear_tree_can_use_static_block_execution(models, compact, entropy):
+def test_linear_tree_can_use_static_block_execution(models, compact, entropy, duplicate):
     base, reference = models
     prompt = [5, 7, 9]
     first = int(_reference_forward(reference, prompt).logits[0, -1].argmax())
@@ -165,8 +171,11 @@ def test_linear_tree_can_use_static_block_execution(models, compact, entropy):
                                   capture_predictions=compact)) as target:
         target.eos_token_ids = frozenset([next_token])
         state, _ = target.prefill(prompt)
-        result = verify_tree_greedy(target, state, first, [next_token, 5, 7], compute_entropy=entropy)
+        drafts = [next_token, 5, 7]
+        tree = DraftTree(drafts + [next_token], [-1, 0, 1, -1]) if duplicate else drafts
+        result = verify_tree_greedy(target, state, first, tree, compute_entropy=entropy)
         assert result.committed == [next_token] and result.finished
-        assert result.n_draft_accepted == 1 and result.n_draft_proposed == 3
+        assert result.n_draft_accepted == 1 and result.n_draft_proposed == len(tree)
+        assert not result.all_accepted
         expected = _reference_forward(reference, prompt + [first])
         assert not _cache_failures(state, expected.past_key_values, len(prompt) + 1, atol=2e-6, rtol=2e-5)

@@ -127,6 +127,12 @@ class DraftTree:
         return cls(tokens, parent)
 
 
+def _is_chain(tree: DraftTree) -> bool:
+    return len(tree.parent) == len(tree) and all(
+        type(parent) is int and parent == index - 1 for index, parent in enumerate(tree.parent)
+    )
+
+
 def _merge_tree_prefixes(tree: DraftTree) -> DraftTree:
     if len(tree.parent) != len(tree.tokens):
         return tree
@@ -193,15 +199,19 @@ def verify_tree_greedy(
     n = len(draft_tree)
     base_len = state.seq_len
 
-    if n == 0 or (len(draft_tree.parent) == n and all(
-        type(parent) is int and parent == index - 1 for index, parent in enumerate(draft_tree.parent)
-    )):
-        # A chain needs no tree mask or cache gather.
+    chain = n == 0 or _is_chain(draft_tree)
+    if not chain:
+        draft_tree = _merge_tree_prefixes(draft_tree)
+        chain = len(draft_tree) < n and _is_chain(draft_tree)
+    if chain:
         from dart.verification.block_verify import verify_block_greedy
 
-        return verify_block_greedy(target, state, pending_block, draft_tree.tokens, compute_entropy=compute_entropy)
+        result = verify_block_greedy(target, state, pending_block, draft_tree.tokens, compute_entropy=compute_entropy)
+        if result.n_draft_proposed != n:
+            result.n_draft_proposed = n  # Count the submitted nodes.
+            result.all_accepted = False
+        return result
 
-    draft_tree = _merge_tree_prefixes(draft_tree)  # Keep the original proposal count.
     live = _live_tree_rows(target, draft_tree, base_len + p_len)
     tokens, parents, slots = (draft_tree.tokens, draft_tree.parent, None) if live is None else live
     logits = target.forward_tree(state, pending_block, tokens, parents)
