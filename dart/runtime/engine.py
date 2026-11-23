@@ -173,7 +173,7 @@ class DartEngine:
 
     def _synchronize_round(self) -> None:
         if torch.device(self.target.device).type == "cuda":
-            torch.cuda.synchronize(self.target.device)
+            torch.cuda.current_stream(self.target.device).synchronize()  # Includes work joined to this stream.
 
     @staticmethod
     def _gpu_free_gb(device: str | torch.device | None = None) -> float:
@@ -483,12 +483,13 @@ class DartEngine:
             # length in the scheduler (docs/design.md §10).  Seeded
             # from the prompt's last-token distribution.
             ent_ewma = 0.0
-            if scheduler_entropy and not sampling and not finished and len(generated) < config.max_new_tokens:
-                d0 = torch.softmax(logits.float(), dim=-1)
-                ent_ewma = float(-(d0 * d0.clamp_min(1e-12).log()).sum())
+            if not finished and len(generated) < config.max_new_tokens:
+                if scheduler_entropy and not sampling:
+                    d0 = torch.softmax(logits.float(), dim=-1)
+                    ent_ewma = float(-(d0 * d0.clamp_min(1e-12).log()).sum())
+                if timed_scheduler:
+                    self._synchronize_round()
 
-            if timed_scheduler:
-                self._synchronize_round()
             while not finished and len(generated) < config.max_new_tokens:
                 round_start = time.perf_counter() if timed_scheduler else 0.0
                 budget = config.max_new_tokens - len(generated)

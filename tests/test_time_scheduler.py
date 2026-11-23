@@ -205,6 +205,42 @@ def test_time_scheduler_preserves_eos_and_short_requests(device, eos_position):
         assert not output.rounds and not scheduler.counts
 
 
+def test_timed_round_leaves_unrelated_streams_pending(monkeypatch):
+    pending = {"request", "other"}
+
+    class RequestStream:
+        def synchronize(self):
+            pending.remove("request")
+
+    def current_stream(device):
+        assert device == "cuda:1"
+        return RequestStream()
+
+    monkeypatch.setattr(torch.cuda, "current_stream", current_stream)
+    monkeypatch.setattr(torch.cuda, "synchronize", lambda device: pending.clear())
+    with DartEngine(build_tiny_target()) as engine:
+        engine._synchronize_round()
+        assert pending == {"request", "other"}
+        monkeypatch.setattr(engine.target, "device", "cuda:1")
+        engine._synchronize_round()
+    assert pending == {"other"}
+
+
+@pytest.mark.parametrize("finish", ["budget", "eos"])
+def test_scheduler_skips_wait_when_prefill_finishes(monkeypatch, finish):
+    target = build_tiny_target()
+    prompt = [7, 8, 9]
+    first, = target.greedy_generate(prompt, 1)
+    target.eos_token_ids = frozenset({first}) if finish == "eos" else frozenset()
+    scheduler = TimeScheduler(SchedulerConfig())
+    with DartEngine(target, lanes={"ngram": NGramDrafter()}, scheduler=scheduler) as engine:
+        monkeypatch.setattr(engine, "_synchronize_round", lambda: pytest.fail("no verifier round to time"))
+        result = engine.generate(prompt, DecodeConfig(max_new_tokens=8 if finish == "eos" else 1))
+    assert result.token_ids == [first]
+    assert result.metadata["finished_eos"] == (finish == "eos")
+    assert not result.rounds and not scheduler.counts
+
+
 def test_existing_scheduler_does_not_add_round_barriers(monkeypatch):
     with build_engine({"target": {"model": "tiny:1234"}, "lanes": {"ngram": {}},
                        "scheduler": {"type": "heuristic"}}) as engine:
