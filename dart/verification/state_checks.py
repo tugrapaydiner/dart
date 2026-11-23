@@ -90,7 +90,10 @@ def _cache_pairs(cache):
     if hasattr(cache, "layers"):
         return [(layer.keys, layer.values) for layer in cache.layers]
     if hasattr(cache, "key_cache"):
-        return list(zip(cache.key_cache, cache.value_cache))
+        try:
+            return list(zip(cache.key_cache, cache.value_cache, strict=True))
+        except ValueError as error:
+            raise ValueError("invalid legacy cache key/value layers") from error
     if isinstance(cache, (tuple, list)):
         return [(layer[0], layer[1]) for layer in cache]
     raise TypeError("state checks require an HF-compatible cache or ReplayCache")

@@ -5,6 +5,7 @@ import gc
 import json
 import weakref
 from dataclasses import asdict
+from types import SimpleNamespace
 
 import pytest
 import torch
@@ -245,3 +246,56 @@ def test_live_caches_defaults_and_rng_are_preserved_without_retaining_outputs(mo
     finally:
         if static:
             target.close()
+
+
+def legacy_cache(cache, extra):
+    keys = [layer.keys for layer in cache.layers]
+    values = [layer.values for layer in cache.layers]
+    if extra == "key":
+        keys.append(keys[-1])
+    if extra == "value":
+        values.append(values[-1])
+    return SimpleNamespace(key_cache=keys, value_cache=values, get_seq_length=cache.get_seq_length)
+
+
+@pytest.mark.parametrize("extra", [None, "key", "value"])
+def test_candidate_legacy_key_value_layers(monkeypatch, extra):
+    target, reference = models()
+    forward = target.forward_block
+
+    def as_legacy(state, tokens):
+        logits = forward(state, tokens)
+        state.cache = legacy_cache(state.cache, extra)
+        return logits
+
+    monkeypatch.setattr(target, "forward_block", as_legacy)
+    report = check_forward_paths(target, reference, (5, 6, 7), (11, 13))
+    assert report.incremental_full.passed
+    for check in (report.candidate_full, report.candidate_incremental):
+        assert check.passed == (extra is None)
+        if extra:
+            failure, = check.failures
+            assert failure.kind == "exception" and "legacy cache" in failure.detail
+
+
+@pytest.mark.parametrize("path", ["full", "incremental"])
+@pytest.mark.parametrize("extra", [None, "key", "value"])
+def test_reference_legacy_key_value_layers(monkeypatch, path, extra):
+    target, reference = models()
+    forward = reference.forward
+
+    def as_legacy(*args, **kwargs):
+        output = forward(*args, **kwargs)
+        full = kwargs["input_ids"].shape[1] == 5
+        incremental = kwargs.get("past_key_values") is not None
+        if (path == "full" and full) or (path == "incremental" and incremental):
+            output.past_key_values = legacy_cache(output.past_key_values, extra)
+        return output
+
+    monkeypatch.setattr(reference, "forward", as_legacy)
+    if extra is None:
+        assert check_forward_paths(target, reference, (5, 6, 7), (11, 13)).passed
+    else:
+        monkeypatch.setattr(target, "prefill", lambda *args: pytest.fail("candidate ran with an invalid reference"))
+        with pytest.raises(ValueError, match="legacy cache"):
+            check_forward_paths(target, reference, (5, 6, 7), (11, 13))
