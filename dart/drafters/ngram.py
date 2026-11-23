@@ -15,6 +15,7 @@ the single verify pass can accept whichever one the target picks.
 from __future__ import annotations
 
 from collections.abc import Iterator
+from numbers import Integral
 
 from dart.runtime.types import VerifyResult
 from dart.verification.tree_verify import DraftTree
@@ -39,13 +40,13 @@ class NGramDrafter:
         scans the full context (v0.1 behavior)."""
         if min_ngram < 1 or max_ngram < min_ngram:
             raise ValueError("require 1 <= min_ngram <= max_ngram")
-        if tree_width < 1:
-            raise ValueError("tree_width must be >= 1")
+        if isinstance(tree_width, bool) or not isinstance(tree_width, Integral) or tree_width < 1:
+            raise ValueError("tree_width must be an integer >= 1")
         if max_scan is not None and max_scan < 1:
             raise ValueError("max_scan must be >= 1 (or None for unbounded)")
         self.max_ngram = max_ngram
         self.min_ngram = min_ngram
-        self.tree_width = tree_width
+        self.tree_width = int(tree_width)
         self.max_scan = max_scan
 
     def _continuations(

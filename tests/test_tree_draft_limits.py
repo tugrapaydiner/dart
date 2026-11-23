@@ -4,11 +4,13 @@ from functools import wraps
 
 import pytest
 import torch
+import yaml
 
 from benchmarks.run_bench import build_hf_method
 from dart.drafters.ar_draft import ARDrafter
 from dart.drafters.ngram import NGramDrafter
 from dart.runtime.engine import DartEngine
+from dart.runtime.factory import build_lane
 from dart.runtime.scheduler import SchedulerConfig
 from dart.runtime.time_scheduler import CostTableScheduler
 from dart.runtime.types import DecodeConfig, DecodeState, VerifyResult
@@ -41,6 +43,36 @@ def test_ngram_builds_only_retained_nodes(width, monkeypatch):
     assert output.token_ids == expected
     assert output.rounds[0].n_draft_proposed == 15
     assert max(sizes) == 15
+
+
+@pytest.mark.parametrize(("width", "scheduled", "cap", "nodes"), [
+    (1, False, 15, 2), (2, True, 15, 4), (4, False, 15, 8),
+    (None, True, 15, 6), (4, True, 3, 3),
+])
+def test_configured_tree_width_bounds_verified_nodes(tmp_path, width, scheduled, cap, nodes):
+    config = {
+        "target": {"model": "tiny:1234"}, "verifier": "tree",
+        "lanes": {"ngram": {} if width is None else {"tree_width": width}},
+        "decode": {"max_new_tokens": 4, "draft_len": 2, "max_tree_nodes": cap},
+    }
+    if scheduled:
+        config["scheduler"] = {"type": "heuristic", "draft_len": 2}
+    path = tmp_path / "engine.yaml"
+    path.write_text(yaml.safe_dump(config), encoding="utf-8")
+    prompt = [token for branch in range(10, 14) for token in (5, 6, 7, 0, branch, 20)] + [5, 6, 7]
+    with DartEngine.from_config(str(path)) as engine:
+        with torch.no_grad():
+            engine.target.model.lm_head.weight.zero_()  # The first token completes the repeated suffix.
+        expected = build_hf_method(engine.target, 4)(prompt).token_ids
+        output = engine.generate(prompt)
+    assert output.token_ids == expected
+    assert output.rounds[0].n_draft_proposed == nodes
+
+
+@pytest.mark.parametrize("width", [0, True, 1.5, float("nan"), float("inf"), "2"])
+def test_ngram_config_rejects_invalid_tree_width(width):
+    with pytest.raises(ValueError, match="tree_width"):
+        build_lane("ngram", {"tree_width": width}, None)
 
 
 def test_replaced_tree_hook_keeps_its_call_signature():

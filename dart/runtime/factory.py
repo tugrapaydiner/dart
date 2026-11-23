@@ -127,6 +127,7 @@ def build_lane(name: str, spec: dict, target: TargetModel):
         return NGramDrafter(
             max_ngram=spec.get("max_ngram", 4),
             min_ngram=spec.get("min_ngram", 1),
+            tree_width=spec.get("tree_width", 3),
             max_scan=spec.get("max_scan"),
         )
     if name == "compressed_kv":
