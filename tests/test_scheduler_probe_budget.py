@@ -4,6 +4,7 @@ import pytest
 
 from benchmarks.run_bench import build_hf_method
 from dart.drafters.ngram import NGramDrafter
+from dart.models.replay import CudaGraphTarget
 from dart.runtime.engine import DartEngine
 from dart.runtime.factory import build_engine
 from dart.runtime.scheduler import SchedulerConfig
@@ -28,6 +29,81 @@ def observe(scheduler, action, milliseconds=10, committed=1, **options):
     scheduler.observe(action.lane, VerifyResult([7] * committed, action.draft_len, drafted,
                                                drafted == action.draft_len, False),
                       round_ms=milliseconds, **options)
+
+
+@pytest.mark.parametrize("reason", ["warmup", "no_probes", "no_output_room", "no_tree_room"])
+def test_forced_target_skips_arm_construction(scheduler_type, reason, monkeypatch):
+    scheduler = planner(scheduler_type, 0 if reason == "no_probes" else 1)
+    state = decode_state()
+    if reason != "warmup":
+        observe(scheduler, scheduler.choose_action(state))
+    if reason == "no_output_room":
+        state.max_draft_tokens = 0
+    if reason == "no_tree_room":
+        state.default_verifier, state.max_tree_nodes = "tree", 0
+    with monkeypatch.context() as patch:
+        patch.setattr(scheduler, "_candidates", lambda *_: pytest.fail("built draft arms for a forced target step"))
+        action = scheduler.choose_action(state)
+    assert (action.lane, action.draft_len, action.canvas_len) == ("target_only", 0, 0)
+    observe(scheduler, action)
+    assert scheduler.probe_rounds == 0
+    assert scheduler.counts == {"target_only": scheduler.decisions}
+    if reason != "no_probes":
+        assert scheduler.choose_action(decode_state()).lane == "ngram"
+        assert scheduler.probe_rounds == 1
+
+
+def test_forced_target_with_an_explicit_tree_only_menu(monkeypatch):
+    scheduler = planner(CostTableScheduler, 1, verifiers=("tree",))
+    state = decode_state()
+    observe(scheduler, scheduler.choose_action(state))
+    state.max_tree_nodes = 0
+    monkeypatch.setattr(scheduler, "_candidates", lambda *_: pytest.fail("built an unavailable tree arm"))
+    assert scheduler.choose_action(state).lane == "target_only"
+    assert scheduler.probe_rounds == 0
+
+
+@pytest.mark.parametrize("name", ["max_draft_tokens", "max_tree_nodes"])
+@pytest.mark.parametrize("limit", [-1, False, 1.5])
+def test_time_scheduler_rejects_invalid_limits_before_counting(name, limit):
+    scheduler = planner(TimeScheduler, 1)
+    state = decode_state()
+    setattr(state, name, limit)
+    with pytest.raises(ValueError, match=name):
+        scheduler.choose_action(state)
+    assert scheduler.decisions == scheduler.probe_rounds == 0
+    assert not scheduler.counts
+
+
+@pytest.mark.parametrize("width,budget", [(1, 7), (4, 3)])
+def test_forced_target_keeps_compact_predictions(width, budget, monkeypatch):
+    base = build_tiny_target()
+    base.eos_token_ids = frozenset()
+    prompt = [5, 6, 7]
+    expected = build_hf_method(base, budget)(prompt).token_ids
+    drafter = NGramDrafter()
+    drafter.requires_entropy = True
+    scheduler = planner(TimeScheduler, 1)
+    target = CudaGraphTarget(base, capacity=16, max_block_tokens=width, capture_predictions=True, replay=False)
+    with DartEngine(target, lanes={"ngram": drafter}, scheduler=scheduler, owns_target=True) as engine:
+        predictions, logits = [], []
+        compact, full = target.forward_predictions, target.forward_block
+
+        def record_compact(state, tokens):
+            predictions.append(len(tokens))
+            return compact(state, tokens)
+
+        def record_full(state, tokens):
+            logits.append(len(tokens))
+            return full(state, tokens)
+
+        monkeypatch.setattr(target, "forward_predictions", record_compact)
+        monkeypatch.setattr(target, "forward_block", record_full)
+        output = engine.generate(prompt, DecodeConfig(max_new_tokens=budget))
+    assert output.token_ids == expected
+    assert predictions == [1] * (budget - 1) and logits == []
+    assert all(step.lane == "target_only" for step in output.rounds)
+    assert scheduler.counts == {"target_only": budget - 1} and scheduler.probe_rounds == 0
 
 
 @pytest.mark.parametrize("limit", [0, 1, 2])

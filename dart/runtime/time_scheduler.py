@@ -19,6 +19,7 @@ class TimeScheduler(HeuristicScheduler):
 
     requires_round_timing = True
     requires_free_memory = False  # Uses observed lane KV, not device free memory.
+    verifiers: tuple[str, ...] | None = None
 
     @property
     def requires_entropy(self) -> bool:
@@ -82,12 +83,16 @@ class TimeScheduler(HeuristicScheduler):
                 if lane != "target_only" and (allowed is None or lane in allowed)}
 
     def _choose_arm(self, allowed, state: DecodeState) -> tuple[str, str, int, str | None]:
-        arms = {key: arm for key, arm in self._candidates(allowed, state).items()
-                if self.kv_gb.get(key, 0.0) <= self.config.max_gpu_kv_gb}
         baseline = ("target_only", "target_only", 0, None)
-        if self.counts.get("target_only", 0) < self.warmup_rounds:
+        if self.counts.get("target_only", 0) < self.warmup_rounds or state.max_draft_tokens == 0:
+            return baseline
+        if state.max_tree_nodes == 0 and (self.verifiers or (state.default_verifier,)) == ("tree",):
             return baseline
         can_probe = self.max_probe_rounds is None or self.probe_rounds < self.max_probe_rounds
+        if not can_probe and len(self.counts) == 1:  # Only the baseline has a cost.
+            return baseline
+        arms = {key: arm for key, arm in self._candidates(allowed, state).items()
+                if self.kv_gb.get(key, 0.0) <= self.config.max_gpu_kv_gb}
         if can_probe:
             for key, arm in arms.items():
                 if key not in self.counts:
@@ -117,6 +122,10 @@ class TimeScheduler(HeuristicScheduler):
         return entropy_gated(draft_len, self.config.canvas_len if lane == "diffusion" else 0, state, self.config)
 
     def choose_action(self, state: DecodeState, allowed=None) -> DecodeAction:
+        for name in ("max_draft_tokens", "max_tree_nodes"):
+            limit = getattr(state, name)
+            if limit is not None and (type(limit) is not int or limit < 0):
+                raise ValueError(f"{name} must be a nonnegative integer or None")
         self.decisions += 1
         key, lane, draft_len, verifier = self._choose_arm(allowed, state)
         self._last_arm = (key, lane)
@@ -158,13 +167,6 @@ class CostTableScheduler(TimeScheduler):
         self.draft_lengths = draft_lengths
         self.verifiers = verifiers
         super().__init__(config, **options)
-
-    def choose_action(self, state: DecodeState, allowed=None) -> DecodeAction:
-        for name in ("max_draft_tokens", "max_tree_nodes"):
-            limit = getattr(state, name)
-            if limit is not None and (type(limit) is not int or limit < 0):
-                raise ValueError(f"{name} must be a nonnegative integer or None")
-        return super().choose_action(state, allowed=allowed)
 
     def _draft_sizes(self, lane: str, draft_len: int, state: DecodeState) -> tuple[int, int]:
         return draft_len, draft_len if lane == "diffusion" else 0  # Candidates are already gated and bounded.
