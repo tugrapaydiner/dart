@@ -12,17 +12,19 @@ from dart.verification.tree_verify import verify_tree_greedy
 
 
 class CountingTarget:
-    def __init__(self, eos, compact):
+    def __init__(self, eos, compact, vocab_size=67):
         self.eos_token_ids = frozenset(eos)
         self.capture_predictions = compact
-        self.model = SimpleNamespace(config=SimpleNamespace(vocab_size=67))
+        self.vocab_size = vocab_size
+        self.model = SimpleNamespace(config=SimpleNamespace(vocab_size=vocab_size))
         self.calls = []
 
     def forward_block(self, state, tokens):
         self.calls.append(list(tokens))
         state.seq_len += len(tokens)
-        logits = torch.full((len(tokens), 67), -8.)
-        logits[torch.arange(len(tokens)), [(token + 1) % 67 for token in tokens]] = 8.
+        vocab = self.vocab_size
+        logits = torch.full((len(tokens), vocab), -8.)
+        logits[torch.arange(len(tokens)), [(token + 1) % vocab for token in tokens]] = 8.
         return logits
 
     def forward_predictions(self, state, tokens):
@@ -66,6 +68,69 @@ def test_no_eos_keeps_full_block(drafts, eos):
     result = verify_block_greedy(target, state, 10, drafts)
     assert target.calls == [[10] + drafts]
     assert result.committed == drafts + [11 + len(drafts)]
+
+
+@pytest.mark.parametrize("pending", [[10], [7, 9, 10]])
+@pytest.mark.parametrize("drafts,eos,vocab,threads,capture,entropy,scans", [
+    ([50, 12, 13, 14], [], 32_000, 1, False, False, "prefix"),
+    ([50, 12, 13, 14], [11], 32_000, 1, False, True, "prefix"),
+    ([11, 50, 13, 14], [], 32_000, 1, False, True, "split"),
+    ([11, 12, 13, 14], [], 32_000, 1, False, False, "split"),
+    ([11, 12, 13, 14], [14], 32_000, 1, False, True, "split"),
+    ([50, 12], [], 32_000, 1, False, False, "full"),
+    ([50, 12, 13, 14], [], 31_999, 1, False, False, "full"),
+    ([50, 12, 13, 14], [], 32_000, 2, False, False, "full"),
+    ([50, 12, 13, 14], [], 32_000, 1, True, False, "captured"),
+])
+def test_block_prediction_rows(pending, drafts, eos, vocab, threads, capture, entropy, scans, monkeypatch):
+    target = CountingTarget(eos, capture, vocab)
+    state, ref_state = SimpleNamespace(seq_len=3), SimpleNamespace(seq_len=3)
+    expected = verify_greedy_reference(CountingTarget(eos, False, vocab), ref_state, pending, drafts)
+    rows, argmax = [], torch.argmax
+
+    def measure(logits, dim):
+        rows.append(logits.shape[0])
+        return argmax(logits, dim=dim)
+
+    monkeypatch.setattr(torch, "get_num_threads", lambda: threads)
+    monkeypatch.setattr(torch, "argmax", measure)
+    result = verify_block_greedy(target, state, pending, drafts, compute_entropy=entropy)
+    forwarded = drafts[:next((i for i, token in enumerate(drafts) if token in eos), len(drafts))]
+    assert target.calls == [pending + forwarded]
+    expected_rows = {"prefix": [len(pending)], "split": [len(pending), len(forwarded)],
+                     "full": [len(pending) + len(forwarded)], "captured": []}
+    assert rows == expected_rows[scans]
+    assert result == expected and state.seq_len == ref_state.seq_len
+    assert result.hidden_index == len(pending) + len(result.committed) - 2
+    assert result.pending_divergence == int(len(pending) > 1)
+    accepted_eos = expected.finished and len(expected.committed) == expected.n_draft_accepted
+    if entropy and not accepted_eos:
+        scores = torch.full((vocab,), -8.)
+        scores[result.committed[-1]] = 8.
+        probs = scores.softmax(-1)
+        torch.testing.assert_close(result.entropy, float(-(probs * probs.clamp_min(1e-12).log()).sum()))
+    else:
+        assert result.entropy == 0
+
+
+@pytest.mark.parametrize("peak", [1.0, float("nan")])
+def test_block_prediction_rows_preserve_argmax_on_strided_logits(monkeypatch, peak):
+    target = CountingTarget([], False, 32_000)
+    scores = torch.zeros(6, 64_000)[:, ::2]
+    scores[:, 7:9] = peak
+    expected = scores.argmax(-1).tolist()
+    state = SimpleNamespace(seq_len=3)
+
+    def forward(state, tokens):
+        assert len(tokens) == len(scores)
+        state.seq_len += len(tokens)
+        return scores
+
+    monkeypatch.setattr(target, "forward_block", forward)
+    monkeypatch.setattr(torch, "get_num_threads", lambda: 1)
+    result = verify_block_greedy(target, state, [4, expected[0]], [50, 12, 13, 14], compute_entropy=False)
+    assert result.committed == [expected[1]] and result.pending_divergence == 0
+    assert state.seq_len == 5
 
 
 @pytest.fixture

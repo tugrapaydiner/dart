@@ -62,7 +62,13 @@ def verify_block_greedy(
         preds = target.forward_predictions(state, tokens)
     else:
         logits = target.forward_block(state, tokens)
-        preds = torch.argmax(logits, dim=-1).tolist()  # preds[i] follows input[i]
+        if (len(forward_drafts) >= 3 and type(draft_tokens[0]) is int
+                and logits.device.type == "cpu" and logits.size(-1) >= 32_000 and torch.get_num_threads() == 1):
+            preds = torch.argmax(logits[:p_len], dim=-1).tolist()
+            if preds[-1] == draft_tokens[0]:  # A first rejection leaves the remaining rows unused.
+                preds.extend(torch.argmax(logits[p_len:], dim=-1).tolist())
+        else:
+            preds = torch.argmax(logits, dim=-1).tolist()
 
     # Divergence audit of unverified pending tokens (approx mode only).
     divergence = sum(
