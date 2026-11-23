@@ -359,6 +359,9 @@ class TargetModel:
         if all(offset == index for index, offset in enumerate(path)):
             self.crop(state, keep_len + len(path))
             return
+        self._gather_tree_rows(state, keep_len, path)
+
+    def _gather_tree_rows(self, state, keep_len, path):
         indices = array("q", range(keep_len))
         indices.extend(keep_len + p for p in path)
         if indices.itemsize == 8:

@@ -529,6 +529,35 @@ class CudaGraphTarget(TargetModel):
                 raise ValueError("cache belongs to a different replay target")
             super().crop(state, length)
 
+    @torch.inference_mode()
+    def gather_tree_tail(self, state, keep_len, path):
+        with self._lock:
+            self._check_ready()
+            if isinstance(state.cache, ReplayCache) and state.cache.owner is not self._owner:
+                raise ValueError("cache belongs to a different replay target")
+            super().gather_tree_tail(state, keep_len, path)
+
+    def _gather_tree_rows(self, state, keep_len, path):
+        length = keep_len + len(path)
+        self._check_context_length(length)
+        cache = state.cache
+        if not isinstance(cache, ReplayCache):
+            return super()._gather_tree_rows(state, keep_len, path)
+        storage = cache._buffer.tensor if type(cache) is ReplayCache else cache.storage
+        workspace = self._workspace.storage
+        if (storage.shape != workspace.shape or storage.device != workspace.device
+                or storage.dtype != workspace.dtype or cache.length > self.capacity):
+            raise ValueError("cache storage does not match the prepared replay workspace")
+        offsets = torch.tensor(path, device=storage.device, dtype=torch.long)
+        rows = storage[..., keep_len:cache.length, :].index_select(-2, offsets)  # A path can overlap its destination.
+        self._resident_cache = None
+        try:
+            storage[..., keep_len:length, :].copy_(rows)
+            cache.length = length
+        except BaseException:
+            state._failed = True
+            raise
+
     def forward_tree(self, *args, **kwargs):
         raise ValueError("CUDA replay supports block verification, not tree verification")
 

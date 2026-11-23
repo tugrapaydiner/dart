@@ -216,3 +216,120 @@ def test_external_storage_is_not_assumed_to_match_resident_prefix(pair, monkeypa
     forward(base, target, ar, b, 'logits', 17)
     check_cache(b, ar)
     assert copies == [4, 6]
+
+
+@pytest.mark.parametrize('keep, path', [(3, [0, 3]), (0, [6, 1, 6]), (4, [3] * 6), (3, [0, 1]), (0, [])])
+@pytest.mark.parametrize('exposed', [False, True])
+def test_tree_tail_continues_from_selected_rows(pair, keep, path, exposed):
+    base, target = pair
+    a, _ = target.prefill([3, 5, 7, 9])
+    ar, _ = base.prefill([3, 5, 7, 9])
+    target.forward_block(a, [11, 13, 17, 19])
+    base.forward_block(ar, [11, 13, 17, 19])
+    alias = a.cache.storage if exposed else None
+    base.gather_tree_tail(ar, keep, path)
+    target.gather_tree_tail(a, keep, path)
+    assert a.seq_len == ar.seq_len == keep + len(path)
+    if exposed and a.seq_len:
+        with torch.inference_mode():
+            alias[0, 1, ..., 0, :].add_(0.5)
+            ar.cache.layers[0].values[..., 0, :].add_(0.5)
+    forward(base, target, ar, a, 'logits', 23)  # Read the compacted rows before exposing the cache.
+    check_cache(a, ar)
+
+
+@pytest.mark.parametrize('after_replay', [False, True])
+def test_tree_tail_rejects_capacity_growth_without_changing_state(pair, after_replay):
+    base, target = pair
+    a, _ = target.prefill([3, 5, 7])
+    ar, _ = base.prefill([3, 5, 7])
+    if after_replay:
+        forward(base, target, ar, a, 'predictions', 11)
+    with pytest.raises(ValueError, match='capacity|context'):
+        target.gather_tree_tail(a, 1, [1] * target.capacity)
+    assert a.seq_len == ar.seq_len
+    forward(base, target, ar, a, 'logits', 13)
+    check_cache(a, ar)
+
+
+def test_tree_tail_rejects_foreign_and_closed_targets(pair):
+    base, target = pair
+    a, _ = target.prefill([3, 5, 7])
+    ar, _ = base.prefill([3, 5, 7])
+    forward(base, target, ar, a, 'logits', 11)
+    other = CudaGraphTarget(base, capacity=64, replay=False)
+    try:
+        with pytest.raises(ValueError, match='different replay target'):
+            other.gather_tree_tail(a, 1, [2])
+        other.close()
+        with pytest.raises(RuntimeError, match='closed'):
+            other.gather_tree_tail(a, 1, [2])
+    finally:
+        other.close()
+    forward(base, target, ar, a, 'logits', 17)
+    check_cache(a, ar)
+
+
+def test_tree_tail_interleaved_requests_keep_their_own_rows(pair):
+    base, target = pair
+    states = []
+    for prompt in ([3, 5, 7], [17, 11, 13, 19]):
+        a, _ = target.prefill(prompt)
+        ar, _ = base.prefill(prompt)
+        target.forward_block(a, [5, 7, 11, 13])
+        base.forward_block(ar, [5, 7, 11, 13])
+        states.append((a, ar))
+    for (a, ar), path in zip(states, ([4, 1], [2, 0, 3])):
+        base.gather_tree_tail(ar, 2, path)
+        target.gather_tree_tail(a, 2, path)
+    for a, ar in reversed(states):
+        forward(base, target, ar, a, '2', 23)
+        check_cache(a, ar)
+
+
+def test_tree_tail_selects_only_the_requested_rows(pair, monkeypatch):
+    base, target = pair
+    a, _ = target.prefill([3] * 48)
+    ar, _ = base.prefill([3] * 48)
+    target.forward_block(a, [5, 7, 11, 13])
+    base.forward_block(ar, [5, 7, 11, 13])
+    base.gather_tree_tail(ar, 48, [3, 0, 3])
+    selects = []
+    select = torch.Tensor.index_select
+
+    def observe(tensor, dim, index):
+        selects.append((tensor.shape[dim], index.tolist()))
+        return select(tensor, dim, index)
+
+    with monkeypatch.context() as spy:
+        spy.setattr(torch.Tensor, 'index_select', observe)
+        target.gather_tree_tail(a, 48, [3, 0, 3])
+    assert selects == [(4, [3, 0, 3])]
+    forward(base, target, ar, a, 'logits', 23)
+    check_cache(a, ar)
+
+
+def test_tree_tail_partial_write_invalidates_only_its_request(pair, monkeypatch):
+    base, target = pair
+    a, _ = target.prefill([3, 5, 7])
+    target.forward_block(a, [11, 13, 17])
+    other, _ = target.prefill([17, 19])
+    ref, _ = base.prefill([17, 19])
+    forward(base, target, ref, other, 'logits', 23)
+    pointer = a.cache.storage.untyped_storage().data_ptr()
+    copy_ = torch.Tensor.copy_
+
+    def fail(destination, source, *args, **kwargs):
+        if destination.untyped_storage().data_ptr() == pointer:
+            destination.zero_()
+            raise RuntimeError('partial tail write')
+        return copy_(destination, source, *args, **kwargs)
+
+    with monkeypatch.context() as fault:
+        fault.setattr(torch.Tensor, 'copy_', fail)
+        with pytest.raises(RuntimeError, match='partial tail write'):
+            target.gather_tree_tail(a, 3, [2, 0])
+    with pytest.raises(RuntimeError, match='invalid'):
+        target.forward_block(a, [23])
+    forward(base, target, ref, other, 'logits', 29)
+    check_cache(other, ref)
