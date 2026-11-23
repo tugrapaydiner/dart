@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from contextlib import closing
+from unittest.mock import patch
 
 import pytest
 import torch
@@ -173,25 +174,25 @@ def test_block_sparse_reuses_matching_compacted_prefix(models, monkeypatch, adde
         torch.testing.assert_close(cached.values, fresh.values, atol=2e-6, rtol=2e-5)
 
 
-@pytest.mark.parametrize("added,kept", [([22, 23], [21, 22, 23]), ([22, 23, 24, 25], [25])])
-def test_block_sparse_refills_after_a_wide_delta_or_changed_selection(models, monkeypatch, added, kept):
+@pytest.mark.parametrize("added,kept,appends", [
+    ([22, 23], [21, 22, 23], [[22], [23]]),
+    ([22, 23, 24], [21, 22, 23, 24], []),
+    ([22, 23, 24, 25], [25], []),
+])
+def test_block_sparse_syncs_a_wide_delta_or_changed_selection(models, added, kept, appends):
     base, reference = models
     with closing(CudaGraphTarget(base, capacity=32, max_block_tokens=1, replay=False)) as target:
         lane = BlockSparseKVDrafter(target, block_size=4, top_k=0, sink_blocks=1, recent_blocks=1)
         prompt = list(range(5, 22))
         lane.propose(prompt, 1)
-        calls = []
-        prefill = target.prefill
-
-        def record(tokens, **kwargs):
-            calls.append(list(tokens))
-            return prefill(tokens, **kwargs)
-
-        monkeypatch.setattr(target, "prefill", record)
         compacted = prompt[:4] + kept
         expected, _ = reference_proposals(reference, compacted, 1, False, None)
-        assert lane.propose(prompt + added, 1) == expected
-        assert calls == [compacted]
+        with patch.object(target, "prefill", wraps=target.prefill) as prefill, patch.object(
+            target, "forward_block", wraps=target.forward_block
+        ) as block:
+            assert lane.propose(prompt + added, 1) == expected
+        assert [call.args[1] for call in block.call_args_list] == appends
+        assert [call.args[0] for call in prefill.call_args_list] == ([] if appends else [compacted])
 
 
 def test_block_sparse_retries_with_fresh_cache_after_failed_append(models, monkeypatch):

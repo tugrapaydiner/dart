@@ -88,13 +88,22 @@ class ARDrafter:
     def _sync(self, committed: list[int]) -> Tensor:
         """Bring the draft cache up to ``committed``; return next-token logits."""
         delta = committed[len(self._processed):]
-        too_long = len(delta) > getattr(self.dm, "max_block_tokens", len(delta))  # Static targets prepare fixed blocks.
-        if self._state is None or not self._is_extension(committed) or not self._processed or too_long:
+        width = getattr(self.dm, "max_block_tokens", len(delta))
+        overflow = len(delta) > width
+        refill = overflow and (len(delta) > 2 * width or len(delta) > len(self._processed))
+        if self._state is None or not self._processed or refill or not self._is_extension(committed):
             self.reset()
             self._state, logits = self.dm.prefill(committed, cache=self._make_cache())
             return logits
         if delta:
-            return self.dm.forward_block(self._state, delta)[-1]
+            try:
+                if overflow:
+                    self.dm.forward_block(self._state, delta[:width])  # Keep the longer cached prefix.
+                    delta = delta[width:]
+                return self.dm.forward_block(self._state, delta)[-1]
+            except BaseException:
+                self.reset()  # A failed append may have changed the cache.
+                raise
         # Engine never calls propose twice without committing, but stay
         # correct if it does: re-derive logits from the last token.
         self.dm.crop(self._state, len(committed) - 1)
