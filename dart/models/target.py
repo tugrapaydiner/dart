@@ -30,8 +30,13 @@ from torch import Tensor
 from dart.attention.verifier_mask import tree_mask
 
 try:
-    from transformers import AutoModelForCausalLM, AutoTokenizer
-    from transformers.cache_utils import DynamicCache
+    from transformers import (
+        AutoModelForCausalLM,
+        AutoTokenizer,
+        LlamaForCausalLM,
+        LlamaModel,
+    )
+    from transformers.cache_utils import DynamicCache, DynamicLayer
 except ImportError as e:  # pragma: no cover
     raise ImportError("dart requires `transformers>=5.16.1`") from e
 
@@ -87,6 +92,7 @@ class TargetModel:
         self.tokenizer = tokenizer
         self.device = device
         self.dtype = dtype
+        self._cpu_llama = torch.device(device).type == "cpu" and type(model) is LlamaForCausalLM
         self.eos_token_ids = self._collect_eos_ids()
         # Opt-in tap for drafters that condition on target hidden states
         # (MTP heads, trained diffusion drafters).  When enabled, the final
@@ -229,9 +235,14 @@ class TargetModel:
         past_len = state.seq_len
         total_len = past_len + input_ids.size(1)
         self._check_context_length(total_len)
-        attention_mask = torch.ones(
-            (1, total_len), device=self.device, dtype=torch.long
-        )
+        attention_mask = None  # Llama builds its causal mask from the growing cache.
+        if not (
+            self._cpu_llama and self.model.config._attn_implementation in ("eager", "sdpa")
+            and getattr(self.model.forward, "__func__", None) is LlamaForCausalLM.forward
+            and getattr(self.model.model.forward, "__func__", None) is LlamaModel.forward
+            and type(state.cache) is DynamicCache and state.cache.layer_class_to_replicate is DynamicLayer
+        ):
+            attention_mask = torch.ones((1, total_len), device=self.device, dtype=torch.long)
         logits_options = {"logits_to_keep": 1} if last_logits_only and self._last_prefill_logits else {}
         return self._run_model(
             state,
