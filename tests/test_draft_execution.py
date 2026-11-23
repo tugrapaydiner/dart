@@ -1,11 +1,15 @@
 from __future__ import annotations
 
+from contextlib import closing
+
 import pytest
 import torch
 
 from dart.drafters.ar_draft import ARDrafter
+from dart.drafters.block_sparse_kv import BlockSparseKVDrafter
 from dart.drafters.compressed_kv import CompressedKVDrafter
 from dart.kv.cache import QuantSpec
+from dart.models.replay import CudaGraphTarget
 from dart.runtime.engine import DartEngine
 from dart.runtime.types import DecodeConfig
 from dart.verification.differential import GenerationCase, hf_decoder
@@ -149,3 +153,62 @@ def test_generation_after_shortened_drafting_matches_independent_hf(models, comp
         for prompt in ([5, 6, 7, 8], [13, 17, 19], [5, 6, 7, 8]):
             expected = hf_decoder(reference)(GenerationCase('draft', tuple(prompt), 9))
             assert engine.generate(prompt, DecodeConfig(max_new_tokens=9, draft_len=3)).token_ids == expected
+
+
+@pytest.mark.parametrize("added", [[], [22], [22, 23]])
+@torch.inference_mode()
+def test_block_sparse_reuses_matching_compacted_prefix(models, monkeypatch, added):
+    target, reference = models
+    lane = BlockSparseKVDrafter(target, block_size=4, top_k=0, sink_blocks=1, recent_blocks=1)
+    prompt = list(range(5, 22))
+    lane.propose(prompt, 3)
+    calls = count_forwards(target, monkeypatch)
+    compacted = prompt[:4] + prompt[16:] + added
+    expected = reference(input_ids=torch.tensor([compacted]), use_cache=True)
+    assert lane.propose(prompt + added, 1) == [int(expected.logits[0, -1].argmax())]
+    assert calls == [max(1, len(added))]
+    assert lane._state.seq_len == len(compacted)
+    for cached, fresh in zip(lane._state.cache.layers, expected.past_key_values.layers, strict=True):
+        torch.testing.assert_close(cached.keys, fresh.keys, atol=2e-6, rtol=2e-5)
+        torch.testing.assert_close(cached.values, fresh.values, atol=2e-6, rtol=2e-5)
+
+
+@pytest.mark.parametrize("added,kept", [([22, 23], [21, 22, 23]), ([22, 23, 24, 25], [25])])
+def test_block_sparse_refills_after_a_wide_delta_or_changed_selection(models, monkeypatch, added, kept):
+    base, reference = models
+    with closing(CudaGraphTarget(base, capacity=32, max_block_tokens=1, replay=False)) as target:
+        lane = BlockSparseKVDrafter(target, block_size=4, top_k=0, sink_blocks=1, recent_blocks=1)
+        prompt = list(range(5, 22))
+        lane.propose(prompt, 1)
+        calls = []
+        prefill = target.prefill
+
+        def record(tokens, **kwargs):
+            calls.append(list(tokens))
+            return prefill(tokens, **kwargs)
+
+        monkeypatch.setattr(target, "prefill", record)
+        compacted = prompt[:4] + kept
+        expected, _ = reference_proposals(reference, compacted, 1, False, None)
+        assert lane.propose(prompt + added, 1) == expected
+        assert calls == [compacted]
+
+
+def test_block_sparse_retries_with_fresh_cache_after_failed_append(models, monkeypatch):
+    target, reference = models
+    lane = BlockSparseKVDrafter(target, block_size=4, top_k=0, sink_blocks=1, recent_blocks=1)
+    prompt = list(range(5, 22))
+    lane.propose(prompt, 1)
+    forward = target.forward_block
+
+    def fail_after_append(state, tokens):
+        forward(state, tokens)
+        raise RuntimeError("failed after cache update")
+
+    with monkeypatch.context() as patch:
+        patch.setattr(target, "forward_block", fail_after_append)
+        with pytest.raises(RuntimeError, match="failed after cache update"):
+            lane.propose(prompt + [22], 2)
+    expected, _ = reference_proposals(reference, prompt[:4] + [21, 22], 2, False, None)
+    assert lane.propose(prompt + [22], 2) == expected
+    assert lane._state.seq_len == 6

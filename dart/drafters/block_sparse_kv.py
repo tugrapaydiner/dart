@@ -9,7 +9,7 @@ no forward) so no per-layer attention internals are needed:
     block score = <mean embedding of block, mean embedding of recent window>
 
 Like the sink+window sparse lane this is *sequence compaction* (keep the
-selected blocks' tokens, drop the rest, prefill the compacted sequence), so
+selected blocks' tokens and draft on that sequence), so
 it stays independent of transformers cache internals.  The full verifier
 sees everything, so output is exact; block selection only moves acceptance
 (docs/design.md §9.3).
@@ -68,8 +68,8 @@ class BlockSparseKVDrafter(ARDrafter):
     def propose(self, committed: list[int], max_tokens: int) -> list[int]:
         compacted, compacted_now = self._select(committed)
         self.compacted_last_round = compacted_now
-        if compacted_now:
-            # Selection changes round to round, so the compacted view is not a
-            # prefix-extension of the previous one: re-prefill it fresh.
+        try:
+            return super().propose(compacted, max_tokens)  # Checks the selected token prefix before reuse.
+        except BaseException:
             self.reset()
-        return super().propose(compacted, max_tokens)
+            raise
