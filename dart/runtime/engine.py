@@ -36,7 +36,7 @@ import torch
 from dart.drafters.base import Drafter, NullDrafter
 from dart.kv.prefetch import SyncPrefetcher, ThreadPrefetcher
 from dart.kv.residency import ResidencyStats, move_cache
-from dart.models.target import TargetModel
+from dart.models.target import TargetModel, prefill_for_generation
 from dart.runtime.metrics import (
     DecodeMetrics,
     TraceLogger,
@@ -447,7 +447,7 @@ class DartEngine:
             finish = getattr(drafter, "finish_request", None)
             if finish is not None:
                 cleanup.callback(finish)
-        state, logits = target.prefill(prompt)
+        state, logits = prefill_for_generation(target, prompt, config.max_new_tokens)
         if config.seed is not None:
             self._seed_drafters(config.seed)
         for d in self._all_drafters():

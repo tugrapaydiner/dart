@@ -155,3 +155,105 @@ def test_uninspectable_forward_falls_back_to_full_logits(monkeypatch, error):
         assert rows == [3]
     finally:
         handle.remove()
+
+
+@pytest.mark.parametrize("attention", ["eager", "sdpa"])
+@pytest.mark.parametrize("length", [1, 17])
+@pytest.mark.parametrize("record_hidden", [False, True])
+def test_terminal_prompt_matches_cached_scores_without_retaining_keys(attention, length, record_hidden):
+    target = build_tiny_target()
+    target.model.set_attn_implementation(attention)
+    target.record_hidden = record_hidden
+    prompt = random_prompt(71, length)
+    state, expected = target.prefill(prompt)
+    hidden = target.last_hidden_block
+    seen = []
+
+    with target.model.register_forward_hook(lambda model, args, out: seen.append(out)):
+        tokens = target.greedy_generate(prompt, 1)
+
+    output, = seen
+    assert output.past_key_values is None
+    torch.testing.assert_close(output.logits[0, -1], expected, rtol=1e-4, atol=1e-5)
+    assert tokens == [int(expected.argmax())] and state.seq_len == length
+    if record_hidden:
+        torch.testing.assert_close(target.last_hidden_block, hidden, rtol=1e-4, atol=1e-5)
+    else:
+        assert target.last_hidden_block is None
+
+
+@pytest.mark.parametrize("mode", ["exact", "exact_sampling", "approx"])
+def test_terminal_prompt_engine_keeps_first_token_and_request_hooks(monkeypatch, mode):
+    target = build_tiny_target()
+    target.record_hidden = True
+    prompt = [7, 9, 11]
+    _, logits = target.prefill(prompt)
+    hidden = target.last_hidden_block
+    seed = 41
+    if mode == "exact_sampling":
+        expected = int(torch.multinomial(logits.softmax(-1), 1, generator=torch.Generator().manual_seed(seed)))
+    else:
+        expected = int(logits.argmax())
+    target.eos_token_ids = frozenset([expected])
+    drafter = NGramDrafter()
+    events = []
+    seen = []
+
+    def after_prefill():
+        torch.testing.assert_close(target.last_hidden_block, hidden, rtol=1e-4, atol=1e-5)
+        events.append("prefill")
+
+    monkeypatch.setattr(drafter, "seed_request", lambda seed: events.append("seed"), raising=False)
+    monkeypatch.setattr(drafter, "after_prefill", after_prefill, raising=False)
+    monkeypatch.setattr(drafter, "finish_request", lambda: events.append("finish"), raising=False)
+    with DartEngine(target, drafter) as engine, target.model.register_forward_hook(
+        lambda model, args, out: seen.append(out.past_key_values)
+    ):
+        result = engine.generate(prompt, DecodeConfig(mode=mode, max_new_tokens=1, seed=seed))
+    assert seen == [None] and result.token_ids == [expected]
+    assert result.rounds == [] and result.metadata["finished_eos"] and result.metadata["tokens_verified"] == 1
+    assert events == ["seed", "prefill", "finish"] and target.last_hidden_block is None
+
+
+@pytest.mark.parametrize("entry", ["baseline", "engine"])
+@pytest.mark.parametrize("case", ["two_tokens", "custom_prefill", "custom_model", "bfloat16"])
+def test_terminal_prompt_preserves_cached_generation_for_other_paths(entry, case):
+    target = build_tiny_target()
+    if case == "bfloat16":
+        target = TargetModel(target.model, dtype=torch.bfloat16)
+    limit = 2 if case == "two_tokens" else 1
+    seen = []
+    with patch.object(target, "eos_token_ids", frozenset()), target.model.register_forward_hook(
+        lambda model, args, out: seen.append(out.past_key_values)
+    ):
+        def generate():
+            if entry == "baseline":
+                return target.greedy_generate([7, 9, 11], limit)
+            return DartEngine(target).generate([7, 9, 11], DecodeConfig(max_new_tokens=limit)).token_ids
+
+        if case == "custom_prefill":
+            with patch.object(target, "prefill", wraps=target.prefill) as prefill:
+                assert len(generate()) == limit
+                prefill.assert_called_once()
+        elif case == "custom_model":
+            with patch.object(target.model, "forward", wraps=target.model.forward):
+                assert len(generate()) == limit
+        else:
+            assert len(generate()) == limit
+    assert len(seen) == limit and all(cache is not None for cache in seen)
+
+
+def test_terminal_prompt_clears_hidden_after_a_failed_forward():
+    target = build_tiny_target()
+    target.record_hidden = True
+    prompt = [7, 9, 11]
+    _, logits = target.prefill(prompt)
+
+    def fail(model, args, out):
+        if out.past_key_values is None:
+            raise RuntimeError("terminal forward failed")
+
+    with target.model.register_forward_hook(fail), pytest.raises(RuntimeError, match="terminal forward failed"):
+        target.greedy_generate(prompt, 1)
+    assert target.last_hidden_block is None
+    assert target.greedy_generate(prompt, 1) == [int(logits.argmax())]

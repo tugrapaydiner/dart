@@ -203,6 +203,13 @@ class TargetModel:
             self._check_vocabulary(t)
         return t.to(device=self.device)
 
+    def _native_cpu_llama(self) -> bool:
+        return (
+            self._cpu_llama and self.model.config._attn_implementation in ("eager", "sdpa")
+            and getattr(self.model.forward, "__func__", None) is LlamaForCausalLM.forward
+            and getattr(self.model.model.forward, "__func__", None) is LlamaModel.forward
+        )
+
     @torch.inference_mode()
     def prefill(
         self, prompt_ids: list[int] | Tensor, cache: Optional[DynamicCache] = None
@@ -237,26 +244,26 @@ class TargetModel:
         self._check_context_length(total_len)
         attention_mask = None  # Llama builds its causal mask from the growing cache.
         if not (
-            self._cpu_llama and self.model.config._attn_implementation in ("eager", "sdpa")
-            and getattr(self.model.forward, "__func__", None) is LlamaForCausalLM.forward
-            and getattr(self.model.model.forward, "__func__", None) is LlamaModel.forward
+            self._native_cpu_llama()
             and type(state.cache) is DynamicCache and state.cache.layer_class_to_replicate is DynamicLayer
         ):
             attention_mask = torch.ones((1, total_len), device=self.device, dtype=torch.long)
-        logits_options = {"logits_to_keep": 1} if last_logits_only and self._last_prefill_logits else {}
         return self._run_model(
             state,
             input_ids=input_ids,
             attention_mask=attention_mask,
             last_logits_only=last_logits_only,
-            **logits_options,
         )
 
-    def _run_model(self, state: TargetState, *, last_logits_only: bool = False, **kwargs) -> Tensor:
+    def _run_model(self, state: TargetState | None, *, last_logits_only: bool = False, **kwargs) -> Tensor:
         try:
-            out = self.model(past_key_values=state.cache, use_cache=True,
+            if last_logits_only and self._last_prefill_logits:
+                kwargs["logits_to_keep"] = 1
+            cache = state.cache if state is not None else None
+            out = self.model(past_key_values=cache, use_cache=state is not None,
                              output_hidden_states=self.record_hidden, **kwargs)
-            state.cache = out.past_key_values  # Some models return a new cache.
+            if state is not None:
+                state.cache = out.past_key_values  # Some models return a new cache.
             if self.record_hidden:
                 self.last_hidden_block = out.hidden_states[-1][0].detach()
             rows = out.logits[0]
@@ -269,7 +276,8 @@ class TargetModel:
                     return rows.clone()  # A single row can still share the full prompt buffer.
             return rows.float()
         except BaseException:
-            state._failed = True
+            if state is not None:
+                state._failed = True
             self.last_hidden_block = None
             raise
 
@@ -419,7 +427,7 @@ class TargetModel:
         if max_new_tokens == 0:
             self.validate_prompt(input_ids)
             return []
-        state, logits = self.prefill(input_ids)
+        state, logits = prefill_for_generation(self, input_ids, max_new_tokens)
         generated: list[int] = []
         next_token = int(torch.argmax(logits).item())
         for _ in range(max_new_tokens):
@@ -431,3 +439,19 @@ class TargetModel:
             step_logits = self.forward_block(state, [next_token])
             next_token = int(torch.argmax(step_logits[-1]).item())
         return generated
+
+
+@torch.inference_mode()
+def prefill_for_generation(
+    target: TargetModel, prompt_ids: list[int] | Tensor, max_new_tokens: int
+) -> tuple[TargetState | None, Tensor]:
+    """Keep the prompt cache only if the native target can use it in a later round."""
+    if (
+        max_new_tokens == 1 and type(target) is TargetModel and target.dtype == torch.float32
+        and target._native_cpu_llama() and getattr(target.prefill, "__func__", None) is TargetModel.prefill
+    ):
+        ids = target._ids(prompt_ids)
+        target.validate_generation(ids.size(1), 0)
+        rows = target._run_model(None, input_ids=ids, attention_mask=None, last_logits_only=True)
+        return None, rows[-1]
+    return target.prefill(prompt_ids)
