@@ -37,6 +37,7 @@ def cuda_counters(monkeypatch):
         return 4_000_000_000, 8_000_000_000
 
     monkeypatch.setattr(torch.cuda, 'is_available', available)
+    monkeypatch.setattr(torch.cuda, 'is_initialized', lambda: True)
     monkeypatch.setattr(torch.cuda, 'max_memory_allocated', peak)
     monkeypatch.setattr(torch.cuda, 'reset_peak_memory_stats', reset)
     monkeypatch.setattr(torch.cuda, 'mem_get_info', free)
@@ -64,9 +65,21 @@ def test_memory_queries_use_the_selected_cuda_device(device, cuda_counters):
 
 def test_unavailable_cuda_does_not_read_memory(cuda_counters, monkeypatch):
     monkeypatch.setattr(torch.cuda, 'is_available', lambda: False)
+    monkeypatch.setattr(torch.cuda, 'is_initialized', lambda: False)
     assert metrics.gpu_memory_gb('cuda:1') == 0.0
     metrics.reset_gpu_memory_stats('cuda:1')
     assert DartEngine._gpu_free_gb('cuda:1') == float('inf')
+    assert cuda_counters == []
+
+
+@pytest.mark.parametrize('device', [None, 'cuda:0', torch.device('cuda:1')])
+@pytest.mark.parametrize('operation', ['read', 'reset'])
+def test_cold_allocator_has_no_peak(device, operation, cuda_counters, monkeypatch):
+    monkeypatch.setattr(torch.cuda, 'is_initialized', lambda: False)
+    if operation == 'read':
+        assert metrics.gpu_memory_gb(device) == 0.0
+    else:
+        metrics.reset_gpu_memory_stats(device)
     assert cuda_counters == []
 
 
@@ -95,7 +108,7 @@ def test_cpu_generation_does_not_reset_or_read_unrelated_gpu_stats(models, execu
         calls.append(True)
         pytest.fail('CPU request touched CUDA memory accounting')
 
-    for name in ('is_available', 'max_memory_allocated', 'reset_peak_memory_stats', 'mem_get_info'):
+    for name in ('is_available', 'is_initialized', 'max_memory_allocated', 'reset_peak_memory_stats', 'mem_get_info'):
         monkeypatch.setattr(torch.cuda, name, unexpected)
 
     class Scheduler(HeuristicScheduler):
