@@ -10,6 +10,7 @@ import torch
 from dart.verification.differential import CheckFailure, InvalidCheckCase
 from dart.verification.state_checks import (
     _cache_pairs,
+    _check_reference_storage,
     _reference_forward,
     _validate_tolerances,
 )
@@ -110,11 +111,7 @@ def _validate(target, reference, prefix, tokens):
         raise InvalidCheckCase("forward checks support at most 16 block tokens")
     if target.model is reference or target.model.training or reference.training:
         raise ValueError("use separate eval-mode target and reference models")
-    def storage(model):
-        return {(tensor.device, tensor.untyped_storage().data_ptr())
-                for tensor in (*model.parameters(), *model.buffers()) if tensor.numel()}
-    if storage(target.model) & storage(reference):
-        raise ValueError("target and reference must not share tensor storage")
+    _check_reference_storage(target.model, reference)
     context = min(target.model.config.max_position_embeddings, reference.config.max_position_embeddings)
     if len(prefix) + len(tokens) > context:
         raise InvalidCheckCase("prefix and block exceed the model context limit")

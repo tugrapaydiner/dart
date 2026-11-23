@@ -13,6 +13,7 @@ from dart.verification.state_checks import (
     RoundCase,
     _cache_failures,
     _cache_pairs,
+    _check_reference_storage,
     _reference_forward,
     _result_failures,
     _round_expectation,
@@ -121,6 +122,7 @@ def check_state_sequence(target, reference_model, operations: Sequence[StateOper
     _validate_tolerances(atol, rtol)
     if target.model is reference_model or target.model.training or reference_model.training:
         raise ValueError("use separate eval-mode target and reference models")
+    _check_reference_storage(target.model, reference_model)
     context = min(target.model.config.max_position_embeddings, reference_model.config.max_position_embeddings)
     vocab = min(target.model.config.vocab_size, reference_model.config.vocab_size)
     states, prefixes, reference_caches, steps = {}, {}, {}, []

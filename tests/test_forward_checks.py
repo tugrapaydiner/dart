@@ -14,6 +14,11 @@ from transformers import LlamaConfig, LlamaForCausalLM
 from dart.models.replay import CudaGraphTarget
 from dart.models.target import TargetModel
 from dart.verification.forward_checks import check_forward_paths
+from dart.verification.state_checks import (
+    RoundCase,
+    check_verifier_state,
+    compare_verifier_states,
+)
 from dart.verification.state_sequences import StateOperation, check_state_sequence
 
 
@@ -214,6 +219,53 @@ def test_reference_independence_and_eval_mode_are_required(fault):
         reference.train()
     with pytest.raises(ValueError):
         check_forward_paths(target, reference, (5,), (7,))
+
+
+@pytest.mark.parametrize("entry", ["block", "tree", "comparison", "sequence", "forward"])
+@pytest.mark.parametrize("alias", ["parameter", "buffer_view"])
+def test_state_reference_storage_is_checked_before_inference(entry, alias):
+    target, reference = models()
+    independent = copy.deepcopy(target)
+    if alias == "parameter":
+        weight = target.model.lm_head.weight
+        reference.lm_head.weight = torch.nn.Parameter(weight.detach(), requires_grad=False)
+        with torch.no_grad():
+            weight.zero_()  # This changes the reference too.
+    else:
+        backing = torch.arange(4)
+        target.model.register_buffer("probe", backing[:3])
+        reference.register_buffer("probe", backing[1:])
+        assert target.model.probe.data_ptr() != reference.probe.data_ptr()
+
+    calls = []
+    case = RoundCase("round", (5, 7), 11, (13,), (-1,))
+    with reference.register_forward_pre_hook(lambda model, args: calls.append(1)):
+        with pytest.raises(ValueError, match="share tensor storage"):
+            if entry == "comparison":
+                compare_verifier_states({"first": independent, "second": target}, reference, case)
+            elif entry == "sequence":
+                check_state_sequence(target, reference, (StateOperation("a", "prefill", case.prefix),))
+            elif entry == "forward":
+                check_forward_paths(target, reference, case.prefix, (case.pending,))
+            else:
+                check_verifier_state(target, reference, case, verifier=entry, inspect_tree=entry == "tree")
+    assert not calls
+
+
+def test_state_reference_storage_is_rechecked_between_candidates(monkeypatch):
+    first, reference = models()
+    second = copy.deepcopy(first)
+    prefill = first.prefill
+
+    def share_weight(prompt):
+        second.model.lm_head.weight = reference.lm_head.weight
+        return prefill(prompt)
+
+    monkeypatch.setattr(first, "prefill", share_weight)
+    monkeypatch.setattr(second, "prefill", lambda prompt: pytest.fail("aliased candidate ran"))
+    with pytest.raises(ValueError, match="share tensor storage"):
+        compare_verifier_states({"first": first, "second": second}, reference,
+                                RoundCase("round", (5, 7), 11, (), ()))
 
 
 @pytest.mark.parametrize("static", [False, True])

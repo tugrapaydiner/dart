@@ -5,6 +5,7 @@ from __future__ import annotations
 import math
 from collections.abc import Mapping
 from dataclasses import dataclass
+from itertools import chain
 
 import torch
 
@@ -75,6 +76,15 @@ def _expected_path(drafts, parents, continuation, eos):
 def _reference_forward(model, tokens):
     ids = torch.tensor([tokens], dtype=torch.long, device=model.device)
     return model(input_ids=ids, attention_mask=torch.ones_like(ids), use_cache=True)
+
+
+def _check_reference_storage(model, reference):
+    def storages(module):
+        return ((tensor.device, tensor.untyped_storage().data_ptr())
+                for tensor in chain(module.parameters(), module.buffers()) if tensor.numel())
+
+    if not set(storages(reference)).isdisjoint(storages(model)):
+        raise ValueError("target and reference must not share tensor storage")
 
 
 def _cache_pairs(cache):
@@ -200,6 +210,7 @@ def _round_parameters(target, reference_model, case, verifier):
     eos = frozenset(() if eos is None else [eos] if isinstance(eos, int) else eos)
     if target.eos_token_ids != eos:
         raise ValueError("reference and target EOS settings differ")
+    _check_reference_storage(target.model, reference_model)
     return lookahead, eos
 
 
@@ -247,7 +258,7 @@ def check_verifier_state(
 ) -> RoundCheck:
     """Check one real round, cache values, and one subsequent target step.
 
-    Supply separate eval-mode models with matching weights and EOS settings.
+    Use eval-mode models with independent parameter and buffer storage, matching weights and EOS settings.
     This supports HF-compatible caches and ReplayCache. The reference uses native
     generation and fresh full-prefix forwards, never target cache operations.
     Reference errors propagate; candidate exceptions are reported as failures.
@@ -276,8 +287,8 @@ def compare_verifier_states(
 ) -> dict[str, RoundCheck]:
     """Check named implementations using one set of native round references.
 
-    Candidates run in mapping order with separate request states. They must use
-    matching weights and EOS settings, and must not modify the reference model.
+    Candidates run in mapping order with separate request states and matching weights and EOS settings.
+    They must keep the reference unmodified and use independent parameter and buffer storage.
     All candidates are validated before inference. Native generation and the two
     full-prefix cache forwards run once per call; nothing is cached across calls.
     Optional packed-row inspections still run independently for each candidate.
