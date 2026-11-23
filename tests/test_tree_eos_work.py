@@ -158,3 +158,62 @@ def test_unknown_vocabulary_keeps_original_forward(vocabulary):
     tree = DraftTree.from_branches([[11, 12], [50]])
     verify_tree_greedy(target, SimpleNamespace(seq_len=3), 10, tree)
     assert target.trees == [(tree.tokens, tree.parent)]
+
+
+@pytest.fixture(scope='module', params=[1, 4])
+def prediction_threads(request):
+    previous = torch.get_num_threads()
+    torch.set_num_threads(request.param)
+    try:
+        yield request.param
+    finally:
+        torch.set_num_threads(previous)
+
+
+@pytest.mark.parametrize('vocab', [512, 32000])
+@pytest.mark.parametrize('pending', [[10], [7, 9, 10]])
+@pytest.mark.parametrize('branches,eos,committed,accepted,path', [
+    ([[40, 41], [50, 51]], [2], [11], 0, []),
+    ([[50, 51], [11, 12, 13]], [2], [11, 12, 13, 14], 3, [2, 3, 4]),
+    ([[50, 51], [11, 40]], [2], [11, 12], 1, [2]),
+    ([[50, 51], [11, 12, 13]], [12], [11, 12], 2, [2]),
+    ([[50, 51], [11, 12]], [11, 50], [11], 1, []),
+    ([[11, 12], [50, 51]], [13], [11, 12, 13], 2, [0, 1]),
+])
+def test_cpu_tree_prediction_rows(monkeypatch, prediction_threads, vocab, pending, branches, eos, committed, accepted, path):
+    target = TreeTarget(eos, False)
+    target.model.config.vocab_size = vocab
+    state = SimpleNamespace(seq_len=3)
+    tree = DraftTree.from_branches(branches)
+    visited = []
+    physical = []
+
+    def forward(state, pending, tokens, parents):
+        physical.extend(pending + tokens)
+        state.seq_len += len(physical)
+        logits = torch.zeros((len(physical), 2 * vocab))[:, ::2]
+        logits[:, -1] = 1  # The smaller token wins the tie.
+        logits[torch.arange(len(physical)), [token + 1 for token in physical]] = 1
+        return logits
+
+    argmax = torch.argmax
+
+    def record(rows, *args, **kwargs):
+        start = rows.storage_offset() // (2 * vocab)
+        count = rows.numel() // vocab
+        visited.extend(range(start, start + count))
+        return argmax(rows, *args, **kwargs)
+
+    monkeypatch.setattr(target, 'forward_tree', forward)
+    monkeypatch.setattr(torch, 'argmax', record)
+    result = verify_tree_greedy(target, state, pending, tree, compute_entropy=False)
+
+    expected_rows = list(range(len(pending))) + [len(pending) + offset for offset in path]
+    path_only = vocab == 32000 and prediction_threads == 1
+    assert visited == (expected_rows if path_only else list(range(len(physical))))
+    assert result.committed == committed and result.n_draft_accepted == accepted
+    assert result.n_draft_proposed == len(tree) and not result.all_accepted
+    assert result.hidden_index == expected_rows[-1]
+    assert result.finished == (committed[-1] in eos)
+    assert result.pending_divergence == sum(b != a + 1 for a, b in zip(pending, pending[1:]))
+    assert state.seq_len == 3 + len(pending) + len(committed) - 1

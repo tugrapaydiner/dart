@@ -215,7 +215,8 @@ def verify_tree_greedy(
     live = _live_tree_rows(target, draft_tree, base_len + p_len)
     tokens, parents, slots = (draft_tree.tokens, draft_tree.parent, None) if live is None else live
     logits = target.forward_tree(state, pending_block, tokens, parents)
-    preds = torch.argmax(logits, dim=-1).tolist()
+    path_only = logits.device.type == "cpu" and logits.size(-1) >= 32_000 and torch.get_num_threads() == 1
+    preds = torch.argmax(logits[:p_len] if path_only else logits, dim=-1).tolist()  # Keep parallel reductions batched.
 
     # Divergence audit of unverified pending tokens (approx-mode metadata;
     # 0 in exact mode by construction) - matches the block verifier.
@@ -233,8 +234,8 @@ def verify_tree_greedy(
     cur_row = p_len - 1           # row deciding the next position
     accepted_eos = False
     correction: int | None = None
+    want = preds[cur_row]
     while True:
-        want = preds[cur_row]
         nxt = next(
             (c for c in children.get(cur_parent, [])
              if draft_tree.tokens[c] == want),
@@ -249,6 +250,7 @@ def verify_tree_greedy(
             break
         cur_parent = nxt
         cur_row = p_len + (nxt if slots is None else slots[nxt])
+        want = int(torch.argmax(logits[cur_row], dim=-1)) if path_only else preds[cur_row]
 
     m = len(path)
     if accepted_eos:
