@@ -81,7 +81,7 @@ def test_dense_llama_uses_no_padding_mask(backend):
     for tokens, keep in (([0, 7, 0, 11], None), ([0], None), ([13, 0, 15], None), ([19, 21], 5)):
         if keep is not None:
             target.crop(state, keep)
-            reference_cache.crop(keep)
+            reference_cache.crop(keep - reference_cache.get_seq_length())
         past = reference_cache.get_seq_length()
         with target.model.register_forward_pre_hook(record_mask, with_kwargs=True):
             if state is None:
