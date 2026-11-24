@@ -1,3 +1,4 @@
+from contextlib import closing
 from dataclasses import asdict
 from importlib.metadata import version
 from types import SimpleNamespace
@@ -177,3 +178,83 @@ def test_prediction_option_requires_boolean(value):
 def test_eager_rejects_prediction_option_before_loading_model():
     with pytest.raises(ValueError, match="require static or cuda_graph execution"):
         build_target({"model": "invalid", "capture_predictions": True})
+
+
+@pytest.mark.parametrize("width,pending_len,rejection", [(5, 1, 0), (4, 1, 1), (5, 2, 2), (4, 2, 0)])
+def test_retained_replay_rows_skip_rejected(tiny_target, width, pending_len, rejection, monkeypatch):
+    prompt = [5, 7, 9]
+    expected = hf_ids(tiny_target, prompt, width + 1)
+    pending, drafts = expected[:pending_len], expected[pending_len:width]
+    drafts[rejection] = (drafts[rejection] + 1) % tiny_target.model.config.vocab_size
+    with closing(CudaGraphTarget(tiny_target, capacity=32, max_block_tokens=5, replay=False,
+                                 capture_predictions=True, replay_block_sizes=(1, 5))) as target:
+        state, _ = target.prefill(prompt)
+        native, _ = tiny_target.prefill(prompt)
+        wanted = verify_block_greedy(tiny_target, native, pending, drafts, compute_entropy=False)
+        workspace = target._workspace.storage.untyped_storage().data_ptr()
+        widths = []
+        copy = torch.Tensor.copy_
+
+        def observe(dest, source, *args, **kwargs):
+            if source.ndim == 6 and source.untyped_storage().data_ptr() == workspace:
+                widths.append(source.size(-2))
+            return copy(dest, source, *args, **kwargs)
+
+        with monkeypatch.context() as patch:
+            patch.setattr(torch.Tensor, "copy_", observe)
+            result = verify_block_greedy(target, state, pending, drafts, compute_entropy=False)
+        assert asdict(result) == asdict(wanted) and result.n_draft_accepted == rejection
+        assert widths == [pending_len + rejection]
+        assert state.seq_len == native.seq_len == len(prompt) + widths[0]
+        for i, layer in enumerate(native.cache.layers):
+            torch.testing.assert_close(state.cache.storage[i, 0, ..., :state.seq_len, :], layer.keys)
+            torch.testing.assert_close(state.cache.storage[i, 1, ..., :state.seq_len, :], layer.values)
+        next_token = [result.committed[-1]]
+        assert target.forward_predictions(state, next_token) == tiny_target.forward_block(native, next_token).argmax(-1).tolist()
+
+
+def test_replay_decision_failure_keeps_request_prefix(execution, monkeypatch):
+    base, target = execution
+    prompt = [3, 5, 7]
+    expected = hf_ids(base, prompt, 6)
+    state, _ = target.prefill(prompt)
+    target.forward_predictions(state, expected[:1])
+    cache, length = state.cache, state.seq_len
+
+    def fail(*args, **kwargs):
+        target._workspace.storage.fill_(float("nan"))
+        raise RuntimeError("interrupted decision")
+
+    with monkeypatch.context() as patch:
+        patch.setattr("dart.verification.block_verify._block_result", fail)
+        with pytest.raises(RuntimeError, match="interrupted decision"):
+            verify_block_greedy(target, state, expected[1], expected[2:5], compute_entropy=False)
+    assert state.cache is cache and state.seq_len == length
+    other, _ = target.prefill([11, 9, 7])
+    target.forward_predictions(other, [4])
+    recovered = verify_block_greedy(target, state, expected[1], expected[2:5], compute_entropy=False)
+    native, _ = base.prefill(prompt + expected[:1])
+    wanted = verify_block_greedy(base, native, expected[1], expected[2:5], compute_entropy=False)
+    assert asdict(recovered) == asdict(wanted)
+    for i, layer in enumerate(native.cache.layers):
+        torch.testing.assert_close(state.cache.storage[i, 0, ..., :state.seq_len, :], layer.keys, atol=2e-6, rtol=2e-5)
+        torch.testing.assert_close(state.cache.storage[i, 1, ..., :state.seq_len, :], layer.values, atol=2e-6, rtol=2e-5)
+
+
+def test_custom_crop_sees_the_full_forward(execution, monkeypatch):
+    base, target = execution
+    prompt = [5, 7, 9]
+    pending, truth, *rest = hf_ids(base, prompt, 5)
+    drafts = [(truth + 1) % base.model.config.vocab_size, *rest]
+    state, _ = target.prefill(prompt)
+    before = []
+    crop = target.crop
+
+    def observe(state, length):
+        before.append(state.seq_len)
+        crop(state, length)
+
+    monkeypatch.setattr(target, "crop", observe)
+    result = verify_block_greedy(target, state, pending, drafts, compute_entropy=False)
+    assert before == [len(prompt) + 1 + len(drafts)]
+    assert result.committed == [truth] and state.seq_len == len(prompt) + 1

@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import torch
 
+from dart.models.replay import CudaGraphTarget
 from dart.models.target import TargetModel, TargetState
 from dart.runtime.types import VerifyResult
 
@@ -59,7 +60,18 @@ def verify_block_greedy(
             break  # The full forward handles bounds and invalid IDs.
     tokens.extend(forward_drafts)
     if not compute_entropy and getattr(target, "capture_predictions", False):
-        preds = target.forward_predictions(state, tokens)
+        forward = target.forward_predictions
+        if (base_len and forward_drafts and type(target) is CudaGraphTarget
+                and getattr(forward, "__func__", None) is CudaGraphTarget.forward_predictions
+                and getattr(target.crop, "__func__", None) is CudaGraphTarget.crop
+                and type(draft_tokens) is list and all(type(token) is int for token in tokens)):
+            def decide(predictions):
+                result = _block_result(tokens, p_len, draft_tokens, predictions, target.eos_token_ids)
+                return p_len - 1 + len(result.committed), result
+
+            return target._verify_predictions(state, tokens, decide)
+        preds = forward(state, tokens)
+        logits = None
     else:
         logits = target.forward_block(state, tokens)
         if (len(forward_drafts) >= 3 and type(draft_tokens[0]) is int
@@ -70,6 +82,13 @@ def verify_block_greedy(
         else:
             preds = torch.argmax(logits, dim=-1).tolist()
 
+    result = _block_result(tokens, p_len, draft_tokens, preds, target.eos_token_ids, logits if compute_entropy else None)
+    target.crop(state, base_len + p_len - 1 + len(result.committed))
+    return result
+
+
+def _block_result(tokens, p_len, draft_tokens, preds, eos_ids, logits=None):
+    k = len(draft_tokens)
     # Divergence audit of unverified pending tokens (approx mode only).
     divergence = sum(
         1 for j in range(1, p_len) if tokens[j] != preds[j - 1]
@@ -79,7 +98,7 @@ def verify_block_greedy(
     m = 0
     accepted_eos = False
     while m < k and draft_tokens[m] == preds[off + m]:
-        is_eos = draft_tokens[m] in target.eos_token_ids
+        is_eos = draft_tokens[m] in eos_ids
         m += 1
         if is_eos:
             accepted_eos = True
@@ -88,30 +107,24 @@ def verify_block_greedy(
     if accepted_eos:
         committed = list(draft_tokens[:m])
         finished = True
-        n_accepted = m
     else:
         committed = list(draft_tokens[:m]) + [preds[off + m]]
-        finished = committed[-1] in target.eos_token_ids
-        n_accepted = m
+        finished = committed[-1] in eos_ids
 
     # Predictive entropy at the decided (on-trajectory) position - drives the
     # scheduler's entropy gate.  Row off+m produced the correction/bonus token;
     # rows after it are off-trajectory (conditioned on a rejected draft).
-    if accepted_eos or not compute_entropy:
+    if accepted_eos or logits is None:
         entropy = 0.0
     else:
         dist = torch.softmax(logits[off + m].float(), dim=-1)
         entropy = float(-(dist * dist.clamp_min(1e-12).log()).sum())
 
-    # Roll back KV entries of rejected draft tokens.  Postcondition: the
-    # cache covers all committed tokens except the new pending one.
-    target.crop(state, base_len + p_len - 1 + len(committed))
-
     return VerifyResult(
         committed=committed,
         n_draft_proposed=k,
-        n_draft_accepted=n_accepted,
-        all_accepted=(n_accepted == k),
+        n_draft_accepted=m,
+        all_accepted=(m == k),
         finished=finished,
         pending_divergence=divergence,
         entropy=entropy,

@@ -455,6 +455,10 @@ class CudaGraphTarget(TargetModel):
             raise ValueError("prepare the target with capture_predictions=True")
         return self._forward(state, self._ids(tokens), return_predictions=True)
 
+    @torch.inference_mode()
+    def _verify_predictions(self, state, tokens, decide):
+        return self._forward(state, self._ids(tokens), return_predictions=True, decide=decide)
+
     def _resident_prefix_length(self, cache):
         if (type(cache) is ReplayCache and not cache._buffer.exposed and not self._workspace_dirty
                 and self._resident_cache is not None and self._resident_cache() is cache):
@@ -516,7 +520,7 @@ class CudaGraphTarget(TargetModel):
             self._workspace_dirty = False
             return output
 
-    def _forward(self, state, input_ids, *, last_logits_only=False, return_predictions=False):
+    def _forward(self, state, input_ids, *, last_logits_only=False, return_predictions=False, decide=None):
         with self._lock:
             self._check_ready()
             state._check_usable()
@@ -542,12 +546,15 @@ class CudaGraphTarget(TargetModel):
                 block.ids.copy_(input_ids)
                 block.start.fill_(cache.length)
                 logits = block.run()
-            storage[..., cache.length:total_len, :].copy_(self._workspace.storage[..., cache.length:total_len, :])
             if return_predictions:
                 predictions = logits.argmax(dim=-1) if block is None else block.predictions
                 output = predictions[0].tolist()  # Copy before another call can replay this workspace.
+                if decide is not None:
+                    kept, output = decide(output)
+                    total_len = cache.length + kept  # Rejected rows stay in the workspace.
             else:
                 output = logits[0].float().clone()  # Later replays must not overwrite a caller's logits.
+            storage[..., cache.length:total_len, :].copy_(self._workspace.storage[..., cache.length:total_len, :])
             cache.length = total_len
             state.cache = cache
             self._resident_cache = weakref.ref(cache)
