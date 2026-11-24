@@ -455,6 +455,12 @@ class CudaGraphTarget(TargetModel):
             raise ValueError("prepare the target with capture_predictions=True")
         return self._forward(state, self._ids(tokens), return_predictions=True)
 
+    def _resident_prefix_length(self, cache):
+        if (type(cache) is ReplayCache and not cache._buffer.exposed and not self._workspace_dirty
+                and self._resident_cache is not None and self._resident_cache() is cache):
+            return self._resident_length
+        return 0
+
     def _restore_prefix(self, cache):
         storage = cache._buffer.tensor if type(cache) is ReplayCache else cache.storage
         if cache.owner is not self._owner or storage.shape != self._workspace.storage.shape:
@@ -462,13 +468,11 @@ class CudaGraphTarget(TargetModel):
         if self._workspace_dirty:
             self._resident_cache = None
             self._workspace.storage.zero_()  # Failed work may leave NaNs in masked rows.
-        resident = (type(cache) is ReplayCache and not cache._buffer.exposed
-                    and self._resident_cache is not None and self._resident_cache() is cache
-                    and cache.length <= self._resident_length)
+        shared = self._resident_prefix_length(cache)
         self._resident_cache = None  # Any failed workspace write requires a fresh restore.
         self._workspace_dirty = True
-        if not resident:
-            self._workspace.storage[..., :cache.length, :].copy_(storage[..., :cache.length, :])
+        if shared < cache.length:
+            self._workspace.storage[..., shared:cache.length, :].copy_(storage[..., shared:cache.length, :])
         return storage
 
     @torch.inference_mode()
@@ -582,6 +586,7 @@ class CudaGraphTarget(TargetModel):
             raise ValueError("cache storage does not match the prepared replay workspace")
         offsets = torch.tensor(path, device=storage.device, dtype=torch.long)
         rows = storage[..., keep_len:cache.length, :].index_select(-2, offsets)  # A path can overlap its destination.
+        shared = min(keep_len, self._resident_prefix_length(cache))
         self._resident_cache = None
         try:
             storage[..., keep_len:length, :].copy_(rows)
@@ -589,6 +594,9 @@ class CudaGraphTarget(TargetModel):
         except BaseException:
             state._failed = True
             raise
+        if shared:
+            self._resident_length = shared  # Only the selected tail needs restoring on the next call.
+            self._resident_cache = weakref.ref(cache)
 
     def forward_tree(self, *args, **kwargs):
         raise ValueError("CUDA replay supports block verification, not tree verification")

@@ -333,3 +333,95 @@ def test_tree_tail_partial_write_invalidates_only_its_request(pair, monkeypatch)
         target.forward_block(a, [23])
     forward(base, target, ref, other, 'logits', 29)
     check_cache(other, ref)
+
+
+def workspace_writes(monkeypatch, target):
+    workspace = target._workspace.storage
+    address = workspace.untyped_storage().data_ptr()
+    writes = []
+    copy_ = torch.Tensor.copy_
+
+    def record(destination, source, *args, **kwargs):
+        if destination.ndim == 6 and destination.untyped_storage().data_ptr() == address:
+            start = (destination.storage_offset() - workspace.storage_offset()) // workspace.stride(-2)
+            writes.append((start, destination.size(-2)))
+        return copy_(destination, source, *args, **kwargs)
+
+    monkeypatch.setattr(torch.Tensor, 'copy_', record)
+    return writes
+
+
+@pytest.mark.parametrize('mode, regather, crop_to, expected', [
+    ('logits', False, None, [(48, 3)]), ('predictions', False, None, [(48, 3)]),
+    ('2', True, None, [(48, 3)]), ('4', True, 50, [(48, 2)]),
+    ('logits', False, 49, [(48, 1)]), ('predictions', True, 48, []), ('2', False, 47, []),
+])
+def test_selected_tail_resumes_at_the_shared_prefix(pair, monkeypatch, mode, regather, crop_to, expected):
+    base, target = pair
+    state, _ = target.prefill([3] * 48)
+    ref, _ = base.prefill([3] * 48)
+    target.forward_block(state, [5, 7, 11, 13])
+    base.forward_block(ref, [5, 7, 11, 13])
+    writes = workspace_writes(monkeypatch, target)
+    for model, request in ((target, state), (base, ref)):
+        model.gather_tree_tail(request, 48, [3, 0, 2])
+        if regather:
+            model.gather_tree_tail(request, 49, [1, 0])
+        if crop_to is not None:
+            model.crop(request, crop_to)
+    assert writes == []
+    token = forward(base, target, ref, state, mode, 23)
+    forward(base, target, ref, state, 'predictions', token)
+    check_cache(state, ref)
+    assert writes == expected
+
+
+@pytest.mark.parametrize('interruption', ['switch', 'alias', 'shallow'])
+def test_selected_tail_restores_a_changed_or_exposed_prefix(pair, monkeypatch, interruption):
+    base, target = pair
+    state, _ = target.prefill([3, 5, 7])
+    ref, _ = base.prefill([3, 5, 7])
+    target.forward_block(state, [9, 11, 13])
+    base.forward_block(ref, [9, 11, 13])
+    target.gather_tree_tail(state, 3, [2, 0])
+    base.gather_tree_tail(ref, 3, [2, 0])
+    if interruption == 'switch':
+        other, _ = target.prefill([19, 23])
+        target.forward_predictions(other, [29])
+    else:
+        alias = state.cache if interruption == 'alias' else copy.copy(state.cache)
+        with torch.inference_mode():
+            alias.storage[0, 1, ..., 0, :].add_(0.25)
+            ref.cache.layers[0].values[..., 0, :].add_(0.25)
+    writes = workspace_writes(monkeypatch, target)
+    forward(base, target, ref, state, 'predictions', 31)
+    check_cache(state, ref)
+    assert writes == [(0, 5)]
+
+
+def test_selected_tail_failed_restore_reloads_the_request(pair, monkeypatch):
+    base, target = pair
+    state, _ = target.prefill([3, 5, 7])
+    ref, _ = base.prefill([3, 5, 7])
+    target.forward_block(state, [11, 13, 17])
+    base.forward_block(ref, [11, 13, 17])
+    target.gather_tree_tail(state, 3, [2, 0])
+    base.gather_tree_tail(ref, 3, [2, 0])
+    workspace = target._workspace.storage
+    copy_ = torch.Tensor.copy_
+
+    def fail(destination, source, *args, **kwargs):
+        if destination.ndim == 6 and destination.untyped_storage().data_ptr() == workspace.untyped_storage().data_ptr():
+            workspace.fill_(float('nan'))
+            raise RuntimeError('interrupted prefix restore')
+        return copy_(destination, source, *args, **kwargs)
+
+    with monkeypatch.context() as fault:
+        fault.setattr(torch.Tensor, 'copy_', fail)
+        with pytest.raises(RuntimeError, match='interrupted prefix restore'):
+            target.forward_predictions(state, [23])
+    assert state.seq_len == 5
+    writes = workspace_writes(monkeypatch, target)
+    forward(base, target, ref, state, 'logits', 23)
+    check_cache(state, ref)
+    assert writes == [(0, 5)]
