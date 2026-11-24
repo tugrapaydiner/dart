@@ -4,6 +4,7 @@ import copy
 import gc
 import weakref
 from importlib.metadata import version
+from types import SimpleNamespace
 
 import pytest
 import torch
@@ -196,6 +197,31 @@ def test_active_columns_match_live_keys_and_mask(models, monkeypatch, mode, widt
         assert target._workspace.storage.size(-2) == capacity
     finally:
         target.close()
+
+
+@pytest.mark.parametrize("width,start,active", [(1, 0, True), (1, 15, True), (3, 0, True),
+                                                (3, 7, True), (3, 13, True), (3, 7, False), (1, 5, False)])
+def test_causal_mask_skips_visible_prefix(monkeypatch, width, start, active):
+    capacity = 16
+    workspace = SimpleNamespace(columns=torch.arange(capacity), storage=torch.zeros(1, 1, capacity, 2))
+    end = start + width if active else None
+    columns = end if active else capacity
+    low = torch.finfo(workspace.storage.dtype).min
+    expected = torch.tensor([[0.0 if k <= start + i else low for k in range(columns)] for i in range(width)])
+    comparisons = []
+    greater = torch.Tensor.__gt__
+
+    def compare(left, right):
+        comparisons.append(torch.broadcast_shapes(left.shape, right.shape).numel())
+        return greater(left, right)
+
+    with monkeypatch.context() as patch:
+        patch.setattr(torch.Tensor, "__gt__", compare)
+        mask = replay._causal_logits(lambda **args: SimpleNamespace(logits=args["attention_mask"]), workspace,
+                                     torch.zeros(1, width, dtype=torch.long), torch.arange(start, start + width), end=end)
+    assert torch.equal(mask[0, 0], expected)
+    if active:
+        assert sum(comparisons) <= (width * width if width > 1 else 0)
 
 
 @pytest.mark.parametrize("mode", ["prepared", "fallback", "chunk"])

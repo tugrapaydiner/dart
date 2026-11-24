@@ -172,8 +172,12 @@ def _causal_logits(forward, workspace, ids, positions, *, end=None):
     if end is not None and end < columns.numel():
         rows = rows[..., :end, :]
         columns = columns[:end]
-    mask = rows.new_zeros((1, 1, ids.shape[1], columns.numel()))
-    mask.masked_fill_(columns[None, :] > positions[:, None], torch.finfo(mask.dtype).min)
+    width = ids.shape[1]
+    mask = rows.new_zeros((1, 1, width, columns.numel()))
+    if end is None:
+        mask.masked_fill_(columns[None, :] > positions[:, None], torch.finfo(mask.dtype).min)
+    elif width > 1:
+        mask[..., -width:].fill_(torch.finfo(mask.dtype).min).triu_(diagonal=1)  # The prefix is visible to every query.
     previous = getattr(workspace, "_rows", rows)
     if previous is not rows:
         workspace._rows = rows
