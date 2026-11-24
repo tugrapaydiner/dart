@@ -58,19 +58,23 @@ class NGramDrafter:
             return
         seq_len = len(committed)
         scan_from = 0 if self.max_scan is None else max(0, seq_len - self.max_scan)
+        stop = seq_len - scan_from - self.min_ngram
+        if stop <= 0:
+            return
         candidates = committed[scan_from:seq_len - 1]
         candidates.reverse()
+        last = committed[-1]
+        try:
+            first = candidates.index(last, 0, stop)  # Every suffix ends in this token.
+        except ValueError:
+            return
         found: list[list[int]] = []
-        for n in range(min(self.max_ngram, seq_len - 1), self.min_ngram - 1, -1):
+        longest = min(self.max_ngram, len(candidates) - first)
+        for n in range(longest, self.min_ngram - 1, -1):
             pattern = committed[seq_len - n :]
-            cursor, stop = 0, len(candidates) - n + 1
-            while cursor < stop:
-                try:
-                    offset = candidates.index(pattern[-1], cursor, stop)  # Skip impossible suffix endings.
-                except ValueError:
-                    break
+            offset, stop = first, len(candidates) - n + 1
+            while True:
                 start = seq_len - n - 1 - offset
-                cursor = offset + 1
                 if committed[start : start + n] == pattern:
                     cont = committed[start + n : start + n + max_tokens]
                     if cont and cont not in found:
@@ -78,6 +82,12 @@ class NGramDrafter:
                         yield cont
                         if len(found) >= limit:
                             return
+                if offset + 1 >= stop:
+                    break
+                try:
+                    offset = candidates.index(last, offset + 1, stop)
+                except ValueError:
+                    break
             if found:
                 break  # branches from one n keep the recency semantics clean
 

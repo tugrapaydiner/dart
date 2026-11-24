@@ -65,6 +65,45 @@ def test_lookup_honors_scan_boundary_and_reused_mutable_inputs():
     assert drafter.propose([1, 2, 7, 1, 2], 2) == [7, 1]
 
 
+@pytest.mark.parametrize("tree", [False, True])
+def test_suffix_search_avoids_rescanning_a_missing_token(tree):
+    compared = []
+
+    class LastToken(int):
+        def __eq__(self, other):
+            compared.append(other)
+            return super().__eq__(other)
+
+    history = [*range(127), LastToken(127)]
+    drafter = NGramDrafter(max_ngram=4)
+    if tree:
+        assert drafter.propose_tree(history, 2).tokens == []
+    else:
+        assert drafter.propose(history, 2) == []
+    assert sorted(compared) == list(range(127))
+
+
+@pytest.mark.parametrize("tree", [False, True])
+def test_suffix_search_avoids_lengths_that_cannot_fit_at_the_last_match(tree):
+    suffix_lengths = []
+
+    class History(list):
+        def __getitem__(self, key):
+            items = super().__getitem__(key)
+            if isinstance(key, slice) and key.stop is None:
+                suffix_lengths.append(len(items))
+            return items
+
+    history = History(range(1024))
+    history[-1] = history[-8]
+    drafter = NGramDrafter(max_ngram=1023, max_scan=12)
+    if tree:
+        assert drafter.propose_tree(history, 2) == DraftTree.chain([1017, 1018])
+    else:
+        assert drafter.propose(history, 2) == [1017, 1018]
+    assert max(suffix_lengths, default=0) <= 5
+
+
 @pytest.mark.parametrize("cap", [0, 1, 3, 5, 8, 15, 25])
 def test_bounded_lookup_keeps_the_first_packed_nodes(cap):
     rng = random.Random(37)
