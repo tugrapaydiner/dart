@@ -32,8 +32,9 @@ def _verifier_work(stack, target):
         return counted
 
     for item in targets:
-        name = "_forward" if isinstance(item, CudaGraphTarget) else "_run_model"  # Replay bypasses model hooks.
-        stack.enter_context(patch.object(item, name, observe(getattr(item, name))))
+        names = ("_run_model", "_run_replay_block") if isinstance(item, CudaGraphTarget) else ("_run_model",)
+        for name in names:  # Count the selected dispatch without changing verifier routing.
+            stack.enter_context(patch.object(item, name, observe(getattr(item, name))))
 
     def during_verification(verify):
         @wraps(verify)

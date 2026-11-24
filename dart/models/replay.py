@@ -520,6 +520,14 @@ class CudaGraphTarget(TargetModel):
             self._workspace_dirty = False
             return output
 
+    def _run_replay_block(self, block, input_ids, *, start):
+        if block is None:
+            positions = self._workspace.columns[:input_ids.shape[1]] + start
+            return _causal_logits(self._workspace.forward_model, self._workspace, input_ids, positions)
+        block.ids.copy_(input_ids)
+        block.start.fill_(start)
+        return block.run()
+
     def _forward(self, state, input_ids, *, last_logits_only=False, return_predictions=False, decide=None):
         with self._lock:
             self._check_ready()
@@ -539,13 +547,7 @@ class CudaGraphTarget(TargetModel):
                 cache = ReplayCache.from_dynamic(cache, self.capacity, self._owner)
             block = self._blocks.get(width)
             storage = self._restore_prefix(cache)
-            if block is None:
-                positions = self._workspace.columns[:width] + cache.length
-                logits = _causal_logits(self._workspace.forward_model, self._workspace, input_ids, positions)
-            else:
-                block.ids.copy_(input_ids)
-                block.start.fill_(cache.length)
-                logits = block.run()
+            logits = self._run_replay_block(block, input_ids, start=cache.length)
             if decide is not None:
                 predictions = block.predictions[0].tolist() if block is not None and self.capture_predictions else None
                 kept, output = decide(logits[0], predictions)  # Read scores before the workspace is reused.

@@ -10,7 +10,7 @@ import torch
 from benchmarks import profiling, run_bench
 from dart import cli
 from dart.drafters.ngram import NGramDrafter
-from dart.models.replay import CapacityBuckets
+from dart.models.replay import CapacityBuckets, CudaGraphTarget
 from dart.runtime import engine as runtime
 from dart.runtime.engine import DartEngine
 from dart.runtime.types import DecodeConfig
@@ -80,6 +80,37 @@ def test_verifier_work_counts_selected_replay_bucket(monkeypatch):
                 for row in report["samples"]:
                     assert (row["verify_target_calls"], row["verify_input_positions"]) == expected
         assert all("_forward" not in vars(bucket) for bucket in prepared.buckets)
+
+
+@pytest.mark.parametrize("capture,entropy", [(True, False), (True, True), (False, False), (False, True)])
+def test_profiling_preserves_replay_writes(monkeypatch, capture, entropy):
+    pytest.importorskip("transformers", minversion="5.16.1")
+    base, prompt = target_and_prompt()
+    drafter = NGramDrafter()
+    drafter.requires_entropy = entropy
+    monkeypatch.setattr(drafter, "propose", lambda history, count: [1] * count)
+    writes = []
+    with closing(CudaGraphTarget(base, capacity=32, max_block_tokens=3, replay=False,
+                                 capture_predictions=capture, replay_block_sizes=(1, 3))) as target:
+        workspace = target._workspace.storage.untyped_storage().data_ptr()
+        copy = torch.Tensor.copy_
+
+        def observe(dest, source, *args, **kwargs):
+            if source.ndim == 6 and source.untyped_storage().data_ptr() == workspace:
+                writes[-1].append(source.size(-2))
+            return copy(dest, source, *args, **kwargs)
+
+        monkeypatch.setattr(torch.Tensor, "copy_", observe)
+        with DartEngine(target, drafter) as engine:
+            def generate(ids):
+                writes.append([])
+                return engine.generate(ids, DecodeConfig(max_new_tokens=6, draft_len=2))
+
+            report = profiling.profile_methods({"block": generate}, [prompt], target, {"block": engine},
+                                               reference="block", repeats=1)
+        assert writes == [[1] * 5, [1] * 5]  # Reference and profiled request.
+        row, = report["samples"]
+        assert (row["verify_target_calls"], row["verify_input_positions"]) == (5, 12)
 
 
 @pytest.mark.parametrize("default", ["block", "tree", "reference"])
