@@ -63,6 +63,57 @@ def test_branches_keep_tree_execution(parents):
     assert target.trees == [(tree.tokens, parents)] and len(target.gathers) == 1
 
 
+@pytest.mark.parametrize('pending,committed,path', [(10, [11, 12, 13], [2, 3]), (30, [31], [])])
+def test_tree_walk_uses_existing_edges(pending, committed, path):
+    target = TreeTarget([], False)
+    scans = []
+
+    class Parents(list):
+        def __iter__(self):
+            if target.calls:
+                scans.append(len(self))
+            return super().__iter__()
+
+    tree = DraftTree([50, 51, 11, 12], Parents([-1, -1, -1, 2]))
+    state = SimpleNamespace(seq_len=3)
+    result = verify_tree_greedy(target, state, pending, tree, compute_entropy=False)
+    assert result.committed == committed and target.gathers == [path]
+    assert state.seq_len == 3 + len(committed)
+    assert not scans
+
+
+@pytest.mark.parametrize('eos,committed,path', [([], [11, 12, 13, 14, 15], [1, 2, 4, 5]),
+                                                ([13], [11, 12, 13], [1, 2])])
+def test_tree_walk_uses_merged_parent_indices(eos, committed, path):
+    tree = DraftTree([50, 11, 12, 11, 13, 12, 13, 14], [-1, -1, 1, -1, 3, 3, 5, 6])
+    target, state = TreeTarget(eos, False), SimpleNamespace(seq_len=3)
+    result = verify_tree_greedy(target, state, 10, tree, compute_entropy=False)
+    assert result.committed == committed and result.finished == bool(eos)
+    assert result.n_draft_accepted == len(path) + bool(eos) and result.n_draft_proposed == len(tree)
+    assert target.gathers == [path] and state.seq_len == 3 + len(committed)
+
+
+def test_tree_walk_compares_nonstandard_sibling_tokens():
+    class Token(int):
+        __hash__ = None
+
+    tree = DraftTree([Token(50), 11, 12], [-1, -1, 1])
+    target, state = TreeTarget([], False), SimpleNamespace(seq_len=3)
+    result = verify_tree_greedy(target, state, 10, tree, compute_entropy=False)
+    assert result.committed == [11, 12, 13] and target.gathers == [[1, 2]]
+
+
+def test_tree_walk_compares_scalar_predictions(monkeypatch):
+    target = TreeTarget([50], True)
+    monkeypatch.setattr(target, 'forward_predictions',
+                        lambda state, ids: target.forward_block(state, ids).argmax(dim=-1))
+    state = SimpleNamespace(seq_len=3)
+    tree = DraftTree([50, 11, 12], [-1, -1, 1])
+    result = verify_tree_greedy(target, state, 10, tree, compute_entropy=False)
+    assert result.committed == [11, 12, 13] and result.n_draft_accepted == 2
+    assert state.seq_len == 6
+
+
 @pytest.fixture
 def models():
     previous = torch.get_num_threads()

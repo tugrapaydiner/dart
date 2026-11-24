@@ -158,19 +158,19 @@ def _is_chain(tree: DraftTree) -> bool:
     )
 
 
-def _merge_tree_prefixes(tree: DraftTree) -> DraftTree:
+def _index_tree_edges(tree: DraftTree) -> tuple[DraftTree, dict[tuple[int, int], int] | None]:
     if len(tree.parent) != len(tree.tokens):
-        return tree
+        return tree, None
     edges = {}
     slots = []
     for index, (parent, token) in enumerate(zip(tree.parent, tree.tokens)):
         if type(parent) is not int or not -1 <= parent < index or type(token) is not int:
-            return tree  # Keep the target's normal input checks.
+            return tree, None  # Keep the target's normal input checks.
         parent = slots[parent] if parent >= 0 else -1
         slots.append(edges.setdefault((parent, token), len(edges)))
-    if len(edges) == len(tree):
-        return tree
-    return DraftTree([token for _, token in edges], [parent for parent, _ in edges])
+    if len(edges) < len(tree):
+        tree = DraftTree([token for _, token in edges], [parent for parent, _ in edges])
+    return tree, edges
 
 
 def _live_tree_rows(target, tree: DraftTree, context_len: int):
@@ -234,7 +234,7 @@ def verify_tree_greedy(
 
     chain = n == 0 or _is_chain(draft_tree)
     if not chain:
-        draft_tree = _merge_tree_prefixes(draft_tree)
+        draft_tree, edges = _index_tree_edges(draft_tree)
         chain = len(draft_tree) < n and _is_chain(draft_tree)
     if chain:
         from dart.verification.block_verify import verify_block_greedy
@@ -263,23 +263,23 @@ def verify_tree_greedy(
         1 for j in range(1, p_len) if pending_block[j] != preds[j - 1]
     )
 
-    children: dict[int, list[int]] = {}
-    for i, p in enumerate(draft_tree.parent):
-        children.setdefault(p, []).append(i)
-
     # Greedy argmax walk from the prefix down the tree.
     path: list[int] = []          # accepted node indices, root-first
+    children: dict[int, list[int]] | None = None
     cur_parent = -1
     cur_row = p_len - 1           # row deciding the next position
     accepted_eos = False
     correction: int | None = None
     want = preds[cur_row]
     while True:
-        nxt = next(
-            (c for c in children.get(cur_parent, [])
-             if draft_tree.tokens[c] == want),
-            None,
-        )
+        if edges is not None and type(want) is int:
+            nxt = edges.get((cur_parent, want))
+        else:
+            if children is None:  # Some scalar IDs compare by value but hash by identity.
+                children = {}
+                for i, p in enumerate(draft_tree.parent):
+                    children.setdefault(p, []).append(i)
+            nxt = next((c for c in children.get(cur_parent, ()) if draft_tree.tokens[c] == want), None)
         if nxt is None:
             correction = want  # target's own token; may terminate the walk
             break
