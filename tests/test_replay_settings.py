@@ -116,6 +116,33 @@ def test_repreparing_changed_model_restores_supported_execution(tiny_target, mon
             assert current.greedy_generate([5, 6, 7], 5) == expected
 
 
+@pytest.mark.parametrize("shared", [True, False], ids=["shared_projection", "swapped_names"])
+@torch.inference_mode()
+def test_replay_rejects_changed_child_bindings(tiny_target, monkeypatch, shared):
+    base = TargetModel(copy.deepcopy(tiny_target.model))
+    first, last = (layer.mlp for layer in base.model.model.layers)
+    if shared:
+        first.gate_proj = last.gate_proj
+    reference = copy.deepcopy(base.model)
+    with closing(CudaGraphTarget(base, capacity=16, replay=False)) as target:
+        state, _ = target.prefill([5, 6, 7])
+        before = [(k.clone(), v.clone()) for k, v in values(state)]
+        with monkeypatch.context() as patch:
+            if shared:
+                patch.setitem(first._modules, "gate_proj", last.up_proj)
+            else:
+                names = {"up_proj": "gate_proj", "gate_proj": "up_proj"}
+                rebound = {names.get(key, key): child for key, child in first._modules.items()}
+                patch.setattr(first, "_modules", rebound)  # Same children in the same iteration order.
+            with pytest.raises(ValueError, match="layer settings changed"):
+                target.forward_block(state, [8])
+        assert state.seq_len == 3
+        for (keys, vals), (old_keys, old_vals) in zip(values(state), before):
+            assert torch.equal(keys, old_keys) and torch.equal(vals, old_vals)
+        expected = reference(input_ids=torch.tensor([[5, 6, 7, 8]]), use_cache=False).logits[0, -1]
+        torch.testing.assert_close(target.forward_block(state, [8])[-1], expected, rtol=2e-5, atol=2e-6)
+
+
 def test_close_releases_replaced_module_registration(tiny_target):
     base = TargetModel(copy.deepcopy(tiny_target.model))
     target = CudaGraphTarget(base, capacity=16, replay=False)

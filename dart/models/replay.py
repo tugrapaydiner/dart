@@ -381,15 +381,18 @@ class CudaGraphTarget(TargetModel):
         pending, seen, tensors, layers = [self.model], set(), [], []
         while pending:
             module = pending.pop()
-            if module is None or module in seen:
+            module_id = id(module)
+            if module is None or module_id in seen:
+                layers.append(module_id)  # Shared and empty slots still count in traversal order.
                 continue
-            seen.add(module)
-            pending.extend(module._modules.values())
-            tensors.extend(tensor for tensor in (*module._parameters.values(), *module._buffers.values())
-                           if tensor is not None)  # Check live registrations without building parameter names.
-            layers.append((module, type(module), module.training))
-        storage = tuple((tensor.data_ptr(), tensor.device, tensor.dtype, tuple(tensor.shape), tensor.stride())
-                        for tensor in tensors)
+            seen.add(module_id)
+            children = module._modules
+            pending.extend(children.values())
+            tensors.extend(module._parameters.values())
+            tensors.extend(module._buffers.values())
+            layers.append((module_id, module, type(module), module.training, tuple(children)))
+        storage = tuple((tensor.data_ptr(), tensor.device, tensor.dtype, tensor.shape, tensor.stride())
+                        for tensor in tensors if tensor is not None)
         return storage, tuple(layers)
 
     def _settings_signature(self):
