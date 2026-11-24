@@ -572,6 +572,9 @@ class CudaGraphTarget(TargetModel):
                 raise ValueError("cache belongs to a different replay target")
             super().crop(state, length)
 
+    _native_predictions = forward_predictions
+    _native_crop = crop  # Keep the originals when callers replace a class method.
+
     @torch.inference_mode()
     def gather_tree_tail(self, state, keep_len, path):
         with self._lock:

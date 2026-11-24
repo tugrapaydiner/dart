@@ -241,7 +241,8 @@ def test_replay_decision_failure_keeps_request_prefix(execution, monkeypatch):
         torch.testing.assert_close(state.cache.storage[i, 1, ..., :state.seq_len, :], layer.values, atol=2e-6, rtol=2e-5)
 
 
-def test_custom_crop_sees_the_full_forward(execution, monkeypatch):
+@pytest.mark.parametrize("override", ["instance_override", "class_override"])
+def test_custom_crop_sees_the_full_forward(execution, monkeypatch, override):
     base, target = execution
     prompt = [5, 7, 9]
     pending, truth, *rest = hf_ids(base, prompt, 5)
@@ -254,7 +255,10 @@ def test_custom_crop_sees_the_full_forward(execution, monkeypatch):
         before.append(state.seq_len)
         crop(state, length)
 
-    monkeypatch.setattr(target, "crop", observe)
+    if override == "class_override":
+        monkeypatch.setattr(CudaGraphTarget, "crop", lambda self, state, length: observe(state, length))
+    else:
+        monkeypatch.setattr(target, "crop", observe)
     result = verify_block_greedy(target, state, pending, drafts, compute_entropy=False)
     assert before == [len(prompt) + 1 + len(drafts)]
     assert result.committed == [truth] and state.seq_len == len(prompt) + 1

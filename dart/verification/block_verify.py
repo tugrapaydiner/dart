@@ -62,8 +62,8 @@ def verify_block_greedy(
     if not compute_entropy and getattr(target, "capture_predictions", False):
         forward = target.forward_predictions
         if (base_len and forward_drafts and type(target) is CudaGraphTarget
-                and getattr(forward, "__func__", None) is CudaGraphTarget.forward_predictions
-                and getattr(target.crop, "__func__", None) is CudaGraphTarget.crop
+                and getattr(forward, "__func__", None) is CudaGraphTarget._native_predictions
+                and getattr(target.crop, "__func__", None) is CudaGraphTarget._native_crop
                 and type(draft_tokens) is list and all(type(token) is int for token in tokens)):
             def decide(predictions):
                 result = _block_result(tokens, p_len, draft_tokens, predictions, target.eos_token_ids)
