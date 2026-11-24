@@ -257,3 +257,66 @@ def test_terminal_prompt_clears_hidden_after_a_failed_forward():
         target.greedy_generate(prompt, 1)
     assert target.last_hidden_block is None
     assert target.greedy_generate(prompt, 1) == [int(logits.argmax())]
+
+
+def _first_token(target, prompt, entry):
+    if entry == "baseline":
+        return target.greedy_generate(prompt, 1)
+    with DartEngine(target) as engine:
+        return engine.generate(prompt, DecodeConfig(max_new_tokens=1)).token_ids
+
+
+@pytest.mark.parametrize("entry", ["baseline", "engine"])
+@pytest.mark.parametrize("method", ["prefill", "_forward"])
+@pytest.mark.parametrize("binding", ["class", "other_target"])
+def test_terminal_prompt_honors_target_method(monkeypatch, entry, method, binding):
+    target = build_tiny_target()
+    prompt = [7, 9, 11]
+    _, logits = target.prefill(prompt)
+    expected = int(logits.roll(1).argmax())
+
+    if binding == "class":
+        original = getattr(TargetModel, method)
+
+        def shift(owner, *args, **kwargs):
+            result = original(owner, *args, **kwargs)
+            if method == "prefill":
+                state, scores = result
+                return state, scores.roll(1, -1)
+            return result.roll(1, -1)
+
+        monkeypatch.setattr(TargetModel, method, shift)
+    else:
+        other = TargetModel(target.model)
+        run = other._run_model
+        monkeypatch.setattr(other, "_run_model", lambda *a, **kw: run(*a, **kw).roll(1, -1))
+        monkeypatch.setattr(target, method, getattr(other, method))
+
+    assert expected != int(logits.argmax())
+    assert _first_token(target, prompt, entry) == [expected]
+
+
+@pytest.mark.parametrize("entry", ["baseline", "engine"])
+@pytest.mark.parametrize("component", ["lm", "decoder"])
+def test_terminal_prompt_honors_model_forward(monkeypatch, entry, component):
+    target = build_tiny_target()
+    prompt = [7, 9, 11]
+    _, expected = target.prefill(prompt)
+    module = target.model if component == "lm" else target.model.model
+    original = type(module).forward
+    calls = []
+
+    def forward(owner, *args, **kwargs):
+        calls.append(owner)
+        return original(owner, *args, **kwargs)
+
+    monkeypatch.setattr(type(module), "forward", forward)
+    seen = []
+
+    def inputs(_module, _args, kwargs):
+        seen.append((kwargs["use_cache"], kwargs["attention_mask"] is not None))
+
+    with target.model.register_forward_pre_hook(inputs, with_kwargs=True):
+        assert _first_token(target, prompt, entry) == [int(expected.argmax())]
+    assert calls == [module]
+    assert seen == [(True, True)]

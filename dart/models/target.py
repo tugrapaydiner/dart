@@ -41,6 +41,14 @@ except ImportError as e:  # pragma: no cover
     raise ImportError("dart requires `transformers>=5.16.1`") from e
 
 
+_LLAMA_LM_FORWARD = LlamaForCausalLM.forward
+_LLAMA_MODEL_FORWARD = LlamaModel.forward
+
+
+def _native_method(method, target, original):
+    return getattr(method, "__self__", None) is target and getattr(method, "__func__", None) is original
+
+
 @dataclass
 class TargetState:
     """Mutable KV-cache state for one sequence.
@@ -206,8 +214,8 @@ class TargetModel:
     def _native_cpu_llama(self) -> bool:
         return (
             self._cpu_llama and self.model.config._attn_implementation in ("eager", "sdpa")
-            and getattr(self.model.forward, "__func__", None) is LlamaForCausalLM.forward
-            and getattr(self.model.model.forward, "__func__", None) is LlamaModel.forward
+            and _native_method(self.model.forward, self.model, _LLAMA_LM_FORWARD)
+            and _native_method(self.model.model.forward, self.model.model, _LLAMA_MODEL_FORWARD)
         )
 
     @torch.inference_mode()
@@ -444,6 +452,10 @@ class TargetModel:
         return generated
 
 
+_TARGET_PREFILL = TargetModel.prefill
+_TARGET_FORWARD = TargetModel._forward
+
+
 @torch.inference_mode()
 def prefill_for_generation(
     target: TargetModel, prompt_ids: list[int] | Tensor, max_new_tokens: int
@@ -451,7 +463,8 @@ def prefill_for_generation(
     """Keep the prompt cache only if the native target can use it in a later round."""
     if (
         max_new_tokens == 1 and type(target) is TargetModel and target.dtype == torch.float32
-        and target._native_cpu_llama() and getattr(target.prefill, "__func__", None) is TargetModel.prefill
+        and target._native_cpu_llama() and _native_method(target.prefill, target, _TARGET_PREFILL)
+        and _native_method(target._forward, target, _TARGET_FORWARD)
     ):
         ids = target._ids(prompt_ids)
         target.validate_generation(ids.size(1), 0)

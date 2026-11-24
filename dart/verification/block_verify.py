@@ -23,7 +23,7 @@ from __future__ import annotations
 import torch
 
 from dart.models.replay import CudaGraphTarget
-from dart.models.target import TargetModel, TargetState
+from dart.models.target import TargetModel, TargetState, _native_method
 from dart.runtime.types import VerifyResult
 
 
@@ -80,10 +80,6 @@ def verify_block_greedy(
     kept, result = decide(None, output) if compact else decide(output, None)
     target.crop(state, base_len + kept)
     return result
-
-
-def _native_method(method, target, original):
-    return getattr(method, "__self__", None) is target and getattr(method, "__func__", None) is original
 
 
 def _block_predictions(logits, p_len, drafts):
