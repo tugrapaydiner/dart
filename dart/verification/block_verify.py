@@ -91,13 +91,21 @@ def verify_block_greedy(
 
 
 def _block_predictions(logits, p_len, drafts):
-    if (len(drafts) >= 3 and type(drafts[0]) is int
-            and logits.device.type == "cpu" and logits.size(-1) >= 32_000 and torch.get_num_threads() == 1):
-        predictions = torch.argmax(logits[:p_len], dim=-1).tolist()
+    if logits.device.type != "cpu" or logits.size(-1) < 32_000 or torch.get_num_threads() != 1:
+        return torch.argmax(logits, dim=-1).tolist()
+
+    def ids(rows):
+        if (type(rows) is torch.Tensor and rows.dtype == torch.float32
+                and rows.layout == torch.strided and rows.stride(-1) == 1):
+            return torch.max(rows, dim=-1).indices.tolist()
+        return torch.argmax(rows, dim=-1).tolist()
+
+    if len(drafts) >= 3 and type(drafts[0]) is int:
+        predictions = ids(logits[:p_len])
         if predictions[-1] == drafts[0]:  # A first rejection leaves the remaining rows unused.
-            predictions.extend(torch.argmax(logits[p_len:], dim=-1).tolist())
+            predictions.extend(ids(logits[p_len:]))
         return predictions
-    return torch.argmax(logits, dim=-1).tolist()
+    return ids(logits)
 
 
 def _block_result(tokens, p_len, draft_tokens, preds, eos_ids, logits=None):

@@ -5,7 +5,7 @@ import torch
 
 from dart.models.replay import CudaGraphTarget
 from dart.verification import sampling
-from dart.verification.block_verify import verify_block_greedy
+from dart.verification.block_verify import _block_predictions, verify_block_greedy
 from dart.verification.greedy import verify_greedy_reference
 from dart.verification.state_checks import _cache_failures, _reference_forward
 from dart.verification.synthetic import _synthetic_models
@@ -87,20 +87,26 @@ def test_block_prediction_rows(pending, drafts, eos, vocab, threads, capture, en
     target = CountingTarget(eos, capture, vocab)
     state, ref_state = SimpleNamespace(seq_len=3), SimpleNamespace(seq_len=3)
     expected = verify_greedy_reference(CountingTarget(eos, False, vocab), ref_state, pending, drafts)
-    rows, argmax = [], torch.argmax
+    rows, operations = [], []
 
-    def measure(logits, dim):
-        rows.append(logits.shape[0])
-        return argmax(logits, dim=dim)
+    def measure(operation):
+        def run(logits, dim):
+            rows.append(logits.shape[0])
+            operations.append(operation.__name__)
+            return operation(logits, dim=dim)
+        return run
 
     monkeypatch.setattr(torch, "get_num_threads", lambda: threads)
-    monkeypatch.setattr(torch, "argmax", measure)
+    monkeypatch.setattr(torch, "argmax", measure(torch.argmax))
+    monkeypatch.setattr(torch, "max", measure(torch.max))
     result = verify_block_greedy(target, state, pending, drafts, compute_entropy=entropy)
     forwarded = drafts[:next((i for i, token in enumerate(drafts) if token in eos), len(drafts))]
     assert target.calls == [pending + forwarded]
     expected_rows = {"prefix": [len(pending)], "split": [len(pending), len(forwarded)],
                      "full": [len(pending) + len(forwarded)], "captured": []}
     assert rows == expected_rows[scans]
+    expected_op = "max" if vocab >= 32_000 and threads == 1 else "argmax"
+    assert operations == [expected_op] * len(rows)
     assert result == expected and state.seq_len == ref_state.seq_len
     assert result.hidden_index == len(pending) + len(result.committed) - 2
     assert result.pending_divergence == int(len(pending) > 1)
@@ -112,6 +118,37 @@ def test_block_prediction_rows(pending, drafts, eos, vocab, threads, capture, en
         torch.testing.assert_close(result.entropy, float(-(probs * probs.clamp_min(1e-12).log()).sum()))
     else:
         assert result.entropy == 0
+
+
+@pytest.mark.parametrize("layout", ["contiguous", "padded", "strided", "double", "subclass"])
+def test_block_prediction_indices_match_native(monkeypatch, layout):
+    class Scores(torch.Tensor):
+        pass
+
+    vocab = 32_003
+    scores = torch.zeros(4, 2 * vocab)
+    scores = scores[:, ::2] if layout == "strided" else scores[:, :vocab]
+    if layout == "contiguous":
+        scores = scores.contiguous()
+    elif layout == "double":
+        scores = scores.double()
+    elif layout == "subclass":
+        scores = scores.as_subclass(Scores)
+    scores[0, [0, vocab - 1]] = float("inf")
+    scores[1, [253, vocab - 1]] = float("nan")
+    scores[2].fill_(float("-inf"))
+    scores[3, ::2] = -0.0
+    expected = torch.argmax(scores, dim=-1).tolist()
+    used, maximum = [], torch.max
+
+    def record(rows, dim):
+        used.append(rows.shape)
+        return maximum(rows, dim=dim)
+
+    monkeypatch.setattr(torch, "get_num_threads", lambda: 1)
+    monkeypatch.setattr(torch, "max", record)
+    assert _block_predictions(scores, len(scores), []) == expected
+    assert used == ([scores.shape] if layout in ("contiguous", "padded") else [])
 
 
 @pytest.mark.parametrize("peak", [1.0, float("nan")])

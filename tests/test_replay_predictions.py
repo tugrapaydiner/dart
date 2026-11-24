@@ -348,12 +348,13 @@ def test_replay_skips_unused_static_predictions(use, entropy, rows, monkeypatch)
         seen = []
         with monkeypatch.context() as patch:
             patch.setattr(torch, "get_num_threads", lambda: 1)
-            for owner in (torch, torch.Tensor):
-                def count(tensor, *args, argmax=owner.argmax, **kwargs):
-                    if tensor.shape[-1] == config.vocab_size:
+            for owner, name in ((torch, "argmax"), (torch.Tensor, "argmax"), (torch, "max")):
+                operation = getattr(owner, name)
+                def count(tensor, *args, reduction=operation, **kwargs):
+                    if tensor.ndim and tensor.shape[-1] == config.vocab_size:
                         seen.append(tensor.numel() // config.vocab_size)
-                    return argmax(tensor, *args, **kwargs)
-                patch.setattr(owner, "argmax", count)
+                    return reduction(tensor, *args, **kwargs)
+                patch.setattr(owner, name, count)
             if use == "scores":
                 actual = target.forward_block(state, pending + drafts)
             elif use == "ids":
