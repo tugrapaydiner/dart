@@ -391,7 +391,8 @@ class CudaGraphTarget(TargetModel):
         return self._greedy_chunk_sizes
 
     def _signature(self):
-        pending, seen, tensors, layers = [self.model], set(), [], []
+        pending, seen = [self.model], set()
+        storage, layers, bindings = [], [], []
         while pending:
             module = pending.pop()
             module_id = id(module)
@@ -401,12 +402,13 @@ class CudaGraphTarget(TargetModel):
             seen.add(module_id)
             children = module._modules
             pending.extend(children.values())
-            tensors.extend(module._parameters.values())
-            tensors.extend(module._buffers.values())
+            for kind, registry in (("parameter", module._parameters), ("buffer", module._buffers)):
+                for name, tensor in registry.items():
+                    if tensor is not None:
+                        bindings.append((module_id, kind, name))
+                        storage.append((tensor.data_ptr(), tensor.device, tensor.dtype, tensor.shape, tensor.stride()))
             layers.append((module_id, module, type(module), module.training, tuple(children)))
-        storage = tuple((tensor.data_ptr(), tensor.device, tensor.dtype, tensor.shape, tensor.stride())
-                        for tensor in tensors if tensor is not None)
-        return storage, tuple(layers)
+        return tuple(storage), tuple(layers), tuple(bindings)
 
     def _settings_signature(self):
         return tuple((module.__dict__, name, _setting_value(module.__dict__[name]))
@@ -426,6 +428,8 @@ class CudaGraphTarget(TargetModel):
             not _same_setting(attributes.get(name), saved) for attributes, name, saved in self._layer_settings
         ):
             raise ValueError("model layer settings changed; prepare a new replay target")
+        if signature[2] != self._model_signature[2]:
+            raise ValueError("model tensor bindings changed; prepare a new replay target")
 
     @property
     def context_limit(self):

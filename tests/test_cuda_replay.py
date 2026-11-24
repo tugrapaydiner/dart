@@ -146,6 +146,71 @@ def test_storage_guard_rejects_live_model_changes_on_cpu(cpu_replay_guard, chang
         target._check_ready()
 
 
+@pytest.mark.parametrize("change", ["parameter_name", "buffer_name", "optional_slot", "register_kind", "different_layer"])
+def test_storage_guard_checks_tensor_bindings(cpu_replay_guard, change):
+    target = cpu_replay_guard
+    model, layer = target.model, target.model[1][0]
+    if change == "parameter_name":
+        bias = layer.bias
+        del layer.bias
+        layer.register_parameter("saved_bias", bias)
+        layer.bias = torch.zeros_like(bias)
+    elif change == "buffer_name":
+        offset = layer.offset
+        del layer.offset
+        layer.register_buffer("saved_offset", offset)
+    elif change == "optional_slot":
+        model.optional_buffer, model.scale = model.scale, None
+    elif change == "register_kind":
+        model.optional_parameter = torch.nn.Parameter(model.scale, requires_grad=False)
+        model.scale = None
+    else:
+        model[1].register_buffer("scale", model.scale)
+        model.scale = None
+    with pytest.raises(ValueError, match="tensor bindings changed"):
+        target._check_ready()
+
+
+def test_storage_guard_accepts_equivalent_views_and_unused_slots(cpu_replay_guard):
+    target = cpu_replay_guard
+    model = target.model
+    data = bytearray(16)
+    model.scale = torch.frombuffer(data, dtype=torch.float32)
+    target._model_signature = target._signature()
+    model[1][0].register_parameter("unused_weight", None)
+    model[1][0].register_buffer("unused_offset", None)
+    model.scale = torch.frombuffer(data, dtype=torch.float32)  # Same address and layout.
+    target._check_ready()
+
+
+@supported_replay
+@torch.inference_mode()
+def test_rebound_output_weight_rejects_before_cache_write(tiny_target):
+    target = CudaGraphTarget(tiny_target, capacity=16, max_block_tokens=3, replay=False)
+    try:
+        head = target.model.lm_head
+        state, _ = target.prefill([5, 6, 7])
+        target.forward_block(state, [8])
+        expected = target.forward_block(state, [9]).clone()
+        target.crop(state, 4)
+        before = state.cache.storage[..., :4, :].clone()
+        weight = head.weight
+        del head.weight
+        head.register_parameter("original_weight", weight)
+        head.weight = torch.zeros_like(weight)
+        try:
+            with pytest.raises(ValueError, match="tensor bindings changed"):
+                target.forward_block(state, [9])
+            assert state.seq_len == 4 and torch.equal(state.cache.storage[..., :4, :], before)
+        finally:
+            del head.weight
+            del head.original_weight
+            head.register_parameter("weight", weight)
+        torch.testing.assert_close(target.forward_block(state, [9]), expected, rtol=0, atol=0)
+    finally:
+        target.close()
+
+
 def test_storage_guard_accepts_shared_modules_and_inplace_values(cpu_replay_guard):
     target = cpu_replay_guard
     target.model.alias = target.model[1][0]
