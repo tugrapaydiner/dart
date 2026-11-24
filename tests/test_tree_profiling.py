@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from contextlib import closing
 from functools import wraps
 
 import pytest
@@ -9,9 +10,11 @@ import torch
 from benchmarks import profiling, run_bench
 from dart import cli
 from dart.drafters.ngram import NGramDrafter
+from dart.models.replay import CapacityBuckets
 from dart.runtime import engine as runtime
 from dart.runtime.engine import DartEngine
 from dart.runtime.types import DecodeConfig
+from dart.verification.tree_verify import DraftTree
 from tests.conftest import build_tiny_target
 from tests.test_cli_policy import policy_model as policy_model
 from tests.test_corpus_eval import records
@@ -23,6 +26,60 @@ def target_and_prompt():
     with torch.no_grad():
         target.model.lm_head.weight.zero_()
     return target, [5, 6, 7, 0, 3, 5, 6, 7, 0, 4, 5, 6, 7]
+
+
+@pytest.mark.parametrize("verifier,widths", [("block", [4, 2]), ("reference", [1] * 6), ("tree", [5, 3])])
+def test_verifier_work_matches_model_inputs(monkeypatch, verifier, widths):
+    target, prompt = target_and_prompt()
+    drafter = NGramDrafter()
+    monkeypatch.setattr(drafter, "propose", lambda history, count: [0] * count)
+    monkeypatch.setattr(drafter, "propose_tree", lambda history, count: DraftTree.from_branches(
+        [[0] * count, [1], [2, 8][:count]]))
+    target.eos_token_ids = frozenset({2})
+    config = DecodeConfig(max_new_tokens=7, draft_len=3)
+    observed = []
+
+    def record(module, args, kwargs):
+        observed.append(kwargs["input_ids"].numel())
+
+    with DartEngine(target, drafter, verifier=verifier) as engine:
+        with target.model.register_forward_pre_hook(record, with_kwargs=True):
+            assert engine.generate(prompt, config).token_ids == [0] * 7
+        assert observed == [len(prompt), *widths]
+        draft = engine._round_drafts
+
+        def draft_with_forward(*args, **kwargs):
+            target.prefill([7, 8])
+            return draft(*args, **kwargs)
+
+        monkeypatch.setattr(engine, "_round_drafts", draft_with_forward)
+        report = profiling.profile_methods({"hf_greedy": run_bench.build_hf_method(target, 7),
+                                            "dart": lambda ids: engine.generate(ids, config)},
+                                           [prompt], target, {"dart": engine}, repeats=2)
+    for name, expected in (("dart", (len(widths), sum(widths))), ("hf_greedy", (None, None))):
+        rows = [row for row in report["samples"] if row["method"] == name]
+        for row in [*rows, report["summary"][name]]:
+            assert (row["verify_target_calls"], row["verify_input_positions"]) == expected
+    assert "_run_model" not in vars(target)
+
+
+def test_verifier_work_counts_selected_replay_bucket(monkeypatch):
+    pytest.importorskip("transformers", minversion="5.16.1")
+    target, _ = target_and_prompt()
+    prompts = [[0] * 3, [0] * 17]
+    drafter = NGramDrafter()
+    monkeypatch.setattr(drafter, "propose", lambda history, count: [0] * count)
+    with closing(CapacityBuckets(target, (16, 32), max_block_tokens=3, capture_predictions=True,
+                                 replay=False)) as prepared:
+        with DartEngine(prepared, drafter) as engine:
+            methods = {"fixed": lambda ids: engine.generate(ids, DecodeConfig(max_new_tokens=6, draft_len=2)),
+                       "one": lambda ids: engine.generate(ids, DecodeConfig(max_new_tokens=1))}
+            for name, expected in (("fixed", (2, 5)), ("one", (0, 0))):
+                report = profiling.profile_methods({name: methods[name]}, prompts, prepared, {name: engine},
+                                                   reference=name, repeats=1)
+                for row in report["samples"]:
+                    assert (row["verify_target_calls"], row["verify_input_positions"]) == expected
+        assert all("_forward" not in vars(bucket) for bucket in prepared.buckets)
 
 
 @pytest.mark.parametrize("default", ["block", "tree", "reference"])
@@ -117,7 +174,9 @@ def test_cli_profiles_adaptive_and_fixed_tree_methods(policy_model, monkeypatch,
         assert sample["output_hash"] == expected["output_hash"]
         if sample["method"] in {"dart", "target_only", *report["policy_controls"]}:
             assert sample["draft_ms"] >= 0 and sample["verify_ms"] > 0
+            assert 0 < sample["verify_target_calls"] <= sample["verify_input_positions"]
         else:
             assert sample["draft_ms"] is None and sample["verify_ms"] is None
+            assert sample["verify_target_calls"] is None and sample["verify_input_positions"] is None
     assert partial["timing"] == report["timing"] and "profile" not in partial
     assert "adaptive" in report["profile"]["policy_scope"]

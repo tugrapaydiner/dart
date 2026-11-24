@@ -7,10 +7,46 @@ from statistics import mean
 from unittest.mock import patch
 
 from benchmarks.timing import Method, synchronize, tokens
+from dart.models.replay import CapacityBuckets, CudaGraphTarget
 from dart.models.target import TargetModel
 from dart.runtime.engine import DartEngine
 from dart.runtime.metrics import output_hash
 from dart.runtime.types import GenerationOutput
+
+
+def _verifier_work(stack, target):
+    targets = target.buckets if isinstance(target, CapacityBuckets) else (target,)
+    fields = ("verify_target_calls", "verify_input_positions")
+    if any(type(item) not in (TargetModel, CudaGraphTarget) for item in targets):
+        return dict.fromkeys(fields), lambda verify: verify
+    totals = dict.fromkeys(fields, 0)
+    verifying = False
+
+    def observe(forward):
+        @wraps(forward)
+        def counted(state, input_ids, **kwargs):
+            if verifying:
+                totals["verify_target_calls"] += 1
+                totals["verify_input_positions"] += input_ids.numel()
+            return forward(state, input_ids=input_ids, **kwargs)
+        return counted
+
+    for item in targets:
+        name = "_forward" if isinstance(item, CudaGraphTarget) else "_run_model"  # Replay bypasses model hooks.
+        stack.enter_context(patch.object(item, name, observe(getattr(item, name))))
+
+    def during_verification(verify):
+        @wraps(verify)
+        def run(*args, **kwargs):
+            nonlocal verifying
+            previous, verifying = verifying, True
+            try:
+                return verify(*args, **kwargs)
+            finally:
+                verifying = previous
+        return run
+
+    return totals, during_verification
 
 
 def profile_methods(
@@ -32,10 +68,10 @@ def profile_methods(
         synchronize(target.device)
         return time.perf_counter()
 
-    def timed_resolver(resolve, timer):
+    def timed_resolver(resolve, timer, observe):
         @wraps(resolve)
         def wrapped(*args, **kwargs):
-            return timer(resolve(*args, **kwargs), "verify_ms")
+            return timer(observe(resolve(*args, **kwargs)), "verify_ms")
         return wrapped
 
     expected = [list(tokens(methods[reference](prompt))) for prompt in prompts]
@@ -68,9 +104,11 @@ def profile_methods(
                     stack.callback(target.model.register_forward_pre_hook(before_forward).remove)
                     stack.callback(target.model.register_forward_hook(after_forward).remove)
                     engine = engines.get(name)
+                    work, observe = _verifier_work(stack, target if engine is not None else None)
                     if engine is not None:
                         stack.enter_context(patch.object(engine, "_round_drafts", timed(engine._round_drafts, "draft_ms")))
-                        stack.enter_context(patch.object(engine, "_resolve_verifier", timed_resolver(engine._resolve_verifier, timed)))
+                        resolver = timed_resolver(engine._resolve_verifier, timed, observe)
+                        stack.enter_context(patch.object(engine, "_resolve_verifier", resolver))
                     start = stamp()
                     output = method(prompt)
                     end = stamp()
@@ -88,8 +126,10 @@ def profile_methods(
                     "prefill_ms": (prefill[1] - prefill[0]) * 1_000,
                     "decode_ms": (end - prefill[1]) * 1_000,
                     **(phases if engine is not None else {key: None for key in phases}),
+                    **work,
                 })
-    fields = ("request_ms", "setup_ms", "prefill_ms", "decode_ms", "draft_ms", "verify_ms")
+    fields = ("request_ms", "setup_ms", "prefill_ms", "decode_ms", "draft_ms", "verify_ms",
+              "verify_target_calls", "verify_input_positions")
     summary = {}
     for name in methods:
         rows = [row for row in samples if row["method"] == name]
@@ -102,6 +142,7 @@ def profile_methods(
         "prefill_scope": "first target model forward, including cache construction inside the model",
         "decode_scope": "everything after that forward, including first-token selection and output decoding",
         "draft_verify_scope": "engine draft construction and verification calls; subsets of decode time, null for baselines without an engine",
+        "verify_work_scope": "target forwards and input token positions during verification on built-in eager and replay targets",
         "policy_scope": "phase barriers can change adaptive decisions; these requests are separate from headline timing",
         "repeats": repeats, "samples": samples, "summary": summary,
     }
