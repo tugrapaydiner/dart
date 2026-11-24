@@ -6,8 +6,14 @@ import pytest
 import torch
 
 from dart.models.replay import ReplayCache
+from dart.models.target import TargetState
 from dart.verification.differential import GenerationCase, hf_decoder
-from dart.verification.state_checks import RoundCase, _cache_pairs, check_verifier_state
+from dart.verification.state_checks import (
+    RoundCase,
+    _cache_failures,
+    _cache_pairs,
+    check_verifier_state,
+)
 from dart.verification.state_sequences import StateOperation as Op
 from dart.verification.state_sequences import check_state_sequence
 from tests.test_replay_predictions import execution as execution
@@ -142,6 +148,65 @@ def test_idle_replay_request_corruption_is_detected(execution, monkeypatch):
                                                      Op("a", "forward", (11,)), Op("b", "forward", (23,))])
     assert all(step.passed for step in report.steps[:-1])
     assert {(item.request, item.failure.kind) for item in report.steps[-1].failures} == {("a", "cache_values")}
+
+
+@cpu_static
+@pytest.mark.parametrize("exposed", [False, True], ids=["private", "mutable-view"])
+def test_state_check_preserves_residency(execution, monkeypatch, exposed):
+    base, target = execution
+    shared = []
+    restore = target._restore_prefix
+
+    def track(cache):
+        if exposed:
+            _ = cache.storage
+        shared.append(min(cache.length, target._resident_prefix_length(cache)))
+        return restore(cache)
+
+    monkeypatch.setattr(target, "_restore_prefix", track)
+    ops = [Op("a", "prefill", (5, 6, 7)), Op("a", "forward", (11,)), Op("a", "forward", (13,)),
+           Op("a", "crop", length=3), Op("a", "forward", (17, 19))]
+    report = check_state_sequence(target, copy.deepcopy(base.model), ops)
+    assert report.passed, report.steps
+    assert shared == ([0, 0, 0] if exposed else [0, 4, 3])
+
+
+@cpu_static
+@pytest.mark.parametrize("exposed", [False, True], ids=["private", "mutable-view"])
+def test_state_check_detects_resident_corruption(execution, monkeypatch, exposed):
+    base, target = execution
+    forward = target.forward_block
+
+    def damage_workspace(state, tokens):
+        logits = forward(state, tokens)
+        if tokens == [11]:
+            if exposed:
+                _ = state.cache.storage
+            target._workspace.storage[..., :state.seq_len, :].fill_(float("nan"))
+        return logits
+
+    monkeypatch.setattr(target, "forward_block", damage_workspace)
+    ops = [Op("a", "prefill", (5, 6, 7)), Op("a", "forward", (11,)), Op("a", "forward", (13,))]
+    report = check_state_sequence(target, copy.deepcopy(base.model), ops)
+    assert all(step.passed for step in report.steps[:-1])
+    if exposed:
+        assert report.passed  # A caller with a mutable view needs a fresh copy.
+    else:
+        assert "logits" in {item.failure.kind for item in report.steps[-1].failures}
+
+
+def test_state_check_reads_overridden_replay_storage():
+    original = torch.zeros(1, 2, 1, 2, 4, 3)
+    replacement = torch.ones_like(original)
+
+    class SwappedCache(ReplayCache):
+        @property
+        def storage(self):
+            return replacement
+
+    state = TargetState(SwappedCache(original, 2, object()))
+    expected = ReplayCache(replacement, 2, object())
+    assert _cache_failures(state, expected, 2, atol=0, rtol=0) == []
 
 
 @cpu_static

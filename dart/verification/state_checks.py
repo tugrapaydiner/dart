@@ -87,9 +87,12 @@ def _check_reference_storage(model, reference):
         raise ValueError("target and reference must not share tensor storage")
 
 
-def _cache_pairs(cache):
+def _cache_pairs(cache, *, read_only=False):
     if isinstance(cache, ReplayCache):
-        storage = cache.storage
+        if read_only and type(cache) is ReplayCache:
+            storage = cache._buffer.tensor  # These views stay inside the comparison.
+        else:
+            storage = cache.storage
         if (not isinstance(storage, torch.Tensor) or storage.ndim != 6
                 or storage.shape[1:3] != (2, 1) or any(size <= 0 for size in storage.shape)):
             raise ValueError("replay cache has invalid storage shape")
@@ -112,7 +115,8 @@ def _cache_pairs(cache):
 def _cache_failures(state, expected, length, *, atol, rtol):
     if state.seq_len != length:
         return [CheckFailure("cache_length", detail=f"expected {length}, got {state.seq_len}")]
-    actual_pairs, expected_pairs = _cache_pairs(state.cache), _cache_pairs(expected)
+    actual_pairs = _cache_pairs(state.cache, read_only=True)
+    expected_pairs = _cache_pairs(expected, read_only=True)
     if len(actual_pairs) != len(expected_pairs):
         return [CheckFailure("cache_layers", detail="cache layer counts differ")]
     failures = []
@@ -147,7 +151,7 @@ def _inspect_tree_rows(target, reference_model, case, *, atol, rtol):
             return [CheckFailure("tree_logits_shape", detail="packed logits shape differs")], 0
         if state.seq_len != packed_length:
             return [CheckFailure("tree_cache_length", detail=f"expected {packed_length}, got {state.seq_len}")], 0
-        pairs = _cache_pairs(state.cache)
+        pairs = _cache_pairs(state.cache, read_only=True)
     except Exception as error:
         return [CheckFailure("exception", detail=f"{type(error).__name__}: {error}")], 0
 
