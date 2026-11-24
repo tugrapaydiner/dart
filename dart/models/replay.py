@@ -120,12 +120,13 @@ class _Workspace:
             raise ValueError("replay KV workspace exceeds 256 MiB")
         parameter = next(model.parameters())
         self.storage = torch.zeros(shape, device=parameter.device, dtype=parameter.dtype)
+        self._rows = self.storage
         self.positions = None
         self.columns = torch.arange(capacity, device=parameter.device)
         self.forward_model = model.forward
 
     def update(self, keys, values, layer_idx, *args, **kwargs):
-        a, b = self.storage[layer_idx, 0], self.storage[layer_idx, 1]
+        a, b = self._rows[layer_idx, 0], self._rows[layer_idx, 1]
         a.index_copy_(2, self.positions, keys)
         b.index_copy_(2, self.positions, values)
         return a, b
@@ -165,13 +166,20 @@ def _capture_pool(device):
     return _capture_stream_pools.devices[device]
 
 
-def _causal_logits(forward, workspace, ids, positions):
+def _causal_logits(forward, workspace, ids, positions, *, end=None):
     workspace.positions = positions
-    columns = workspace.columns
-    mask = workspace.storage.new_zeros((1, 1, ids.shape[1], columns.numel()))
+    columns, rows = workspace.columns, workspace.storage
+    if end is not None and end < columns.numel():
+        rows = rows[..., :end, :]
+        columns = columns[:end]
+    mask = rows.new_zeros((1, 1, ids.shape[1], columns.numel()))
     mask.masked_fill_(columns[None, :] > positions[:, None], torch.finfo(mask.dtype).min)
-    return forward(input_ids=ids, position_ids=positions[None], attention_mask=mask,
-                   past_key_values=workspace, use_cache=True, output_hidden_states=False).logits
+    previous, workspace._rows = workspace._rows, rows
+    try:
+        return forward(input_ids=ids, position_ids=positions[None], attention_mask=mask,
+                       past_key_values=workspace, use_cache=True, output_hidden_states=False).logits
+    finally:
+        workspace._rows = previous
 
 
 class _ReplayBlock:
@@ -185,6 +193,7 @@ class _ReplayBlock:
         device = workspace.storage.device
         self.ids = torch.zeros((1, length), dtype=torch.long, device=device)
         self.start = torch.zeros((), dtype=torch.long, device=device)
+        self._host_start = None  # Graph capture keeps the full KV shape.
         self.columns = workspace.columns
         self.steps = self.columns[:length]
         self.output = None
@@ -210,8 +219,12 @@ class _ReplayBlock:
                 self.close()
                 raise
 
+    def _logits(self, ids, positions, consumed):
+        end = None if self._host_start is None else self._host_start + consumed
+        return _causal_logits(self.forward_model, self.workspace, ids, positions, end=end)
+
     def forward(self):
-        logits = _causal_logits(self.forward_model, self.workspace, self.ids, self.steps + self.start)
+        logits = self._logits(self.ids, self.steps + self.start, self.ids.shape[1])
         if self.capture_predictions:
             self.predictions = logits.argmax(dim=-1)
         return logits
@@ -256,11 +269,7 @@ class _GreedyBlock(_ReplayBlock):
         tokens, predictions = self.ids, []
         for step in range(self.count):
             positions = (self.start + step).reshape(1)
-            self.workspace.positions = positions
-            mask = self.workspace.storage.new_zeros((1, 1, 1, self.columns.numel()))
-            mask.masked_fill_(self.columns > positions, torch.finfo(mask.dtype).min)
-            logits = self.forward_model(input_ids=tokens, position_ids=positions[None], attention_mask=mask,
-                                        past_key_values=self.workspace, use_cache=True, output_hidden_states=False).logits
+            logits = self._logits(tokens, positions, step + 1)
             tokens = logits.argmax(dim=-1)
             predictions.append(tokens)
         return torch.cat(predictions, dim=1)
@@ -349,6 +358,7 @@ class CudaGraphTarget(TargetModel):
         self._layer_settings = self._settings_signature()
         self._model_tensors = tuple(tensor.detach() for tensor in (*self.model.parameters(), *self.model.buffers()))
         self._workspace = _Workspace(self.model, capacity)
+        self._workspace_end = max((*sizes, *greedy_chunk_sizes), default=0) if replay else 0
         self._workspace_dirty = False
         self._resident_cache = None
         self._resident_length = 0
@@ -475,6 +485,7 @@ class CudaGraphTarget(TargetModel):
         if self._workspace_dirty:
             self._resident_cache = None
             self._workspace.storage.zero_()  # Failed work may leave NaNs in masked rows.
+            self._workspace_end = 0
         shared = self._resident_prefix_length(cache)
         self._resident_cache = None  # Any failed workspace write requires a fresh restore.
         self._workspace_dirty = True
@@ -503,8 +514,7 @@ class CudaGraphTarget(TargetModel):
                 cache = ReplayCache.from_dynamic(cache, self.capacity, self._owner)
             block = self._greedy_blocks[count]
             storage = self._restore_prefix(cache)
-            block.ids.copy_(ids)
-            block.start.fill_(cache.length)
+            self._start_block(block, ids, cache.length, count)
             output = block.run()[0].tolist()
             for index, token in enumerate(output):
                 if token in self.eos_token_ids:
@@ -523,12 +533,27 @@ class CudaGraphTarget(TargetModel):
             self._workspace_dirty = False
             return output
 
+    def _start_block(self, block, ids, start, width):
+        end = start + width
+        captured = block is not None and block.graph is not None
+        if captured:
+            first_end = start + ids.shape[1]
+            if first_end < self._workspace_end:  # Masked NaNs can still affect attention.
+                self._workspace.storage[..., first_end:self._workspace_end, :].zero_()
+            self._workspace_end = end
+        else:
+            self._workspace_end = max(self._workspace_end, end)
+        if block is not None:
+            block._host_start = None if captured else start
+            block.ids.copy_(ids)
+            block.start.fill_(start)
+
     def _run_replay_block(self, block, input_ids, *, start):
+        width = input_ids.shape[1]
+        self._start_block(block, input_ids, start, width)
         if block is None:
-            positions = self._workspace.columns[:input_ids.shape[1]] + start
-            return _causal_logits(self._workspace.forward_model, self._workspace, input_ids, positions)
-        block.ids.copy_(input_ids)
-        block.start.fill_(start)
+            positions = self._workspace.columns[:width] + start
+            return _causal_logits(self._workspace.forward_model, self._workspace, input_ids, positions, end=start + width)
         return block.run()
 
     def _forward(self, state, input_ids, *, last_logits_only=False, return_predictions=False, decide=None):

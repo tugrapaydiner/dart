@@ -140,3 +140,134 @@ def test_cpu_static_keeps_model_storage_guard(models, monkeypatch):
             target.prefill([5, 6])
     finally:
         target.close()
+
+
+@pytest.mark.parametrize("mode,width", [("prepared", 3), ("fallback", 2), ("predictions", 1), ("chunk", 4)])
+@pytest.mark.parametrize("at_limit", [False, True])
+@torch.inference_mode()
+def test_active_columns_match_live_keys_and_mask(models, monkeypatch, mode, width, at_limit):
+    base, reference = models
+    capacity = 16
+    prompt = [5] * (capacity - width if at_limit else 3)
+    target = CudaGraphTarget(base, capacity=capacity, max_block_tokens=3, replay=False,
+                             replay_block_sizes=(1, 3), capture_predictions=True, greedy_chunk_sizes=(4,))
+    try:
+        target.eos_token_ids = frozenset()
+        state, _ = target.prefill(prompt)
+        owner = (target._workspace if mode == "fallback" else
+                 target._greedy_blocks[width] if mode == "chunk" else target._blocks[width])
+        forward = owner.forward_model
+        address = target._workspace.storage.untyped_storage().data_ptr()
+        seen = []
+
+        def observe(**kwargs):
+            cache = kwargs["past_key_values"]
+            update = cache.update
+            q, columns = kwargs["attention_mask"].shape[-2:]
+
+            def rows(keys, values, layer, *args, **options):
+                k, v = update(keys, values, layer, *args, **options)
+                assert k.untyped_storage().data_ptr() == v.untyped_storage().data_ptr() == address
+                seen.append((layer, q, columns, k.size(-2), v.size(-2)))
+                return k, v
+
+            with monkeypatch.context() as patch:
+                patch.setattr(cache, "update", rows)
+                return forward(**kwargs)
+
+        monkeypatch.setattr(owner, "forward_model", observe)
+        ids = list(range(9, 9 + width))
+        if mode == "chunk":
+            got = target.forward_greedy(state, ids[0], width)
+            wanted = hf_decoder(reference)(GenerationCase("chunk", tuple(prompt + ids[:1]), width))
+            assert got == wanted
+            sizes = [(1, len(prompt) + j + 1) for j in range(width)]
+        else:
+            if mode == "predictions":
+                assert target.forward_predictions(state, ids) == hf_decoder(reference)(
+                    GenerationCase("single", tuple(prompt + ids), 1))
+            else:
+                logits = target.forward_block(state, ids)
+                native = reference(input_ids=torch.tensor([prompt + ids])).logits[0, -width:]
+                torch.testing.assert_close(logits, native, rtol=2e-5, atol=2e-6)
+            sizes = [(width, len(prompt) + width)]
+        assert seen == [(i, q, end, end, end) for q, end in sizes for i in range(reference.config.num_hidden_layers)]
+        assert state.seq_len == len(prompt) + width
+        assert target._workspace.storage.size(-2) == capacity
+    finally:
+        target.close()
+
+
+@pytest.mark.parametrize("mode", ["prepared", "fallback", "chunk"])
+@pytest.mark.parametrize("component", [0, 1], ids=["keys", "values"])
+@torch.inference_mode()
+def test_active_columns_isolate_a_shorter_request(models, mode, component):
+    base, reference = models
+    target = CudaGraphTarget(base, capacity=16, max_block_tokens=3, replay=False,
+                             replay_block_sizes=(1, 3), capture_predictions=True, greedy_chunk_sizes=(4,))
+    try:
+        target.eos_token_ids = frozenset()
+        longer, _ = target.prefill([5] * 10)
+        target.forward_block(longer, [7])
+        longer.cache.storage[:, component, :, :, 8, :].fill_(float("nan"))  # A mutable caller-owned KV row.
+        assert not target.forward_block(longer, [9]).isfinite().all()
+        prompt, ids = [5, 7, 8], [11, 13] if mode == "fallback" else [11]
+        short, _ = target.prefill(prompt)
+        if mode == "chunk":
+            got = target.forward_greedy(short, ids[0], 4)
+            wanted = hf_decoder(reference)(GenerationCase("short", tuple(prompt + ids), 4))
+            assert got == wanted
+        else:
+            expected = reference(input_ids=torch.tensor([prompt + ids])).logits[0, -len(ids):]
+            actual = target.forward_block(short, ids)
+            torch.testing.assert_close(actual, expected, rtol=2e-5, atol=2e-6)
+        assert longer.seq_len == 12 and longer.cache.storage[:, component, :, :, 8, :].isnan().all()
+    finally:
+        target.close()
+
+
+@pytest.mark.parametrize("chunk", [False, True])
+@torch.inference_mode()
+def test_fixed_replay_clears_stale_columns_after_an_uncaptured_round(models, monkeypatch, chunk):
+    base, reference = models
+    target = CudaGraphTarget(base, capacity=16, max_block_tokens=3, replay=False,
+                             replay_block_sizes=(1, 3), capture_predictions=True, greedy_chunk_sizes=(4,))
+    try:
+        target.eos_token_ids = frozenset()
+        long, _ = target.prefill([5] * 10)
+        target.forward_block(long, [7])
+        slot = 5 if chunk else 8  # The first chunk step cannot see a later step.
+        long.cache.storage[..., slot, :].fill_(float("nan"))
+        target.forward_block(long, [9])
+        prompt = [5, 6, 7]
+        middle, _ = target.prefill(prompt)
+        target.forward_block(middle, [11, 12])  # Short fallback leaves the old tail in storage.
+        short, _ = target.prefill(prompt)
+        block = target._greedy_blocks[4] if chunk else target._blocks[3]
+        forward, columns = block.forward_model, []
+
+        def observe(**kwargs):
+            columns.append(kwargs["attention_mask"].size(-1))
+            return forward(**kwargs)
+
+        class FixedReplay:
+            def replay(self):
+                block.output = block.forward()
+
+            def reset(self):
+                pass
+
+        monkeypatch.setattr(block, "forward_model", observe)
+        monkeypatch.setattr(block, "graph", FixedReplay())
+        if chunk:
+            actual = target.forward_greedy(short, 11, 4)
+            assert actual == hf_decoder(reference)(GenerationCase("fixed", tuple(prompt + [11]), 4))
+        else:
+            ids = [11, 12, 13]
+            actual = target.forward_block(short, ids)
+            expected = reference(input_ids=torch.tensor([prompt + ids])).logits[0, -len(ids):]
+            torch.testing.assert_close(actual, expected, rtol=2e-5, atol=2e-6)
+        assert columns == [16] * (4 if chunk else 1)
+        assert long.cache.storage[..., slot, :].isnan().all()
+    finally:
+        target.close()
