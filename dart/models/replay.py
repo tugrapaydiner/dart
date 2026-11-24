@@ -174,12 +174,15 @@ def _causal_logits(forward, workspace, ids, positions, *, end=None):
         columns = columns[:end]
     mask = rows.new_zeros((1, 1, ids.shape[1], columns.numel()))
     mask.masked_fill_(columns[None, :] > positions[:, None], torch.finfo(mask.dtype).min)
-    previous, workspace._rows = workspace._rows, rows
+    previous = getattr(workspace, "_rows", rows)
+    if previous is not rows:
+        workspace._rows = rows
     try:
         return forward(input_ids=ids, position_ids=positions[None], attention_mask=mask,
                        past_key_values=workspace, use_cache=True, output_hidden_states=False).logits
     finally:
-        workspace._rows = previous
+        if previous is not rows:
+            workspace._rows = previous
 
 
 class _ReplayBlock:

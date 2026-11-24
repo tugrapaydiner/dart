@@ -74,6 +74,7 @@ def test_closed_preparation_reuses_streams(cuda):
     for _ in range(3):
         prepared = [block(length) for length in (1, 2, 3)]
         for value in prepared:
+            assert not hasattr(value.workspace, "_rows")
             value.close()
         del prepared, value
         gc.collect()
