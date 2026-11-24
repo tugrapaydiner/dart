@@ -456,8 +456,8 @@ class CudaGraphTarget(TargetModel):
         return self._forward(state, self._ids(tokens), return_predictions=True)
 
     @torch.inference_mode()
-    def _verify_predictions(self, state, tokens, decide):
-        return self._forward(state, self._ids(tokens), return_predictions=True, decide=decide)
+    def _verify_block(self, state, tokens, decide):
+        return self._forward(state, self._ids(tokens), decide=decide)
 
     def _resident_prefix_length(self, cache):
         if (type(cache) is ReplayCache and not cache._buffer.exposed and not self._workspace_dirty
@@ -546,12 +546,13 @@ class CudaGraphTarget(TargetModel):
                 block.ids.copy_(input_ids)
                 block.start.fill_(cache.length)
                 logits = block.run()
-            if return_predictions:
+            if decide is not None:
+                predictions = block.predictions[0].tolist() if block is not None and self.capture_predictions else None
+                kept, output = decide(logits[0], predictions)  # Read scores before the workspace is reused.
+                total_len = cache.length + kept
+            elif return_predictions:
                 predictions = logits.argmax(dim=-1) if block is None else block.predictions
-                output = predictions[0].tolist()  # Copy before another call can replay this workspace.
-                if decide is not None:
-                    kept, output = decide(output)
-                    total_len = cache.length + kept  # Rejected rows stay in the workspace.
+                output = predictions[0].tolist()
             else:
                 output = logits[0].float().clone()  # Later replays must not overwrite a caller's logits.
             storage[..., cache.length:total_len, :].copy_(self._workspace.storage[..., cache.length:total_len, :])
@@ -572,6 +573,8 @@ class CudaGraphTarget(TargetModel):
                 raise ValueError("cache belongs to a different replay target")
             super().crop(state, length)
 
+    _native_forward = _forward
+    _native_block = TargetModel.forward_block
     _native_predictions = forward_predictions
     _native_crop = crop  # Keep the originals when callers replace a class method.
 

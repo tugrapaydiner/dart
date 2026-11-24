@@ -78,15 +78,16 @@ def test_rejection_and_followup(execution, rejection):
     assert target.forward_predictions(b, next_ids) == base.forward_block(a, next_ids).argmax(-1).tolist()
 
 
-def test_accepted_eos(execution):
+@pytest.mark.parametrize("entropy", [False, True])
+def test_accepted_eos(execution, entropy):
     base, target = execution
     prompt = [5, 7, 9]
     expected = hf_ids(base, prompt, 5)
     base.eos_token_ids = target.eos_token_ids = frozenset([expected[2]])
     a, _ = base.prefill(prompt)
     b, _ = target.prefill(prompt)
-    wanted = verify_block_greedy(base, a, expected[0], expected[1:], compute_entropy=False)
-    actual = verify_block_greedy(target, b, expected[0], expected[1:], compute_entropy=False)
+    wanted = verify_block_greedy(base, a, expected[0], expected[1:], compute_entropy=entropy)
+    actual = verify_block_greedy(target, b, expected[0], expected[1:], compute_entropy=entropy)
     assert asdict(actual) == asdict(wanted)
     assert actual.finished and actual.committed[-1] in target.eos_token_ids
     assert a.seq_len == b.seq_len
@@ -213,7 +214,8 @@ def test_retained_replay_rows_skip_rejected(tiny_target, width, pending_len, rej
         assert target.forward_predictions(state, next_token) == tiny_target.forward_block(native, next_token).argmax(-1).tolist()
 
 
-def test_replay_decision_failure_keeps_request_prefix(execution, monkeypatch):
+@pytest.mark.parametrize("entropy", [False, True])
+def test_replay_decision_failure_keeps_request_prefix(execution, monkeypatch, entropy):
     base, target = execution
     prompt = [3, 5, 7]
     expected = hf_ids(base, prompt, 6)
@@ -228,21 +230,22 @@ def test_replay_decision_failure_keeps_request_prefix(execution, monkeypatch):
     with monkeypatch.context() as patch:
         patch.setattr("dart.verification.block_verify._block_result", fail)
         with pytest.raises(RuntimeError, match="interrupted decision"):
-            verify_block_greedy(target, state, expected[1], expected[2:5], compute_entropy=False)
+            verify_block_greedy(target, state, expected[1], expected[2:5], compute_entropy=entropy)
     assert state.cache is cache and state.seq_len == length
     other, _ = target.prefill([11, 9, 7])
     target.forward_predictions(other, [4])
-    recovered = verify_block_greedy(target, state, expected[1], expected[2:5], compute_entropy=False)
+    recovered = verify_block_greedy(target, state, expected[1], expected[2:5], compute_entropy=entropy)
     native, _ = base.prefill(prompt + expected[:1])
-    wanted = verify_block_greedy(base, native, expected[1], expected[2:5], compute_entropy=False)
-    assert asdict(recovered) == asdict(wanted)
+    wanted = verify_block_greedy(base, native, expected[1], expected[2:5], compute_entropy=entropy)
+    assert asdict(recovered) == dict(asdict(wanted), entropy=pytest.approx(wanted.entropy, abs=2e-6))
     for i, layer in enumerate(native.cache.layers):
         torch.testing.assert_close(state.cache.storage[i, 0, ..., :state.seq_len, :], layer.keys, atol=2e-6, rtol=2e-5)
         torch.testing.assert_close(state.cache.storage[i, 1, ..., :state.seq_len, :], layer.values, atol=2e-6, rtol=2e-5)
 
 
 @pytest.mark.parametrize("override", ["instance_override", "class_override"])
-def test_custom_crop_sees_the_full_forward(execution, monkeypatch, override):
+@pytest.mark.parametrize("entropy", [False, True])
+def test_custom_crop_sees_the_full_forward(execution, monkeypatch, override, entropy):
     base, target = execution
     prompt = [5, 7, 9]
     pending, truth, *rest = hf_ids(base, prompt, 5)
@@ -259,6 +262,95 @@ def test_custom_crop_sees_the_full_forward(execution, monkeypatch, override):
         monkeypatch.setattr(CudaGraphTarget, "crop", lambda self, state, length: observe(state, length))
     else:
         monkeypatch.setattr(target, "crop", observe)
-    result = verify_block_greedy(target, state, pending, drafts, compute_entropy=False)
+    result = verify_block_greedy(target, state, pending, drafts, compute_entropy=entropy)
     assert before == [len(prompt) + 1 + len(drafts)]
     assert result.committed == [truth] and state.seq_len == len(prompt) + 1
+
+
+@pytest.mark.parametrize("capture,entropy,width,rejection", [
+    (True, True, 5, 0), (True, True, 4, 1), (False, True, 5, 2),
+    (False, False, 4, 0), (False, True, 1, None),
+])
+def test_block_consumes_logits_in_place(tiny_target, monkeypatch, capture, entropy, width, rejection):
+    prompt = [5, 7, 9]
+    expected = hf_ids(tiny_target, prompt, width + 1)
+    pending = expected[:1] if width == 1 else expected[:2]
+    drafts = expected[len(pending):width]
+    vocab = tiny_target.model.config.vocab_size
+    if rejection is not None:
+        drafts[rejection] = (drafts[rejection] + 1) % vocab
+
+    with closing(CudaGraphTarget(tiny_target, capacity=32, max_block_tokens=5, replay=False,
+                                 capture_predictions=capture, replay_block_sizes=(1, 5))) as target:
+        state, _ = target.prefill(prompt)
+        native, _ = tiny_target.prefill(prompt)
+        wanted = verify_block_greedy(tiny_target, native, pending, drafts, compute_entropy=entropy)
+        clones, writes, reductions = [], [], []
+        workspace = target._workspace.storage.untyped_storage().data_ptr()
+        clone, copy, argmax = torch.Tensor.clone, torch.Tensor.copy_, torch.argmax
+
+        def observe_clone(tensor, *args, **kwargs):
+            if tensor.shape == (width, vocab):
+                clones.append(tensor.numel())
+            return clone(tensor, *args, **kwargs)
+
+        def observe_copy(dest, source, *args, **kwargs):
+            if source.ndim == 6 and source.untyped_storage().data_ptr() == workspace:
+                writes.append(source.size(-2))
+            return copy(dest, source, *args, **kwargs)
+
+        def observe_argmax(tensor, *args, **kwargs):
+            if tensor.ndim == 2 and tensor.shape[-1] == vocab:
+                reductions.append(tensor.shape[0])
+            return argmax(tensor, *args, **kwargs)
+
+        with monkeypatch.context() as patch:
+            patch.setattr(torch.Tensor, "clone", observe_clone)
+            patch.setattr(torch.Tensor, "copy_", observe_copy)
+            patch.setattr(torch, "argmax", observe_argmax)
+            result = verify_block_greedy(target, state, pending, drafts, compute_entropy=entropy)
+
+        assert asdict(result) == dict(asdict(wanted), entropy=pytest.approx(wanted.entropy, abs=2e-6))
+        assert not clones
+        if capture and width in target.replay_block_sizes:
+            assert not reductions
+        assert writes == [native.seq_len - len(prompt)]
+        assert state.seq_len == native.seq_len
+        for i, layer in enumerate(native.cache.layers):
+            torch.testing.assert_close(state.cache.storage[i, 0, ..., :state.seq_len, :], layer.keys)
+            torch.testing.assert_close(state.cache.storage[i, 1, ..., :state.seq_len, :], layer.values)
+
+
+@pytest.mark.parametrize("where", ["instance", "class", "parent"])
+def test_entropy_uses_custom_block_forward(execution, monkeypatch, where):
+    base, target = execution
+    prompt = [5, 7, 9]
+    pending, truth, *rest = hf_ids(base, prompt, 5)
+    drafts = [(truth + 1) % base.model.config.vocab_size, *rest]
+    state, _ = target.prefill(prompt)
+    widths = []
+    forward = target.forward_block
+
+    def observe(state, tokens):
+        widths.append(len(tokens))
+        return forward(state, tokens)
+
+    if where == "instance":
+        monkeypatch.setattr(target, "forward_block", observe)
+    else:
+        cls = CudaGraphTarget if where == "class" else TargetModel
+        monkeypatch.setattr(cls, "forward_block", lambda self, state, tokens: observe(state, tokens))
+    result = verify_block_greedy(target, state, pending, drafts)
+    assert widths == [1 + len(drafts)] and result.committed == [truth]
+    assert result.entropy > 0 and state.seq_len == len(prompt) + 1
+
+
+@pytest.mark.parametrize("method", ["forward_block", "forward_predictions", "crop"])
+def test_verifier_respects_foreign_bound_method(tiny_target, monkeypatch, method):
+    options = dict(capacity=32, max_block_tokens=5, replay=False, capture_predictions=True)
+    with closing(CudaGraphTarget(tiny_target, **options)) as target, closing(CudaGraphTarget(tiny_target, **options)) as other:
+        state, _ = target.prefill([1, 2, 3])
+        target.forward_predictions(state, [4])
+        monkeypatch.setattr(target, method, getattr(other, method))
+        with pytest.raises(ValueError, match="different replay target"):
+            verify_block_greedy(target, state, 5, [6, 7], compute_entropy=method != "forward_predictions")

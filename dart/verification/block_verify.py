@@ -59,32 +59,41 @@ def verify_block_greedy(
                 forward_drafts = draft_tokens[:index]  # EOS and its tail need no forward.
             break  # The full forward handles bounds and invalid IDs.
     tokens.extend(forward_drafts)
-    if not compute_entropy and getattr(target, "capture_predictions", False):
-        forward = target.forward_predictions
-        if (base_len and forward_drafts and type(target) is CudaGraphTarget
-                and getattr(forward, "__func__", None) is CudaGraphTarget._native_predictions
-                and getattr(target.crop, "__func__", None) is CudaGraphTarget._native_crop
-                and type(draft_tokens) is list and all(type(token) is int for token in tokens)):
-            def decide(predictions):
-                result = _block_result(tokens, p_len, draft_tokens, predictions, target.eos_token_ids)
-                return p_len - 1 + len(result.committed), result
+    compact = not compute_entropy and getattr(target, "capture_predictions", False)
+    forward = target.forward_predictions if compact else target.forward_block
 
-            return target._verify_predictions(state, tokens, decide)
-        preds = forward(state, tokens)
-        logits = None
-    else:
-        logits = target.forward_block(state, tokens)
-        if (len(forward_drafts) >= 3 and type(draft_tokens[0]) is int
-                and logits.device.type == "cpu" and logits.size(-1) >= 32_000 and torch.get_num_threads() == 1):
-            preds = torch.argmax(logits[:p_len], dim=-1).tolist()
-            if preds[-1] == draft_tokens[0]:  # A first rejection leaves the remaining rows unused.
-                preds.extend(torch.argmax(logits[p_len:], dim=-1).tolist())
-        else:
-            preds = torch.argmax(logits, dim=-1).tolist()
+    def decide(logits, predictions):
+        if predictions is None:
+            predictions = _block_predictions(logits, p_len, forward_drafts)
+        result = _block_result(tokens, p_len, draft_tokens, predictions, target.eos_token_ids,
+                               logits if compute_entropy else None)
+        return p_len - 1 + len(result.committed), result
 
-    result = _block_result(tokens, p_len, draft_tokens, preds, target.eos_token_ids, logits if compute_entropy else None)
-    target.crop(state, base_len + p_len - 1 + len(result.committed))
+    if (type(target) is CudaGraphTarget and base_len and (forward_drafts or not compact)
+            and type(draft_tokens) is list and all(type(token) is int for token in tokens)
+            and _native_method(forward, target, CudaGraphTarget._native_predictions if compact else CudaGraphTarget._native_block)
+            and _native_method(target._forward, target, CudaGraphTarget._native_forward)
+            and _native_method(target.crop, target, CudaGraphTarget._native_crop)):
+        return target._verify_block(state, tokens, decide)
+
+    output = forward(state, tokens)
+    kept, result = decide(None, output) if compact else decide(output, None)
+    target.crop(state, base_len + kept)
     return result
+
+
+def _native_method(method, target, original):
+    return getattr(method, "__self__", None) is target and getattr(method, "__func__", None) is original
+
+
+def _block_predictions(logits, p_len, drafts):
+    if (len(drafts) >= 3 and type(drafts[0]) is int
+            and logits.device.type == "cpu" and logits.size(-1) >= 32_000 and torch.get_num_threads() == 1):
+        predictions = torch.argmax(logits[:p_len], dim=-1).tolist()
+        if predictions[-1] == drafts[0]:  # A first rejection leaves the remaining rows unused.
+            predictions.extend(torch.argmax(logits[p_len:], dim=-1).tolist())
+        return predictions
+    return torch.argmax(logits, dim=-1).tolist()
 
 
 def _block_result(tokens, p_len, draft_tokens, preds, eos_ids, logits=None):
