@@ -66,7 +66,7 @@ def cuda(monkeypatch):
 
 def block(length=1):
     model = SimpleNamespace(forward=lambda **kwargs: SimpleNamespace(logits=kwargs["input_ids"].float().unsqueeze(-1)))
-    workspace = SimpleNamespace(storage=torch.zeros(1, 2, 1, 1, 16, 4), positions=None)
+    workspace = SimpleNamespace(storage=torch.zeros(1, 2, 1, 1, 16, 4), positions=None, columns=torch.arange(16))
     return _ReplayBlock(model, workspace, length, True, capture_predictions=True)
 
 

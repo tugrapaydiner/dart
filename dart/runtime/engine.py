@@ -364,6 +364,9 @@ class DartEngine:
             metadata["kv_residency_moved_mb"] = round(res_stats.moved_bytes / 1e6, 3)
         if getattr(target, "uses_replay_cache", False):
             metadata["cache_capacity"] = target.capacity
+            sizes = getattr(target, "replay_block_sizes", None)
+            if sizes is not None and len(sizes) != target.max_block_tokens:
+                metadata["replay_block_sizes"] = list(sizes)
         if sampling:
             metadata["distribution_exact"] = True
             metadata["temperature"] = config.temperature

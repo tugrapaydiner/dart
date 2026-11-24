@@ -121,6 +121,8 @@ class _Workspace:
         parameter = next(model.parameters())
         self.storage = torch.zeros(shape, device=parameter.device, dtype=parameter.dtype)
         self.positions = None
+        self.columns = torch.arange(capacity, device=parameter.device)
+        self.forward_model = model.forward
 
     def update(self, keys, values, layer_idx, *args, **kwargs):
         a, b = self.storage[layer_idx, 0], self.storage[layer_idx, 1]
@@ -163,6 +165,15 @@ def _capture_pool(device):
     return _capture_stream_pools.devices[device]
 
 
+def _causal_logits(forward, workspace, ids, positions):
+    workspace.positions = positions
+    columns = workspace.columns
+    mask = workspace.storage.new_zeros((1, 1, ids.shape[1], columns.numel()))
+    mask.masked_fill_(columns[None, :] > positions[:, None], torch.finfo(mask.dtype).min)
+    return forward(input_ids=ids, position_ids=positions[None], attention_mask=mask,
+                   past_key_values=workspace, use_cache=True, output_hidden_states=False).logits
+
+
 class _ReplayBlock:
     def __init__(self, model, workspace, length, capture, *, capture_predictions=False):
         self._closed = False
@@ -174,8 +185,8 @@ class _ReplayBlock:
         device = workspace.storage.device
         self.ids = torch.zeros((1, length), dtype=torch.long, device=device)
         self.start = torch.zeros((), dtype=torch.long, device=device)
-        self.steps = torch.arange(length, device=device)
-        self.columns = torch.arange(workspace.storage.shape[-2], device=device)
+        self.columns = workspace.columns
+        self.steps = self.columns[:length]
         self.output = None
         self.capture_predictions = capture_predictions
         self.predictions = None
@@ -200,12 +211,7 @@ class _ReplayBlock:
                 raise
 
     def forward(self):
-        positions = self.steps + self.start
-        self.workspace.positions = positions
-        mask = self.workspace.storage.new_zeros((1, 1, self.ids.shape[1], self.columns.numel()))
-        mask.masked_fill_(self.columns[None, :] > positions[:, None], torch.finfo(mask.dtype).min)
-        logits = self.forward_model(input_ids=self.ids, position_ids=positions[None], attention_mask=mask,
-                                    past_key_values=self.workspace, use_cache=True, output_hidden_states=False).logits
+        logits = _causal_logits(self.forward_model, self.workspace, self.ids, self.steps + self.start)
         if self.capture_predictions:
             self.predictions = logits.argmax(dim=-1)
         return logits
@@ -260,6 +266,18 @@ class _GreedyBlock(_ReplayBlock):
         return torch.cat(predictions, dim=1)
 
 
+def _replay_block_sizes(sizes, max_block_tokens):
+    if type(max_block_tokens) is not int or not 1 <= max_block_tokens <= 16:
+        raise ValueError("max_block_tokens must be an integer from 1 to 16")
+    if sizes is None:
+        return tuple(range(1, max_block_tokens + 1))
+    if (not isinstance(sizes, (tuple, list)) or len(sizes) > max_block_tokens
+            or any(type(n) is not int or not 1 <= n <= max_block_tokens for n in sizes)
+            or len(set(sizes)) != len(sizes)):
+        raise ValueError("replay_block_sizes must contain distinct integers from 1 to max_block_tokens")
+    return tuple(sorted(sizes))
+
+
 def _validate_greedy_chunks(sizes, capture_predictions):
     if (not isinstance(sizes, tuple) or any(type(n) is not int or not 2 <= n <= 8 for n in sizes)
             or len(set(sizes)) != len(sizes)):
@@ -275,6 +293,8 @@ class CudaGraphTarget(TargetModel):
     running in the process. Calls use the preparation stream and serialize
     workspace access. Each state and returned logit tensor owns its data.
     ``replay=False`` runs the static-cache path on CPU or CUDA without graph capture.
+    ``replay_block_sizes`` defaults to all widths through ``max_block_tokens``. Other valid widths
+    run eagerly on the same static cache when a subset is supplied.
     ``capture_predictions=True`` also prepares argmax for entropy-free greedy calls.
     ``greedy_chunk_sizes=(2, 4)`` optionally groups greedy steps before returning IDs.
     Chunks keep the same model work; EOS can leave unused steps in the last chunk.
@@ -284,7 +304,7 @@ class CudaGraphTarget(TargetModel):
 
     @torch.inference_mode()
     def __init__(self, target: TargetModel, *, max_block_tokens=5, capacity=None, replay=True,
-                 capture_predictions=False, greedy_chunk_sizes=()):
+                 capture_predictions=False, greedy_chunk_sizes=(), replay_block_sizes=None):
         if type(replay) is not bool:
             raise ValueError("replay must be a boolean")
         if type(capture_predictions) is not bool:
@@ -306,7 +326,8 @@ class CudaGraphTarget(TargetModel):
             raise ValueError("replay capacity must be within the model context and at most 4096")
         if type(max_block_tokens) is not int or not 1 <= max_block_tokens <= min(16, capacity):
             raise ValueError("max_block_tokens must be an integer from 1 to min(16, capacity)")
-        if max(greedy_chunk_sizes, default=0) > capacity or max_block_tokens + len(greedy_chunk_sizes) > 16:
+        sizes = _replay_block_sizes(replay_block_sizes, max_block_tokens)
+        if max(greedy_chunk_sizes, default=0) > capacity or len(sizes) + len(greedy_chunk_sizes) > 16:
             raise ValueError("greedy chunks exceed capacity or the 16 prepared block limit")
         if len({parameter.device for parameter in target.model.parameters()}) != 1 or any(
             parameter.dtype != torch.float32 or parameter.device.type != device for parameter in target.model.parameters()
@@ -318,6 +339,7 @@ class CudaGraphTarget(TargetModel):
         self.max_block_tokens = max_block_tokens
         self._capture_predictions = capture_predictions
         self._greedy_chunk_sizes = greedy_chunk_sizes
+        self._replay_block_sizes = sizes
         self.execution_backend = "cuda_graph" if replay else "static"
         self._owner = object()
         self._lock = threading.RLock()
@@ -333,7 +355,7 @@ class CudaGraphTarget(TargetModel):
         started = time.perf_counter()
         self._blocks, self._greedy_blocks = {}, {}
         try:
-            for length in range(1, max_block_tokens + 1):
+            for length in sizes:
                 self._blocks[length] = _ReplayBlock(self.model, self._workspace, length, replay,
                                                     capture_predictions=capture_predictions)
             for count in greedy_chunk_sizes:
@@ -346,6 +368,10 @@ class CudaGraphTarget(TargetModel):
     @property
     def capture_predictions(self):
         return self._capture_predictions
+
+    @property
+    def replay_block_sizes(self):
+        return self._replay_block_sizes
 
     @property
     def greedy_chunk_sizes(self):
@@ -497,19 +523,25 @@ class CudaGraphTarget(TargetModel):
                     raise ValueError("replay requires a full DynamicCache")
                 logits = super()._forward(state, input_ids, last_logits_only=last_logits_only)
                 return logits.argmax(dim=-1).tolist() if return_predictions else logits
-            if input_ids.shape[1] not in self._blocks:
+            width = input_ids.shape[1]
+            if width > self.max_block_tokens:
                 raise ValueError(f"block exceeds prepared replay size {self.max_block_tokens}")
             cache = state.cache
             if not isinstance(cache, ReplayCache):
                 cache = ReplayCache.from_dynamic(cache, self.capacity, self._owner)
-            block = self._blocks[input_ids.shape[1]]
+            block = self._blocks.get(width)
             storage = self._restore_prefix(cache)
-            block.ids.copy_(input_ids)
-            block.start.fill_(cache.length)
-            logits = block.run()
+            if block is None:
+                positions = self._workspace.columns[:width] + cache.length
+                logits = _causal_logits(self._workspace.forward_model, self._workspace, input_ids, positions)
+            else:
+                block.ids.copy_(input_ids)
+                block.start.fill_(cache.length)
+                logits = block.run()
             storage[..., cache.length:total_len, :].copy_(self._workspace.storage[..., cache.length:total_len, :])
             if return_predictions:
-                output = block.predictions[0].tolist()  # Copy before another call can replay this workspace.
+                predictions = logits.argmax(dim=-1) if block is None else block.predictions
+                output = predictions[0].tolist()  # Copy before another call can replay this workspace.
             else:
                 output = logits[0].float().clone()  # Later replays must not overwrite a caller's logits.
             cache.length = total_len
@@ -621,19 +653,20 @@ class CapacityBuckets:
     record_hidden = False
 
     def __init__(self, target: TargetModel, capacities, *, max_block_tokens=5, replay=True,
-                 capture_predictions=False, greedy_chunk_sizes=()):
+                 capture_predictions=False, greedy_chunk_sizes=(), replay_block_sizes=None):
         if (not isinstance(capacities, tuple) or not 1 <= len(capacities) <= 4
                 or len(set(capacities)) != len(capacities) or any(type(c) is not int for c in capacities)):
             raise ValueError("capacities must be a tuple of one to four distinct integers")
         _validate_greedy_chunks(greedy_chunk_sizes, capture_predictions)
-        if type(max_block_tokens) is int and len(capacities) * (max_block_tokens + len(greedy_chunk_sizes)) > 16:
+        sizes = _replay_block_sizes(replay_block_sizes, max_block_tokens)
+        if len(capacities) * (len(sizes) + len(greedy_chunk_sizes)) > 16:
             raise ValueError("capacity buckets allow at most 16 prepared blocks in total")
         with ExitStack() as cleanup:
             buckets = []
             for capacity in sorted(capacities):
                 bucket = CudaGraphTarget(target, max_block_tokens=max_block_tokens, capacity=capacity,
                                          replay=replay, capture_predictions=capture_predictions,
-                                         greedy_chunk_sizes=greedy_chunk_sizes)
+                                         greedy_chunk_sizes=greedy_chunk_sizes, replay_block_sizes=sizes)
                 cleanup.callback(bucket.close)
                 buckets.append(bucket)
             cleanup.pop_all()
@@ -644,6 +677,7 @@ class CapacityBuckets:
         self.max_block_tokens = max_block_tokens
         self.capture_predictions = capture_predictions
         self.greedy_chunk_sizes = greedy_chunk_sizes
+        self.replay_block_sizes = sizes
         self.execution_backend = largest.execution_backend
         self.setup_ms = sum(bucket.setup_ms for bucket in self.buckets)
         self.last_hidden_block = None
