@@ -4,6 +4,7 @@ import pytest
 import torch
 
 from dart.models.replay import CudaGraphTarget
+from dart.verification import sampling
 from dart.verification.block_verify import verify_block_greedy
 from dart.verification.greedy import verify_greedy_reference
 from dart.verification.state_checks import _cache_failures, _reference_forward
@@ -301,3 +302,84 @@ def test_oversized_eos_block_preserves_token_error_precedence(models, pending, d
         verify_block_greedy(target, state, pending, drafts)
     assert str(error.value) == str(native.value)
     assert state.seq_len == 3 and not state._failed
+
+
+@pytest.mark.parametrize("pending", [[10], [8, 10]])
+@pytest.mark.parametrize("full_q", [False, True])
+@pytest.mark.parametrize("drafts,eos,expected,accepted,used", [
+    ([11, 12, 13, 14], [11, 66], [11], 1, 0),
+    ([11, 12, 13, 14], [13, 66], [11, 12, 13], 3, 2),
+    ([11, 12, 13, 14], [14], [11, 12, 13, 14], 4, 3),
+    ([11, 30, 13, 14], [30], [11, 12], 1, 1),
+    ([36, 12, 13, 14], [13], [11], 0, 2),
+    ([36, 12, 13, 14], [11, 13], [11], 0, 2),
+    ([11, 12], [66], [11, 12, 13], 2, 2),
+    ([], [11], [11], 0, 0),
+])
+def test_sampling_terminal_rows(pending, full_q, drafts, eos, expected, accepted, used, monkeypatch):
+    target = CountingTarget(eos, False)
+    control = CountingTarget(eos, False)
+    control.model.config.vocab_size = None  # Use the full-width forward.
+    state, other = SimpleNamespace(seq_len=3), SimpleNamespace(seq_len=3)
+    rng = torch.Generator().manual_seed(17)
+    reference_rng = torch.Generator().manual_seed(17)
+    q = None
+    if full_q:
+        q = torch.full((len(drafts), 67), 0.1 / 66)
+        for i, draft in enumerate(drafts):
+            q[i, draft] = 0.9
+    expected_result = sampling.verify_block_sampling(control, other, pending, drafts, q, reference_rng, 0.1)
+    softmax = sampling._softmax_with_temperature
+    rows = []
+
+    def count(logits, temperature):
+        rows.append(logits.shape[0])
+        return softmax(logits, temperature)
+
+    monkeypatch.setattr(sampling, "_softmax_with_temperature", count)
+    result = sampling.verify_block_sampling(target, state, pending, drafts, q, rng, 0.1)
+    assert result == expected_result and result.committed == expected
+    assert result.n_draft_proposed == len(drafts) and result.n_draft_accepted == accepted
+    assert result.finished == (expected[-1] in eos)
+    assert result.all_accepted == (accepted == len(drafts))
+    assert result.hidden_index == len(pending) + len(expected) - 2
+    assert state.seq_len == other.seq_len == 3 + len(pending) + len(expected) - 1
+    assert torch.equal(rng.get_state(), reference_rng.get_state())
+    assert control.calls == [pending + drafts]
+    assert target.calls == [pending + drafts[:used]]
+    assert rows == [1 + used]
+
+
+@pytest.mark.parametrize("bad", ["id", "context", "width"])
+def test_sampling_terminal_keeps_full_input_errors(models, bad):
+    base, _ = models
+    target = CudaGraphTarget(base, capacity=12, max_block_tokens=3, replay=False) if bad == "width" else base
+    try:
+        target.eos_token_ids = frozenset([2])
+        if bad == "context":
+            base.model.config.max_position_embeddings = 6
+        drafts = [2, 13, 67 if bad == "id" else 14]
+        state, _ = target.prefill([5, 7, 9])
+        rng = torch.Generator().manual_seed(9)
+        original_rng = rng.get_state()
+        with pytest.raises(ValueError) as native:
+            target.forward_block(state, [10, *drafts])
+        with pytest.raises(ValueError) as error:
+            sampling.verify_block_sampling(target, state, 10, drafts, generator=rng)
+        assert str(error.value) == str(native.value)
+        assert state.seq_len == 3 and not state._failed
+        assert torch.equal(rng.get_state(), original_rng)
+    finally:
+        if target is not base:
+            target.close()
+
+
+def test_sampling_terminal_requires_pending_before_forward():
+    target = CountingTarget([11], False)
+    state = SimpleNamespace(seq_len=3)
+    rng = torch.Generator().manual_seed(13)
+    original_rng = rng.get_state()
+    with pytest.raises(ValueError, match="pending block"):
+        sampling.verify_block_sampling(target, state, [], [11, 12], generator=rng)
+    assert target.calls == [] and state.seq_len == 3
+    assert torch.equal(rng.get_state(), original_rng)

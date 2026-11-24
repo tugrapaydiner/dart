@@ -31,6 +31,7 @@ from torch import Tensor
 
 from dart.models.target import TargetModel, TargetState
 from dart.runtime.types import VerifyResult
+from dart.verification.block_verify import _draft_before_eos
 
 
 def speculative_accept_step(
@@ -94,13 +95,15 @@ def verify_block_sampling(
     whole block; KV for rejected suffixes is cropped.  Same state contract
     as the greedy verifiers (see verification/greedy.py)."""
     pending_block = [pending] if isinstance(pending, int) else list(pending)
+    if not pending_block:
+        raise ValueError("pending block must contain at least one token")
     drafts = list(draft_tokens)
     k = len(drafts)
     base_len = state.seq_len
 
-    logits = target.forward_block(state, pending_block + drafts)
-    probs = _softmax_with_temperature(logits, temperature)
-    off = len(pending_block) - 1  # row `off + i` is the distribution for drafts[i]
+    forward_drafts = _draft_before_eos(target, base_len, len(pending_block), drafts)
+    logits = target.forward_block(state, pending_block + forward_drafts)
+    probs = _softmax_with_temperature(logits[len(pending_block) - 1:], temperature)
 
     committed: list[int] = []
     n_accepted = 0
@@ -108,7 +111,7 @@ def verify_block_sampling(
     for i in range(k):
         q_row = draft_probs[i] if draft_probs is not None else None
         token, accepted = speculative_accept_step(
-            probs[off + i], q_row, drafts[i], generator
+            probs[i], q_row, drafts[i], generator
         )
         committed.append(token)
         if accepted:
@@ -119,7 +122,7 @@ def verify_block_sampling(
         if not accepted:
             break
     else:
-        bonus = int(torch.multinomial(probs[off + k], 1, generator=generator).item())
+        bonus = int(torch.multinomial(probs[k], 1, generator=generator).item())
         committed.append(bonus)
         finished = bonus in target.eos_token_ids
 

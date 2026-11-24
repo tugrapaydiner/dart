@@ -28,6 +28,24 @@ from dart.runtime.types import VerifyResult
 from dart.verification.greedy import _restore_failed_round
 
 
+def _draft_before_eos(target, base_len: int, pending_len: int, draft_tokens: list[int]) -> list[int]:
+    for index, token in enumerate(draft_tokens):
+        if type(token) is int and token in target.eos_token_ids:
+            config = getattr(getattr(target, "model", None), "config", None)
+            vocab_size = getattr(config, "vocab_size", None)
+            context = getattr(target, "context_limit", getattr(config, "max_position_embeddings", None))
+            block = getattr(target, "max_block_tokens", None)
+            width = pending_len + len(draft_tokens)
+            fits_context = context is None or (type(context) is int and base_len + width <= context)
+            fits_block = block is None or (type(block) is int and width <= block)
+            if fits_context and fits_block and type(vocab_size) is int and all(
+                type(value) is int and 0 <= value < vocab_size for value in draft_tokens[index:]
+            ):
+                return draft_tokens[:index]  # EOS and its tail need no forward.
+            break  # The full forward handles bounds and invalid IDs.
+    return draft_tokens
+
+
 def verify_block_greedy(
     target: TargetModel,
     state: TargetState,
@@ -41,24 +59,9 @@ def verify_block_greedy(
     if not tokens:
         raise ValueError("pending block must contain at least one token")
     p_len = len(tokens)
-    k = len(draft_tokens)
     base_len = state.seq_len  # cache length before this round
 
-    forward_drafts = draft_tokens
-    for index, token in enumerate(draft_tokens):
-        if type(token) is int and token in target.eos_token_ids:
-            config = getattr(getattr(target, "model", None), "config", None)
-            vocab_size = getattr(config, "vocab_size", None)
-            context = getattr(target, "context_limit", getattr(config, "max_position_embeddings", None))
-            block = getattr(target, "max_block_tokens", None)
-            width = p_len + k
-            fits_context = context is None or (type(context) is int and base_len + width <= context)
-            fits_block = block is None or (type(block) is int and width <= block)
-            if fits_context and fits_block and type(vocab_size) is int and all(
-                type(value) is int and 0 <= value < vocab_size for value in draft_tokens[index:]
-            ):
-                forward_drafts = draft_tokens[:index]  # EOS and its tail need no forward.
-            break  # The full forward handles bounds and invalid IDs.
+    forward_drafts = _draft_before_eos(target, base_len, p_len, draft_tokens)
     tokens.extend(forward_drafts)
     compact = not compute_entropy and getattr(target, "capture_predictions", False)
     forward = target.forward_predictions if compact else target.forward_block
