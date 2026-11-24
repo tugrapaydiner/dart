@@ -65,12 +65,13 @@ _VERIFIERS: dict[str, VerifyFn] = {
 }
 
 
-def _accepts_node_limit(propose) -> bool:
+def _tree_keywords(propose) -> tuple[str, ...]:
     try:
-        limit = signature(propose, follow_wrapped=False).parameters.get("max_nodes")
+        params = signature(propose, follow_wrapped=False).parameters
     except (TypeError, ValueError):
-        return False
-    return limit is not None and limit.kind in (Parameter.KEYWORD_ONLY, Parameter.POSITIONAL_OR_KEYWORD)
+        return ()
+    return tuple(name for name in ("max_nodes", "eos_token_ids") if name in params
+                 and params[name].kind in (Parameter.KEYWORD_ONLY, Parameter.POSITIONAL_OR_KEYWORD))
 
 
 def _draft_prefix(tokens: Iterable[int], budget: int) -> list[int]:
@@ -313,12 +314,14 @@ class DartEngine:
                 tree_limits = {}
             cached = tree_limits.get(id(drafter))
             if cached is None or cached[0] is not method:
-                cached = (method, _accepts_node_limit(propose))
+                cached = (method, _tree_keywords(propose))
                 tree_limits[id(drafter)] = cached
-            if cached[1]:
-                drafts = propose(committed, per_round, max_nodes=config.max_tree_nodes)
-            else:
-                drafts = propose(committed, per_round)
+            options = {}
+            if "max_nodes" in cached[1]:
+                options["max_nodes"] = config.max_tree_nodes
+            if "eos_token_ids" in cached[1]:
+                options["eos_token_ids"] = frozenset(self.target.eos_token_ids)
+            drafts = propose(committed, per_round, **options)
             if type(drafts) is DraftTree:
                 return drafts.truncate(per_round, max_nodes=config.max_tree_nodes), None
             if isinstance(drafts, DraftTree):
@@ -406,7 +409,7 @@ class DartEngine:
         scheduler_entropy = self.scheduler is not None and bool(getattr(self.scheduler, "requires_entropy", True))
         generator = None
         verify_fns: dict[tuple[str, bool], VerifyFn] = {}
-        tree_limits: dict[int, tuple[object, bool]] = {}
+        tree_limits: dict[int, tuple[object, tuple[str, ...]]] = {}
         if sampling:
             generator = torch.Generator(device=self.target.device)
             generator.manual_seed(config.seed if config.seed is not None else 0)

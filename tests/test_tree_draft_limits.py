@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from functools import wraps
+from random import Random
 
 import pytest
 import torch
@@ -16,6 +17,7 @@ from dart.runtime.time_scheduler import CostTableScheduler
 from dart.runtime.types import DecodeConfig, DecodeState, VerifyResult
 from dart.verification.tree_verify import DraftTree
 from tests.conftest import build_tiny_target
+from tests.test_ngram_lookup import reference_branches
 
 
 @pytest.mark.parametrize("width", [3, 32])
@@ -96,6 +98,69 @@ def test_replaced_tree_hook_keeps_its_call_signature():
         output = engine.generate([7, 8], DecodeConfig(max_new_tokens=5, draft_len=2, max_tree_nodes=3))
     assert output.token_ids == target.greedy_generate([7, 8], 5)
     assert calls == [3, None, None]
+
+
+@pytest.mark.parametrize("cap,width,accepted", [(4, 4, 3), (15, 2, 4)])
+def test_terminal_branches_recover_live_slot(cap, width, accepted):
+    target = build_tiny_target()
+    with torch.no_grad():
+        target.model.lm_head.weight.zero_()
+    suffix = [5, 6, 7, 0]
+    prompt = suffix + [0] * 4 + suffix + [2, 20, 21, 22] + suffix + [2, 31, 32, 33] + suffix[:-1]
+    config = DecodeConfig(max_new_tokens=6, draft_len=4, max_tree_nodes=cap)
+    drafter = NGramDrafter(min_ngram=4, max_ngram=4, tree_width=width)
+    with DartEngine(target, drafter, verifier="tree") as engine:
+        output = engine.generate(prompt, config)
+    assert output.token_ids == target.greedy_generate(prompt, 6) == [0] * 6
+    assert output.rounds[0].n_draft_accepted == accepted
+    assert output.rounds[0].n_draft_proposed == accepted + 1
+
+
+def test_terminal_branch_lookup_matches_reference():
+    rng = Random(541)
+    for _ in range(200):
+        history = [rng.randrange(6) for _ in range(rng.randrange(1, 48))]
+        depth, width, cap = rng.randrange(6), rng.randrange(1, 5), rng.randrange(10)
+        scan = rng.choice([None, 8, 20])
+        eos = frozenset(rng.sample(range(6), rng.randrange(4)))
+        spans = reference_branches(history, depth, 1, 3, scan, len(history))
+        live = []
+        for span in spans:
+            end = next((i + 1 for i, token in enumerate(span) if token in eos), len(span))
+            if span[:end] not in live:
+                live.append(span[:end])
+        drafter = NGramDrafter(max_ngram=3, max_scan=scan, tree_width=width)
+        assert drafter.propose_tree(history, depth, max_nodes=cap, eos_token_ids=eos) == (
+            DraftTree.from_branches(live[:width], max_nodes=cap))
+
+
+def test_terminal_options_follow_hook():
+    target, drafter = build_tiny_target(), NGramDrafter()
+    calls = []
+
+    def stops(committed, depth, *, eos_token_ids):
+        calls.append(eos_token_ids)
+        drafter.propose_tree = both
+        return DraftTree.chain([])
+
+    def both(committed, depth, *, max_nodes, eos_token_ids):
+        calls.append((max_nodes, eos_token_ids))
+        drafter.propose_tree = legacy
+        return DraftTree.chain([])
+
+    def legacy(committed, depth, eos_token_ids=None, /, **kwargs):
+        calls.append((eos_token_ids, kwargs))
+        return DraftTree.chain([])
+
+    drafter.propose_tree = stops
+    target.eos_token_ids = {2}
+    config = DecodeConfig(max_tree_nodes=3)
+    with DartEngine(target, drafter, verifier="tree") as engine:
+        cache = {}
+        for token in (3, 4, 5):
+            engine._round_drafts(drafter, [7, 8], 2, "tree", False, config, cache)
+            target.eos_token_ids.add(token)
+    assert calls == [frozenset({2}), (3, frozenset({2, 3})), (None, {})]
 
 
 @pytest.mark.parametrize("cap", [0, 1, 3])

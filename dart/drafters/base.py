@@ -24,6 +24,7 @@ class Drafter(Protocol):
 
       * ``propose_tree(committed, max_tokens)`` returns a DraftTree for tree rounds.
         Declare a ``max_nodes`` keyword to limit the tree while building it.
+        Declare ``eos_token_ids`` to receive the target's stop IDs as a frozen set.
       * ``propose_with_probs(committed, max_tokens)`` returns drafts and the rows
         they were sampled from, for exact sampling.
       * ``after_prefill()`` and ``after_verify(result)`` see rounds run by other lanes.

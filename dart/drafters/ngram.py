@@ -14,7 +14,7 @@ the single verify pass can accept whichever one the target picks.
 
 from __future__ import annotations
 
-from collections.abc import Iterator
+from collections.abc import Collection, Iterator
 from numbers import Integral
 
 from dart.runtime.types import VerifyResult
@@ -50,7 +50,7 @@ class NGramDrafter:
         self.max_scan = max_scan
 
     def _continuations(
-        self, committed: list[int], max_tokens: int, limit: int
+        self, committed: list[int], max_tokens: int, limit: int, eos_token_ids: Collection[int] = ()
     ) -> Iterator[list[int]]:
         """Up to ``limit`` distinct continuations of the current suffix,
         longest n-gram first, most recent occurrence first within an n."""
@@ -77,6 +77,11 @@ class NGramDrafter:
                 start = seq_len - n - 1 - offset
                 if committed[start : start + n] == pattern:
                     cont = committed[start + n : start + n + max_tokens]
+                    if eos_token_ids:
+                        for i, token in enumerate(cont):
+                            if int(token) in eos_token_ids:
+                                cont = cont[:i + 1]  # Keep EOS as the last candidate.
+                                break
                     if cont and cont not in found:
                         found.append(cont)
                         yield cont
@@ -94,8 +99,11 @@ class NGramDrafter:
     def propose(self, committed: list[int], max_tokens: int) -> list[int]:
         return next(self._continuations(committed, max_tokens, limit=1), [])
 
-    def propose_tree(self, committed: list[int], max_tokens: int, *, max_nodes: int | None = None) -> DraftTree:
-        branches = self._continuations(committed, max_tokens, self.tree_width)
+    def propose_tree(
+        self, committed: list[int], max_tokens: int, *, max_nodes: int | None = None,
+        eos_token_ids: Collection[int] = (),
+    ) -> DraftTree:
+        branches = self._continuations(committed, max_tokens, self.tree_width, eos_token_ids)
         return DraftTree.from_branches(branches, max_nodes=max_nodes)
 
     def observe(self, result: VerifyResult) -> None:
