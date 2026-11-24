@@ -69,7 +69,8 @@ def test_tree_mask_rejects_negative_parent(parent):
         tree_mask(parent, 3)
 
 
-@pytest.mark.parametrize("parent", [[0], [1, -1], [-1, 1], [-1, True], [-1, 0.0]])
+@pytest.mark.parametrize("parent", [[0], [1, -1], [-1, 1], [-1, True], [-1, 0.0],
+                                    [-1] + [0] * 14 + [False], [-1] * 15 + [-1.0]])
 def test_tree_mask_rejects_non_topological_parent_before_allocation(monkeypatch, parent):
     def fail(*args, **kwargs):
         pytest.fail("invalid parent reached tensor allocation")
@@ -153,3 +154,25 @@ def test_tree_forward_avoids_boolean_prefix(tiny_target, monkeypatch, prefix, pe
         mask = tiny_target.forward_tree(state, pending, [19] * len(parents), parents)
     assert mask.shape == (1, 1, *shape) and mask.dtype == tiny_target.dtype
     assert not boolean_prefixes
+
+
+@pytest.mark.parametrize("shared", [False, True])
+@pytest.mark.parametrize("dtype", [torch.bool, torch.float32])
+def test_sibling_mask_avoids_python_matrix(shared, dtype, monkeypatch):
+    parents = [-1] + [0 if shared else -1] * 15
+    visibility = expected_mask(parents, 31)
+    expected = visibility if dtype == torch.bool else torch.zeros_like(visibility, dtype=dtype).masked_fill_(
+        ~visibility, torch.finfo(dtype).min)
+    tensor = torch.tensor
+
+    def check(data, *args, **kwargs):
+        if isinstance(data, list) and data and isinstance(data[0], list):
+            pytest.fail("sibling mask copied a square Python matrix")
+        return tensor(data, *args, **kwargs)
+
+    monkeypatch.setattr(torch, "tensor", check)
+    first = tree_mask(parents, 31, dtype=dtype)
+    first.fill_(False if dtype == torch.bool else 7)
+    second = tree_mask(tuple(parents), 31, dtype=dtype)
+    assert first.data_ptr() != second.data_ptr()
+    assert torch.equal(second, expected)

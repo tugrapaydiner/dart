@@ -46,6 +46,14 @@ def tree_mask(
     else:
         raise ValueError("tree mask dtype must be boolean or floating point")
     n = len(parent)
+    if n >= 16 and type(parent) in (list, tuple) and type(parent[0]) is int and parent[0] == -1:
+        anchor = parent[1]
+        if type(anchor) is int and anchor in (-1, 0) and all(type(p) is int and p == anchor for p in parent[2:]):
+            mask = torch.full((n, prefix_len + n), visible, dtype=dtype, device=device)
+            mask[:, prefix_len + anchor + 1:].fill_(blocked)  # Siblings share at most the first tree column.
+            mask[:, prefix_len:].fill_diagonal_(visible)
+            return mask
+
     rows = []
     for i, p in enumerate(parent):
         if type(p) is not int or not -1 <= p < i:
