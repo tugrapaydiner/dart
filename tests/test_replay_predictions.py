@@ -312,9 +312,61 @@ def test_block_consumes_logits_in_place(tiny_target, monkeypatch, capture, entro
 
         assert asdict(result) == dict(asdict(wanted), entropy=pytest.approx(wanted.entropy, abs=2e-6))
         assert not clones
-        if capture and width in target.replay_block_sizes:
-            assert not reductions
+        assert reductions == [width]
         assert writes == [native.seq_len - len(prompt)]
+        assert state.seq_len == native.seq_len
+        for i, layer in enumerate(native.cache.layers):
+            torch.testing.assert_close(state.cache.storage[i, 0, ..., :state.seq_len, :], layer.keys)
+            torch.testing.assert_close(state.cache.storage[i, 1, ..., :state.seq_len, :], layer.values)
+
+
+@pytest.mark.parametrize("use,entropy,rows", [
+    ("scores", False, []), ("ids", False, [5]), ("reject", False, [2]),
+    ("reject", True, [2]), ("accept", True, [2, 3]),
+])
+def test_replay_skips_unused_static_predictions(use, entropy, rows, monkeypatch):
+    torch.manual_seed(413)
+    config = LlamaConfig(vocab_size=32_000, hidden_size=16, intermediate_size=32, num_hidden_layers=1,
+                         num_attention_heads=2, num_key_value_heads=2, max_position_embeddings=32,
+                         eos_token_id=None, pad_token_id=0, attention_dropout=0.0)
+    config._attn_implementation = "eager"
+    base = TargetModel(LlamaForCausalLM(config))
+    prompt = [5, 7, 9]
+    ids = hf_ids(base, prompt, 6)
+    pending, drafts = ids[:2], ids[2:5]
+    if use == "reject":
+        drafts[0] = (drafts[0] + 1) % config.vocab_size
+
+    with closing(CudaGraphTarget(base, capacity=32, max_block_tokens=5, replay=False,
+                                 capture_predictions=True)) as target:
+        state, _ = target.prefill(prompt)
+        native, _ = base.prefill(prompt)
+        if use in ("scores", "ids"):
+            expected = base.forward_block(native, pending + drafts)
+        else:
+            expected = verify_block_greedy(base, native, pending, drafts, compute_entropy=entropy)
+        seen = []
+        with monkeypatch.context() as patch:
+            patch.setattr(torch, "get_num_threads", lambda: 1)
+            for owner in (torch, torch.Tensor):
+                def count(tensor, *args, argmax=owner.argmax, **kwargs):
+                    if tensor.shape[-1] == config.vocab_size:
+                        seen.append(tensor.numel() // config.vocab_size)
+                    return argmax(tensor, *args, **kwargs)
+                patch.setattr(owner, "argmax", count)
+            if use == "scores":
+                actual = target.forward_block(state, pending + drafts)
+            elif use == "ids":
+                actual = target.forward_predictions(state, pending + drafts)
+            else:
+                actual = verify_block_greedy(target, state, pending, drafts, compute_entropy=entropy)
+        if use == "scores":
+            torch.testing.assert_close(actual, expected)
+        elif use == "ids":
+            assert actual == expected.argmax(-1).tolist()
+        else:
+            assert asdict(actual) == dict(asdict(expected), entropy=pytest.approx(expected.entropy, abs=2e-6))
+        assert seen == rows
         assert state.seq_len == native.seq_len
         for i, layer in enumerate(native.cache.layers):
             torch.testing.assert_close(state.cache.storage[i, 0, ..., :state.seq_len, :], layer.keys)

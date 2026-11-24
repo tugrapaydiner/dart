@@ -188,7 +188,7 @@ class _ReplayBlock:
         self.columns = workspace.columns
         self.steps = self.columns[:length]
         self.output = None
-        self.capture_predictions = capture_predictions
+        self.capture_predictions = capture and capture_predictions  # Static callers can select their own rows.
         self.predictions = None
         if capture:
             self._replay_stream = torch.cuda.current_stream(device)
@@ -551,12 +551,14 @@ class CudaGraphTarget(TargetModel):
             block = self._blocks.get(width)
             storage = self._restore_prefix(cache)
             logits = self._run_replay_block(block, input_ids, start=cache.length)
+            predictions = block.predictions if block is not None else None
             if decide is not None:
-                predictions = block.predictions[0].tolist() if block is not None and self.capture_predictions else None
-                kept, output = decide(logits[0], predictions)  # Read scores before the workspace is reused.
+                ids = predictions[0].tolist() if predictions is not None else None
+                kept, output = decide(logits[0], ids)  # Read scores before the workspace is reused.
                 total_len = cache.length + kept
             elif return_predictions:
-                predictions = logits.argmax(dim=-1) if block is None else block.predictions
+                if predictions is None:
+                    predictions = logits.argmax(dim=-1)
                 output = predictions[0].tolist()
             else:
                 output = logits[0].float().clone()  # Later replays must not overwrite a caller's logits.
