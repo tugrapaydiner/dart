@@ -16,6 +16,7 @@ class PrecomputedDrafter:
     """Offline diagnostic only; continuation generation is excluded from timing."""
 
     name = "perfect_draft"
+    requires_entropy = False
 
     def __init__(self, prompt: list[int], continuation: list[int]):
         self.prompt_len = len(prompt)
