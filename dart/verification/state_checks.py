@@ -73,9 +73,34 @@ def _expected_path(drafts, parents, continuation, eos):
 
 
 @torch.inference_mode()
-def _reference_forward(model, tokens):
+def _reference_forward(model, tokens, **kwargs):
     ids = torch.tensor([tokens], dtype=torch.long, device=model.device)
-    return model(input_ids=ids, attention_mask=torch.ones_like(ids), use_cache=True)
+    return model(input_ids=ids, attention_mask=torch.ones_like(ids), use_cache=True, **kwargs)
+
+
+def _round_cache(model, tokens, record_hidden):
+    if not record_hidden:
+        return _reference_forward(model, tokens).past_key_values, None
+    output = _reference_forward(model, tokens, output_hidden_states=True)
+    hidden = output.hidden_states[-1]
+    if hidden.ndim != 3 or hidden.shape[:2] != (1, len(tokens)):
+        raise ValueError("reference returned an invalid hidden state shape")
+    return output.past_key_values, hidden[0, -1].clone()  # Keep only the retained prefix's final row.
+
+
+def _hidden_failures(target, result, expected, *, atol, rtol):
+    if expected is None:
+        return []
+    block, index = target.last_hidden_block, result.hidden_index
+    if not isinstance(block, torch.Tensor) or block.ndim != 2:
+        return [CheckFailure("hidden_state", detail="expected a matrix of hidden rows")]
+    if type(index) is not int or not 0 <= index < len(block):
+        return [CheckFailure("hidden_index", detail="index outside the recorded hidden rows")]
+    row = block[index].to(expected.device)
+    if (row.shape != expected.shape or row.dtype != expected.dtype or not torch.isfinite(row).all()
+            or not torch.allclose(row, expected, atol=atol, rtol=rtol)):
+        return [CheckFailure("hidden_state", index, "selected row differs from the retained prefix")]
+    return []
 
 
 def _check_reference_storage(model, reference):
@@ -265,6 +290,7 @@ def check_verifier_state(
     Use eval-mode models with independent parameter and buffer storage, matching weights and EOS settings.
     This supports HF-compatible caches and ReplayCache. The reference uses native
     generation and fresh full-prefix forwards, never target cache operations.
+    Targets that record hidden states also check the row selected for drafter feedback.
     Reference errors propagate; candidate exceptions are reported as failures.
     inspect_tree checks every packed row in a separate pass, including rejected
     branches, with at most 32 draft nodes. Each reference branch is run separately.
@@ -272,10 +298,10 @@ def check_verifier_state(
     _validate_state_check(case, verifier, atol, rtol, inspect_tree)
     expected, accepted = _round_expectation(target, reference_model, case, verifier)
     cached_tokens = (*case.prefix, case.pending, *expected[:-1])
-    reference_cache = _reference_forward(reference_model, cached_tokens).past_key_values
+    reference_cache, hidden = _round_cache(reference_model, cached_tokens, getattr(target, "record_hidden", False))
     reference_next = _reference_forward(reference_model, (*cached_tokens, expected[-1]))
     return _check_round_state(target, reference_model, case, verifier, expected, accepted,
-                              reference_cache, reference_next, atol, rtol, inspect_tree)
+                              reference_cache, hidden, reference_next, atol, rtol, inspect_tree)
 
 
 @torch.inference_mode()
@@ -309,18 +335,20 @@ def compare_verifier_states(
     first = next(iter(candidates.values()))
     expected, accepted = _round_expectation(first, reference_model, case, verifier)
     cached_tokens = (*case.prefix, case.pending, *expected[:-1])
-    reference_cache = _reference_forward(reference_model, cached_tokens).past_key_values
+    recording = {name for name, target in candidates.items() if getattr(target, "record_hidden", False)}
+    reference_cache, hidden = _round_cache(reference_model, cached_tokens, bool(recording))
     reference_next = _reference_forward(reference_model, (*cached_tokens, expected[-1]))
     results = {}
     for name, target in candidates.items():
         _round_parameters(target, reference_model, case, verifier)  # Recheck before each candidate runs.
         results[name] = _check_round_state(target, reference_model, case, verifier, expected, accepted,
-                                           reference_cache, reference_next, atol, rtol, inspect_tree)
+                                           reference_cache, hidden if name in recording else None,
+                                           reference_next, atol, rtol, inspect_tree)
     return results
 
 
 def _check_round_state(target, reference_model, case, verifier, expected, accepted,
-                       reference_cache, reference_next, atol, rtol, inspect_tree):
+                       reference_cache, hidden, reference_next, atol, rtol, inspect_tree):
     cached_tokens = (*case.prefix, case.pending, *expected[:-1])
     failures, checked = [], 0
     if inspect_tree:
@@ -334,6 +362,7 @@ def _check_round_state(target, reference_model, case, verifier, expected, accept
             result = verify_block_greedy(target, state, case.pending, list(case.drafts))
         actual, length = tuple(result.committed), int(state.seq_len)
         failures.extend(_result_failures(result, expected, accepted, len(case.drafts), target.eos_token_ids))
+        failures.extend(_hidden_failures(target, result, hidden, atol=atol, rtol=rtol))
         failures.extend(_cache_failures(state, reference_cache, len(cached_tokens), atol=atol, rtol=rtol))
         if actual:
             logits = target.forward_block(state, [actual[-1]])[-1]

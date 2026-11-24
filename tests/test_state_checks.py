@@ -7,7 +7,7 @@ from functools import wraps
 import pytest
 import torch
 
-from dart.verification import state_checks
+from dart.verification import state_checks, state_sequences
 from dart.verification.differential import GenerationCase, hf_decoder
 from dart.verification.state_checks import RoundCase, check_verifier_state
 from dart.verification.tree_verify import DraftTree
@@ -36,6 +36,84 @@ def sample(models, rejection=None):
     if rejection is not None:
         drafts[rejection] = (drafts[rejection] + 1) % reference.config.vocab_size
     return RoundCase("chain", prefix, pending, tuple(drafts), (-1, 0, 1, 2))
+
+
+@pytest.mark.parametrize("fault, kind", [
+    ("sibling", "hidden_state"), ("negative", "hidden_index"), ("past_end", "hidden_index"),
+    ("missing", "hidden_state"), ("dtype", "hidden_state"), ("nonfinite", "hidden_state"),
+])
+def test_round_checks_detect_bad_hidden_feedback(models, monkeypatch, fault, kind):
+    target, reference = models
+    case = sample(models)
+    hit = case.drafts[0]
+    case = replace(case, drafts=((hit + 1) % reference.config.vocab_size, hit), parents=(-1, -1))
+    plain = copy.deepcopy(target)
+    target.record_hidden = True
+    verify = state_checks.verify_tree_greedy
+
+    def corrupt(candidate, *args, **kwargs):
+        result = verify(candidate, *args, **kwargs)
+        if candidate is target:
+            block = candidate.last_hidden_block
+            assert result.hidden_index == 2  # The second sibling supplied the bonus.
+            if fault == "sibling":
+                result.hidden_index = 1
+            elif fault == "negative":
+                result.hidden_index = -1
+            elif fault == "past_end":
+                result.hidden_index = len(block)
+            elif fault == "missing":
+                candidate.last_hidden_block = None
+            elif fault == "dtype":
+                candidate.last_hidden_block = block.double()
+            else:
+                block[result.hidden_index].fill_(float("nan"))
+        return result
+
+    monkeypatch.setattr(state_checks, "verify_tree_greedy", corrupt)
+    checks = state_checks.compare_verifier_states({"plain": plain, "recording": target}, reference, case)
+    assert checks["plain"].passed
+    assert checks["recording"].actual == checks["plain"].actual
+    assert [failure.kind for failure in checks["recording"].failures] == [kind]
+
+
+@pytest.mark.parametrize("verifier", ["block", "tree"])
+def test_interleaved_checks_detect_bad_hidden_feedback(models, monkeypatch, verifier):
+    target, reference = models
+    target.record_hidden = True
+    case = sample(models, rejection=0)
+    ops = [state_sequences.StateOperation("a", "prefill", case.prefix),
+           state_sequences.StateOperation("b", "prefill", (12, 13)),
+           state_sequences.StateOperation("a", verifier, (case.pending, *case.drafts),
+                                         parents=case.parents if verifier == "tree" else ()),
+           state_sequences.StateOperation("b", "forward", (14,))]
+    name = f"verify_{verifier}_greedy"
+    verify = getattr(state_sequences, name)
+
+    def corrupt(*args, **kwargs):
+        result = verify(*args, **kwargs)
+        result.hidden_index = 1  # This rejected draft is outside the retained prefix.
+        return result
+
+    monkeypatch.setattr(state_sequences, name, corrupt)
+    report = state_sequences.check_state_sequence(target, reference, ops)
+    assert [(i, f.request, f.failure.kind) for i, step in enumerate(report.steps) for f in step.failures] == [
+        (2, "a", "hidden_state")
+    ]
+
+
+@pytest.mark.parametrize("stop", ["correction", "bonus", "accepted_eos"])
+def test_round_checks_match_hidden_feedback_after_rollback(models, stop):
+    target, reference = models
+    target.record_hidden = True
+    case = sample(models, rejection=1 if stop == "correction" else None)
+    if stop == "accepted_eos":
+        eos = case.drafts[1]
+        target.eos_token_ids = frozenset({eos})
+        reference.generation_config.eos_token_id = eos
+    for verifier in ("block", "tree"):
+        check = check_verifier_state(target, reference, case, verifier=verifier)
+        assert check.passed, check.failures
 
 
 @pytest.mark.parametrize("rejection", [0, 1, 2, 3, None])

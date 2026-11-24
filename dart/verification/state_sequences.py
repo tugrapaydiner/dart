@@ -14,8 +14,10 @@ from dart.verification.state_checks import (
     _cache_failures,
     _cache_pairs,
     _check_reference_storage,
+    _hidden_failures,
     _reference_forward,
     _result_failures,
+    _round_cache,
     _round_expectation,
     _validate_tolerances,
 )
@@ -140,6 +142,7 @@ def check_state_sequence(target, reference_model, operations: Sequence[StateOper
         else:
             prefix = prefixes.get(request, ())
             next_prefix, reference_cache, wanted, expected, accepted = prefix, None, None, None, None
+            hidden = None
             reference_available = action == "prefill" or request in prefixes
             if operation.expect_error is None and reference_available:
                 if max(operation.tokens, default=0) >= vocab:
@@ -157,7 +160,9 @@ def check_state_sequence(target, reference_model, operations: Sequence[StateOper
                     next_prefix = (*prefix, operation.tokens[0], *expected[:-1])
                 if len(next_prefix) > context:
                     raise InvalidCheckCase("operation exceeds the reference context limit")
-                if next_prefix:
+                if expected is not None:
+                    reference_cache, hidden = _round_cache(reference_model, next_prefix, getattr(target, "record_hidden", False))
+                elif next_prefix:
                     output = _reference_forward(reference_model, next_prefix)
                     reference_cache = output.past_key_values
                     if action in {"prefill", "forward"}:
@@ -200,9 +205,10 @@ def check_state_sequence(target, reference_model, operations: Sequence[StateOper
                                 if not torch.allclose(logits.to(wanted.device), wanted, atol=atol, rtol=rtol):
                                     record("logits", "output differs beyond tolerance")
                         if expected is not None:
-                            failures.extend(StateFailure(request, failure) for failure in
-                                            _result_failures(result, expected, accepted, len(operation.tokens) - 1,
-                                                             target.eos_token_ids))
+                            round_failures = _result_failures(result, expected, accepted, len(operation.tokens) - 1,
+                                                              target.eos_token_ids)
+                            round_failures.extend(_hidden_failures(target, result, hidden, atol=atol, rtol=rtol))
+                            failures.extend(StateFailure(request, failure) for failure in round_failures)
                     except Exception as error:
                         record("output", f"{type(error).__name__}: {error}")
         for name, state in states.items():
