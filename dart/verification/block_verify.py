@@ -25,6 +25,7 @@ import torch
 from dart.models.replay import CudaGraphTarget
 from dart.models.target import TargetModel, TargetState, _native_method
 from dart.runtime.types import VerifyResult
+from dart.verification.greedy import _restore_failed_round
 
 
 def verify_block_greedy(
@@ -76,10 +77,14 @@ def verify_block_greedy(
             and _native_method(target.crop, target, CudaGraphTarget._native_crop)):
         return target._verify_block(state, tokens, decide)
 
-    output = forward(state, tokens)
-    kept, result = decide(None, output) if compact else decide(output, None)
-    target.crop(state, base_len + kept)
-    return result
+    try:
+        output = forward(state, tokens)
+        kept, result = decide(None, output) if compact else decide(output, None)
+        target.crop(state, base_len + kept)
+        return result
+    except BaseException:
+        _restore_failed_round(target, state, base_len)
+        raise
 
 
 def _block_predictions(logits, p_len, drafts):

@@ -30,6 +30,20 @@ from dart.models.target import TargetModel, TargetState
 from dart.runtime.types import VerifyResult
 
 
+def _restore_failed_round(target, state, length):
+    if not isinstance(state, TargetState) or state._failed:
+        return
+    try:
+        if state.seq_len == length:
+            return
+        target.last_hidden_block = None
+        target.crop(state, length)
+        if state.seq_len != length:
+            state._failed = True
+    except BaseException:
+        state._failed = True  # Keep the original verification error.
+
+
 def verify_greedy_reference(
     target: TargetModel,
     state: TargetState,
@@ -40,6 +54,15 @@ def verify_greedy_reference(
     pending_block = [pending] if isinstance(pending, int) else list(pending)
     if not pending_block:
         raise ValueError("pending block must contain at least one token")
+    length = state.seq_len if isinstance(state, TargetState) else None
+    try:
+        return _verify_tokens(target, state, pending_block, draft_tokens)
+    except BaseException:
+        _restore_failed_round(target, state, length)
+        raise
+
+
+def _verify_tokens(target, state, pending_block, draft_tokens):
     k = len(draft_tokens)
 
     # Feed the pending block one token at a time, auditing divergence of

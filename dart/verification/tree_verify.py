@@ -41,6 +41,7 @@ import torch
 
 from dart.models.target import TargetModel, TargetState
 from dart.runtime.types import VerifyResult
+from dart.verification.greedy import _restore_failed_round
 
 
 def _check_parent(index: int, parent: int) -> None:
@@ -228,9 +229,7 @@ def verify_tree_greedy(
     pending_block = [pending] if isinstance(pending, int) else list(pending)
     if not pending_block:
         raise ValueError("pending block must contain at least one token")
-    p_len = len(pending_block)
     n = len(draft_tree)
-    base_len = state.seq_len
 
     chain = n == 0 or _is_chain(draft_tree)
     if not chain:
@@ -245,6 +244,16 @@ def verify_tree_greedy(
             result.all_accepted = False
         return result
 
+    base_len = state.seq_len
+    try:
+        return _verify_branches(target, state, pending_block, draft_tree, n, edges, base_len, compute_entropy)
+    except BaseException:
+        _restore_failed_round(target, state, base_len)
+        raise
+
+
+def _verify_branches(target, state, pending_block, draft_tree, n, edges, base_len, compute_entropy):
+    p_len = len(pending_block)
     live = _live_tree_rows(target, draft_tree, base_len + p_len)
     tokens, parents, slots = (draft_tree.tokens, draft_tree.parent, None) if live is None else live
     causal = live is not None and _fits_causal_block(target, p_len, parents)
