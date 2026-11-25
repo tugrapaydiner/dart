@@ -56,9 +56,15 @@ class TimeScheduler(HeuristicScheduler):
         self.counts: dict[str, int] = {}
         self.last_played: dict[str, int] = {}
         self.kv_gb: dict[str, float] = {}
+        self._cache_owner: dict[str, str] = {}
+        self._cache_kv_gb: dict[str, float] = {}
         self.decisions = 0
         self.probe_rounds = 0
         self._last_arm: tuple[str, str] | None = None  # (key, lane) of the latest decision
+
+    def _bind_lane_caches(self, lanes) -> None:
+        owners = {}
+        self._cache_owner = {name: owners.setdefault(id(drafter), name) for name, drafter in lanes.items()}
 
     def observe(self, lane: str, result: VerifyResult, *, round_ms: float,
                 kv_gb: float = 0.0, **_timing) -> None:
@@ -76,6 +82,7 @@ class TimeScheduler(HeuristicScheduler):
         self.counts[key] = self.counts.get(key, 0) + 1
         self.last_played[key] = self.decisions
         self.kv_gb[key] = kv_gb
+        self._cache_kv_gb[self._cache_owner.get(lane, lane)] = kv_gb  # One cache can serve several arms.
 
     def _candidates(self, allowed, state: DecodeState) -> dict[str, tuple[str, int, str | None]]:
         """Map each drafting arm's key to its (lane, draft length, verifier); None keeps the engine's."""
@@ -91,8 +98,12 @@ class TimeScheduler(HeuristicScheduler):
         can_probe = self.max_probe_rounds is None or self.probe_rounds < self.max_probe_rounds
         if not can_probe and len(self.counts) == 1:  # Only the baseline has a cost.
             return baseline
-        arms = {key: arm for key, arm in self._candidates(allowed, state).items()
-                if self.kv_gb.get(key, 0.0) <= self.config.max_gpu_kv_gb}
+        arms = self._candidates(allowed, state)
+        limit = self.config.max_gpu_kv_gb
+        if math.isfinite(limit):
+            over_budget = {owner for owner, size in self._cache_kv_gb.items() if size > limit}
+            arms = {key: arm for key, arm in arms.items() if self.kv_gb.get(key, 0.0) <= limit
+                    and self._cache_owner.get(arm[0], arm[0]) not in over_budget}
         if can_probe:
             for key, arm in arms.items():
                 if key not in self.counts:

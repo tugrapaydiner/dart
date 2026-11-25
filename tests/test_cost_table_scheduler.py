@@ -2,11 +2,12 @@ from __future__ import annotations
 
 import pytest
 
+from dart.drafters.compressed_kv import CompressedKVDrafter
 from dart.drafters.ngram import NGramDrafter
 from dart.runtime import factory
 from dart.runtime.engine import DartEngine
 from dart.runtime.scheduler import SchedulerConfig
-from dart.runtime.time_scheduler import CostTableScheduler
+from dart.runtime.time_scheduler import CostTableScheduler, TimeScheduler
 from dart.runtime.types import DecodeConfig, DecodeState, VerifyResult
 from tests.conftest import build_tiny_target, random_prompt
 
@@ -81,6 +82,65 @@ def test_kv_budget_and_allowed_lanes_limit_arms():
     assert (first.lane, first.draft_len) == ("ar_draft", 2)
     planner.observe("ar_draft", result(2), round_ms=4.0, kv_gb=0.9)
     assert planner.choose_action(state(), allowed={"ar_draft"}).lane == "target_only"
+
+
+@pytest.mark.parametrize(("widths", "verifiers"), [
+    ((2, 4), None),
+    ((2,), ("block", "tree")),
+])
+def test_resident_kv_budget_covers_other_widths_and_verifiers(widths, verifiers):
+    config = SchedulerConfig(available_lanes=["compressed_kv", "ngram"], max_gpu_kv_gb=0.5)
+    planner = CostTableScheduler(config, draft_lengths=widths, verifiers=verifiers, warmup_rounds=1)
+    assert planner.choose_action(state()).lane == "target_only"
+    planner.observe("target_only", result(1), round_ms=10)
+    assert planner.choose_action(state()).lane == "compressed_kv"
+    planner.observe("compressed_kv", result(2), round_ms=4, kv_gb=0.75)
+
+    assert planner.choose_action(state(), allowed={"compressed_kv"}).lane == "target_only"
+    clipped = state()
+    clipped.max_draft_tokens = 1
+    assert planner.choose_action(clipped, allowed={"compressed_kv"}).lane == "target_only"
+    assert planner.probe_rounds == 1
+    assert planner.choose_action(state()).lane == "ngram"
+
+
+def test_resident_kv_budget_covers_an_earlier_fast_arm():
+    config = SchedulerConfig(available_lanes=["compressed_kv"], max_gpu_kv_gb=0.5)
+    planner = CostTableScheduler(config, draft_lengths=(2, 4), warmup_rounds=1, max_probe_rounds=2)
+    planner.choose_action(state())
+    planner.observe("target_only", result(1), round_ms=10)
+    assert planner.choose_action(state()).draft_len == 2
+    planner.observe("compressed_kv", result(2), round_ms=2, kv_gb=0.5)
+    assert planner.choose_action(state()).draft_len == 4  # Exactly at the limit is allowed.
+    planner.observe("compressed_kv", result(3), round_ms=3, kv_gb=0.75)
+
+    assert planner.kv_gb["compressed_kv:2"] == 0.5 and planner.kv_gb["compressed_kv:4"] == 0.75
+    for _ in range(5):
+        assert planner.choose_action(state()).lane == "target_only"
+        planner.observe("target_only", result(1), round_ms=10)
+    assert planner.probe_rounds == 2
+
+
+@pytest.mark.parametrize("policy", [TimeScheduler, CostTableScheduler])
+@pytest.mark.parametrize("shared", [False, True])
+def test_engine_resident_kv_budget_follows_the_cache_owner(policy, shared):
+    target = build_tiny_target()
+    target.eos_token_ids = frozenset()
+    prompt = random_prompt(17, 12)
+    expected = target.greedy_generate(prompt, 24)
+    first = CompressedKVDrafter(target)
+    second = first if shared else CompressedKVDrafter(target)
+    config = SchedulerConfig(available_lanes=["left", "right"], draft_len=2, max_gpu_kv_gb=0.0)
+    options = {"draft_lengths": (2, 4), "verifiers": ("block", "tree")} if policy is CostTableScheduler else {}
+    planner = policy(config, warmup_rounds=1, **options)
+    with DartEngine(target, lanes={"left": first, "right": second}, scheduler=planner) as engine:
+        for _ in range(2):
+            out = engine.generate(prompt, DecodeConfig(max_new_tokens=24))
+            assert out.token_ids == expected
+            drafted = [r.lane for r in out.rounds if r.lane != "target_only"]
+            assert drafted == (["left"] if shared else ["left", "right"])
+            assert planner.probe_rounds == len(drafted)
+            assert first.last_kv_stats["logical_compressed_bytes"] > 0
 
 
 def test_reset_clears_request_state():

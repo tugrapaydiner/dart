@@ -44,6 +44,7 @@ from dart.runtime.metrics import (
     output_hash,
     reset_gpu_memory_stats,
 )
+from dart.runtime.time_scheduler import TimeScheduler
 from dart.runtime.types import (
     DecodeConfig,
     DecodeState,
@@ -450,6 +451,8 @@ class DartEngine:
         if config.max_new_tokens == 0:
             target.validate_prompt(prompt)
             return self._output(config, metrics, run_id, t_start, target, [], [])
+        if isinstance(self.scheduler, TimeScheduler):
+            self.scheduler._bind_lane_caches(self.lanes)
         cleanup.callback(setattr, target, "last_hidden_block", None)
         for drafter in self._all_drafters():
             finish = getattr(drafter, "finish_request", None)
