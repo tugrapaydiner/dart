@@ -309,7 +309,8 @@ def test_tree_tail_selects_only_the_requested_rows(pair, monkeypatch):
     check_cache(a, ar)
 
 
-def test_tree_tail_partial_write_invalidates_only_its_request(pair, monkeypatch):
+@pytest.mark.parametrize('path', [[2, 0], [2]])
+def test_tree_tail_partial_write_invalidates_only_its_request(pair, monkeypatch, path):
     base, target = pair
     a, _ = target.prefill([3, 5, 7])
     target.forward_block(a, [11, 13, 17])
@@ -328,7 +329,7 @@ def test_tree_tail_partial_write_invalidates_only_its_request(pair, monkeypatch)
     with monkeypatch.context() as fault:
         fault.setattr(torch.Tensor, 'copy_', fail)
         with pytest.raises(RuntimeError, match='partial tail write'):
-            target.gather_tree_tail(a, 3, [2, 0])
+            target.gather_tree_tail(a, 3, path)
     with pytest.raises(RuntimeError, match='invalid'):
         target.forward_block(a, [23])
     forward(base, target, ref, other, 'logits', 29)
@@ -425,3 +426,42 @@ def test_selected_tail_failed_restore_reloads_the_request(pair, monkeypatch):
     forward(base, target, ref, state, 'logits', 23)
     check_cache(state, ref)
     assert writes == [(0, 5)]
+
+
+@pytest.mark.parametrize("path,strided,direct", [
+    ([2], False, True), ([2, 3], False, True), ((4, 5, 6), False, True),
+    ([1, 2], False, False), ([3, 2], False, False), ([3, 3], False, False),
+    ([2, 3], True, False),
+])
+@torch.inference_mode()
+def test_disjoint_tree_span_uses_request_storage(pair, monkeypatch, path, strided, direct):
+    base, target = pair
+    state, _ = target.prefill([3, 5, 7, 9, 11, 13, 15])
+    ref, _ = base.prefill([3, 5, 7, 9, 11, 13, 15])
+    forward(base, target, ref, state, 'logits', 17)
+    keep = 1
+    storage = state.cache._buffer.tensor
+    if strided:
+        padded = storage.new_empty((*storage.shape[:-1], 2 * storage.size(-1)))
+        padded[..., ::2].copy_(storage)
+        state.cache.storage = storage = padded[..., ::2]
+    before = storage[..., :state.seq_len, :].clone()
+    expected = before.clone()
+    expected[..., keep:keep + len(path), :] = before[..., [keep + p for p in path], :]
+    sources = []
+    copy_ = torch.Tensor.copy_
+
+    def record(dest, src, *args, **kwargs):
+        if dest.untyped_storage().data_ptr() == storage.untyped_storage().data_ptr():
+            sources.append(src.untyped_storage().data_ptr() == storage.untyped_storage().data_ptr())
+        return copy_(dest, src, *args, **kwargs)
+
+    with monkeypatch.context() as spy:
+        spy.setattr(torch.Tensor, 'copy_', record)
+        target.gather_tree_tail(state, keep, path)
+    assert sources == [direct]
+    assert state.seq_len == keep + len(path)
+    assert torch.equal(storage[..., :before.size(-2), :], expected)
+    base.gather_tree_tail(ref, keep, path)
+    forward(base, target, ref, state, 'predictions', 19)
+    check_cache(state, ref)

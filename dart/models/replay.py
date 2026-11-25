@@ -640,8 +640,14 @@ class CudaGraphTarget(TargetModel):
         if (storage.shape != workspace.shape or storage.device != workspace.device
                 or storage.dtype != workspace.dtype or cache.length > self.capacity):
             raise ValueError("cache storage does not match the prepared replay workspace")
-        offsets = torch.tensor(path, device=storage.device, dtype=torch.long)
-        rows = storage[..., keep_len:cache.length, :].index_select(-2, offsets)  # A path can overlap its destination.
+        first = path[0] if type(path) in (list, tuple) and path else -1
+        if (first >= len(path) and type(storage) is torch.Tensor and storage.is_contiguous()
+                and all(offset == first + i for i, offset in enumerate(path))):
+            start = keep_len + first
+            rows = storage[..., start:start + len(path), :]  # Disjoint spans can copy directly.
+        else:
+            offsets = torch.tensor(path, device=storage.device, dtype=torch.long)
+            rows = storage[..., keep_len:cache.length, :].index_select(-2, offsets)
         shared = min(keep_len, self._resident_prefix_length(cache))
         self._resident_cache = None
         try:
