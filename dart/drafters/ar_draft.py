@@ -29,6 +29,7 @@ from torch import Tensor
 
 from dart.models.target import TargetModel, TargetState
 from dart.runtime.types import VerifyResult
+from dart.verification.sampling import _softmax_with_temperature
 
 
 class ARDrafter:
@@ -133,12 +134,12 @@ class ARDrafter:
         max_tokens = self._budget(committed, max_tokens)
         if max_tokens <= 0:
             return [], None
-        t = max(self.sample_temperature, 1e-6)
+        temperature = self.sample_temperature
         last_logits = self._sync(committed)
         drafts: list[int] = []
         rows: list[Tensor] = []
         for _ in range(max_tokens):
-            q = torch.softmax(last_logits.float() / t, dim=-1)
+            q = _softmax_with_temperature(last_logits, temperature)
             tok = int(torch.multinomial(q, 1, generator=self.gen).item())
             drafts.append(tok)
             rows.append(q)

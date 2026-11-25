@@ -53,7 +53,7 @@ from dart.runtime.types import (
 )
 from dart.verification.block_verify import verify_block_greedy
 from dart.verification.greedy import verify_greedy_reference
-from dart.verification.sampling import verify_block_sampling
+from dart.verification.sampling import _softmax_with_temperature, verify_block_sampling
 from dart.verification.tree_verify import DraftTree, verify_tree_greedy
 
 VerifyFn = Callable[..., VerifyResult]
@@ -462,7 +462,7 @@ class DartEngine:
             if hasattr(d, "after_prefill"):
                 d.after_prefill()
         if sampling:
-            probs = torch.softmax(logits.float() / max(config.temperature, 1e-6), -1)
+            probs = _softmax_with_temperature(logits, config.temperature)
             first = int(torch.multinomial(probs, 1, generator=generator).item())
         else:
             first = int(torch.argmax(logits).item())

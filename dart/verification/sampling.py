@@ -79,7 +79,10 @@ def speculative_accept_step(
 
 def _softmax_with_temperature(logits: Tensor, temperature: float) -> Tensor:
     t = max(float(temperature), 1e-6)
-    return torch.softmax(logits.float() / t, dim=-1)
+    scores = logits.float()
+    if t != 1.0:
+        scores = scores / t
+    return torch.softmax(scores, dim=-1)
 
 
 @torch.inference_mode()

@@ -2,12 +2,17 @@ from __future__ import annotations
 
 import pytest
 import torch
+from torch.utils._python_dispatch import TorchDispatchMode
 
 from dart.drafters.ar_draft import ARDrafter
 from dart.models.target import TargetModel
 from dart.runtime.engine import DartEngine
 from dart.runtime.types import DecodeConfig
-from dart.verification.sampling import speculative_accept_step
+from dart.verification.sampling import (
+    _softmax_with_temperature,
+    speculative_accept_step,
+    verify_block_sampling,
+)
 from tests.conftest import build_tiny_target, random_prompt
 from tests.test_exactness import ConstantDrafter
 
@@ -122,3 +127,47 @@ def test_sampled_distribution_matches_target_on_each_device(target_device, propo
     assert float((empirical - expected).abs().max()) < 0.025
     assert abs(accepted / n - expected_acceptance) < 0.025
     print(f"{target_device}, q={proposal_device}: p={empirical.tolist()}, acceptance={accepted / n:.4f}")
+
+
+@pytest.mark.parametrize("entry", ["prompt", "block", "draft"])
+def test_unit_temperature_avoids_score_division(tiny_target, entry):
+    prompt = [5, 7, 9]
+    vocab = tiny_target.model.config.vocab_size
+    scales = []
+
+    class CountScales(TorchDispatchMode):
+        def __torch_dispatch__(self, func, types, args=(), kwargs=None):
+            if func in (torch.ops.aten.div.Tensor, torch.ops.aten.div.Scalar):
+                scores, scale = args[:2]
+                if scores.ndim and scores.size(-1) == vocab and isinstance(scale, (int, float)):
+                    scales.append(scale)
+            return func(*args, **(kwargs or {}))
+
+    for temperature in (0.5, 1.0):
+        scales.clear()
+        with CountScales():
+            if entry == "prompt":
+                with DartEngine(tiny_target) as engine:
+                    engine.generate(prompt, DecodeConfig(mode="exact_sampling", max_new_tokens=1,
+                                                         temperature=temperature, seed=11))
+            elif entry == "block":
+                state, _ = tiny_target.prefill(prompt)
+                verify_block_sampling(tiny_target, state, 11, [], generator=torch.Generator().manual_seed(11),
+                                      temperature=temperature)
+            else:
+                ARDrafter(tiny_target, sample_temperature=temperature, seed=11).propose_with_probs(prompt, 2)
+        if temperature == 1.0:
+            assert not scales
+        else:
+            assert scales and all(scale == temperature for scale in scales)
+
+
+@pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16, torch.float32, torch.float64])
+@pytest.mark.parametrize("temperature", [0.0, 0.75, 1.0, 2.0])
+def test_strided_sampling_scores_match_fp32_softmax(dtype, temperature):
+    logits = torch.linspace(-3, 3, 72, dtype=dtype).reshape(3, 24)[:, ::2]
+    before = logits.clone()
+    expected = (logits.float() / max(temperature, 1e-6)).softmax(-1)
+    actual = _softmax_with_temperature(logits, temperature)
+    torch.testing.assert_close(actual, expected, rtol=0, atol=0)
+    assert torch.equal(logits, before)
