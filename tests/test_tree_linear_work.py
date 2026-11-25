@@ -9,7 +9,11 @@ from dart.models.replay import CudaGraphTarget
 from dart.verification.greedy import verify_greedy_reference
 from dart.verification.state_checks import _cache_failures, _reference_forward
 from dart.verification.synthetic import _synthetic_models
-from dart.verification.tree_verify import DraftTree, verify_tree_greedy
+from dart.verification.tree_verify import (
+    DraftTree,
+    _index_tree_edges,
+    verify_tree_greedy,
+)
 from tests.test_block_eos_work import CountingTarget
 
 
@@ -91,6 +95,42 @@ def test_tree_walk_uses_merged_parent_indices(eos, committed, path):
     assert result.committed == committed and result.finished == bool(eos)
     assert result.n_draft_accepted == len(path) + bool(eos) and result.n_draft_proposed == len(tree)
     assert target.gathers == [path] and state.seq_len == 3 + len(committed)
+
+
+class UnhashableToken(int):
+    __hash__ = None
+
+
+@pytest.mark.parametrize('scalar', [torch.tensor, UnhashableToken])
+@pytest.mark.parametrize('branched', [False, True])
+@pytest.mark.parametrize('eos', [[], [13]])
+def test_scalar_duplicate_branches_keep_the_longest_path(scalar, branched, eos):
+    tokens, parents = [11, 11, 12, 13, 14], [-1, -1, 1, 2, 3]
+    if branched:
+        tokens, parents = [50, 11, 12, 11, 12, 13, 14], [-1, -1, 1, -1, 3, 4, 5]
+    values = [scalar(token) for token in tokens]
+    tree = DraftTree(values.copy(), parents.copy())
+    target, state = TreeTarget(eos, False), SimpleNamespace(seq_len=3)
+    control, expected_state = TreeTarget(eos, False), SimpleNamespace(seq_len=3)
+
+    expected = verify_tree_greedy(control, expected_state, 10, DraftTree(tokens, parents))
+    result = verify_tree_greedy(target, state, 10, tree)
+
+    assert result.committed == ([11, 12, 13] if eos else [11, 12, 13, 14, 15])
+    assert result == expected and result.hidden_index == expected.hidden_index
+    assert result.entropy == expected.entropy and result.n_draft_proposed == len(values)
+    assert state.seq_len == expected_state.seq_len
+    assert target.calls == control.calls and target.gathers == control.gathers
+    assert tree.parent == parents and all(a is b for a, b in zip(tree.tokens, values))
+
+
+@pytest.mark.parametrize('token', [
+    True, torch.tensor(True), torch.tensor(11.5), torch.tensor([11]), torch.empty((), device='meta'),
+])
+def test_tree_edge_index_leaves_other_inputs_to_the_target(token):
+    tree = DraftTree([11, token], [-1, -1])
+    original, edges = _index_tree_edges(tree)
+    assert original is tree and edges is None
 
 
 def test_tree_walk_compares_nonstandard_sibling_tokens():

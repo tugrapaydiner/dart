@@ -34,6 +34,7 @@ the suite validates the tiny reference target).  Greedy/exact mode only.
 
 from __future__ import annotations
 
+import operator
 from collections.abc import Iterable
 from dataclasses import dataclass
 
@@ -159,14 +160,32 @@ def _is_chain(tree: DraftTree) -> bool:
     )
 
 
+
+def _scalar_edge_id(token) -> int | None:
+    if isinstance(token, int) and type(token) is not bool:
+        if type(token).__eq__ is int.__eq__ and type(token).__int__ is int.__int__:
+            return int(token)
+    if (type(token) is torch.Tensor and token.device.type == "cpu" and token.ndim == 0
+            and token.layout == torch.strided and token.dtype != torch.bool):
+        try:
+            return operator.index(token)
+        except TypeError:
+            pass
+    return None
+
+
 def _index_tree_edges(tree: DraftTree) -> tuple[DraftTree, dict[tuple[int, int], int] | None]:
     if len(tree.parent) != len(tree.tokens):
         return tree, None
     edges = {}
     slots = []
     for index, (parent, token) in enumerate(zip(tree.parent, tree.tokens)):
-        if type(parent) is not int or not -1 <= parent < index or type(token) is not int:
-            return tree, None  # Keep the target's normal input checks.
+        if type(parent) is not int or not -1 <= parent < index:
+            return tree, None
+        if type(token) is not int:
+            token = _scalar_edge_id(token)
+            if token is None:
+                return tree, None  # Keep the target's normal input checks.
         parent = slots[parent] if parent >= 0 else -1
         slots.append(edges.setdefault((parent, token), len(edges)))
     if len(edges) < len(tree):
