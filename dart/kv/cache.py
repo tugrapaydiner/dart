@@ -43,6 +43,8 @@ def quantize_blockwise(x: Tensor, bits: int) -> tuple[Tensor, Tensor, Tensor]:
     """x [B, H, T, D] -> (q uint8 [B,H,T,D], scale [B,H,T,1], zero [B,H,T,1])."""
     if bits < 2 or bits > 8:
         raise ValueError("bits must be in [2, 8]")
+    if x.dtype == torch.float16:
+        x = x.float()  # The range of two half values can overflow FP16.
     levels = (1 << bits) - 1
     mn = x.amin(dim=-1, keepdim=True)
     mx = x.amax(dim=-1, keepdim=True)

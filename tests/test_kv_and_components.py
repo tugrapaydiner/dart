@@ -38,6 +38,34 @@ def test_quantize_roundtrip_error(bits, tol):
     assert err <= tol * span
 
 
+@pytest.mark.parametrize("bits", [2, 3, 4, 6, 8])
+def test_fp16_cache_range_keeps_scales_and_endpoints(bits):
+    rows = torch.tensor([[-65504, -127, 65504], [0, 2**-22, 2**-20], [3, 3, 3]], dtype=torch.float16)
+    q, scale, zero = quantize_blockwise(rows, bits)
+    levels = (1 << bits) - 1
+    span = rows[:, -1:].float() - rows[:, :1].float()
+    torch.testing.assert_close(scale, span.clamp_min(1e-8) / levels, rtol=0, atol=0)
+    torch.testing.assert_close(zero, rows[:, :1].float(), rtol=0, atol=0)
+    assert q[:, 0].tolist() == [0, 0, 0]
+    assert q[:, -1].tolist() == [levels, levels, 0]
+
+    restored = dequantize_blockwise(q, scale, zero, torch.float32)
+    assert torch.all((restored - rows.float()).abs() <= scale * 0.5 + torch.finfo(torch.float32).eps * span)
+
+
+def test_fp16_cache_range_survives_aging_and_crop():
+    cache = QuantizedKVCache(QuantSpec(bits=8, sink_len=0, window_len=1))
+    keys = torch.tensor([[-65504, 65504], [0, 2**-20], [-2, 8]], dtype=torch.float16).view(1, 1, 3, 2)
+    values = keys.flip((-1,))
+    actual = cache.update(keys, values, 0)
+    for got, expected in zip(actual, (keys, values)):
+        torch.testing.assert_close(got, expected, rtol=0, atol=0)
+    cache.crop(1)
+    actual = cache.update(keys[..., 2:, :], values[..., 2:, :], 0)
+    for got, original in zip(actual, (keys, values)):
+        torch.testing.assert_close(got, original[..., [0, 2], :], rtol=0, atol=0)
+
+
 def test_quantstore_append_crop_and_bytes():
     s = QuantStore()
     x = torch.randn(1, 2, 4, 8)
