@@ -25,7 +25,7 @@ import torch
 from dart.models.replay import CudaGraphTarget
 from dart.models.target import TargetModel, TargetState, _native_method
 from dart.runtime.types import VerifyResult
-from dart.verification.greedy import _restore_failed_round
+from dart.verification.greedy import _cpu_greedy_indices, _restore_failed_round
 
 
 def _draft_before_eos(target, base_len: int, pending_len: int, draft_tokens: list[int]) -> list[int]:
@@ -94,18 +94,12 @@ def _block_predictions(logits, p_len, drafts):
     if logits.device.type != "cpu" or logits.size(-1) < 32_000 or torch.get_num_threads() != 1:
         return torch.argmax(logits, dim=-1).tolist()
 
-    def ids(rows):
-        if (type(rows) is torch.Tensor and rows.dtype == torch.float32
-                and rows.layout == torch.strided and rows.stride(-1) == 1):
-            return torch.max(rows, dim=-1).indices.tolist()
-        return torch.argmax(rows, dim=-1).tolist()
-
     if len(drafts) >= 3 and type(drafts[0]) is int:
-        predictions = ids(logits[:p_len])
+        predictions = _cpu_greedy_indices(logits[:p_len]).tolist()
         if predictions[-1] == drafts[0]:  # A first rejection leaves the remaining rows unused.
-            predictions.extend(ids(logits[p_len:]))
+            predictions.extend(_cpu_greedy_indices(logits[p_len:]).tolist())
         return predictions
-    return ids(logits)
+    return _cpu_greedy_indices(logits).tolist()
 
 
 def _block_result(tokens, p_len, draft_tokens, preds, eos_ids, logits=None):

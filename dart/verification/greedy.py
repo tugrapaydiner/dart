@@ -30,6 +30,13 @@ from dart.models.target import TargetModel, TargetState
 from dart.runtime.types import VerifyResult
 
 
+def _cpu_greedy_indices(rows: torch.Tensor) -> torch.Tensor:
+    if (type(rows) is torch.Tensor and rows.dtype == torch.float32
+            and rows.layout == torch.strided and rows.stride(-1) == 1):
+        return torch.max(rows, dim=-1).indices
+    return torch.argmax(rows, dim=-1)
+
+
 def _restore_failed_round(target, state, length):
     if not isinstance(state, TargetState) or state._failed:
         return

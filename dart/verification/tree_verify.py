@@ -41,7 +41,7 @@ import torch
 
 from dart.models.target import TargetModel, TargetState
 from dart.runtime.types import VerifyResult
-from dart.verification.greedy import _restore_failed_round
+from dart.verification.greedy import _cpu_greedy_indices, _restore_failed_round
 
 
 def _check_parent(index: int, parent: int) -> None:
@@ -264,7 +264,10 @@ def _verify_branches(target, state, pending_block, draft_tree, n, edges, base_le
         logits = (target.forward_block(state, pending_block + tokens) if causal
                   else target.forward_tree(state, pending_block, tokens, parents))
         path_only = logits.device.type == "cpu" and logits.size(-1) >= 32_000 and torch.get_num_threads() == 1
-        preds = torch.argmax(logits[:p_len] if path_only else logits, dim=-1).tolist()
+        if path_only:
+            preds = _cpu_greedy_indices(logits[:p_len]).tolist()
+        else:
+            preds = torch.argmax(logits, dim=-1).tolist()
 
     # Divergence audit of unverified pending tokens (approx-mode metadata;
     # 0 in exact mode by construction) - matches the block verifier.
@@ -298,7 +301,7 @@ def _verify_branches(target, state, pending_block, draft_tree, n, edges, base_le
             break
         cur_parent = nxt
         cur_row = p_len + (nxt if slots is None else slots[nxt])
-        want = int(torch.argmax(logits[cur_row], dim=-1)) if path_only else preds[cur_row]
+        want = int(_cpu_greedy_indices(logits[cur_row])) if path_only else preds[cur_row]
 
     m = len(path)
     if accepted_eos:

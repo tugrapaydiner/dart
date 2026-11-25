@@ -230,6 +230,41 @@ def test_cpu_tree_prediction_rows(monkeypatch, prediction_threads, vocab, pendin
     assert state.seq_len == 3 + len(pending) + len(committed) - 1
 
 
+@pytest.mark.parametrize('peak', [2., float('inf'), float('nan')])
+@pytest.mark.parametrize('pending', [[4], [4, 5]])
+def test_wide_tree_winners_follow_the_accepted_path(monkeypatch, peak, pending):
+    vocab = 32_003
+    tree = DraftTree.from_branches([[19], [7, 9]])
+    target = TreeTarget([], False)
+    target.model.config.vocab_size = vocab
+    state = SimpleNamespace(seq_len=3)
+    reached = []
+    maximum = torch.max
+
+    def forward(state, prefix, tokens, parents):
+        size = len(prefix)
+        state.seq_len += size + len(tokens)
+        scores = torch.zeros((size + len(tokens), vocab))
+        scores[0, 5] = 1
+        for row, token in ((size - 1, 7), (size + 1, 9), (size + 2, 21)):
+            scores[row, [token, vocab - 1]] = peak  # The first tied token wins.
+        return scores
+
+    def record(rows, dim):
+        reached.append((rows.storage_offset() // vocab, rows.numel() // vocab))
+        return maximum(rows, dim=dim)
+
+    monkeypatch.setattr(target, 'forward_tree', forward)
+    monkeypatch.setattr(torch, 'get_num_threads', lambda: 1)
+    monkeypatch.setattr(torch, 'max', record)
+    result = verify_tree_greedy(target, state, pending, tree, compute_entropy=False)
+    size = len(pending)
+    assert result.committed == [7, 9, 21] and result.n_draft_accepted == 2
+    assert result.pending_divergence == 0 and result.hidden_index == size + 2
+    assert state.seq_len == 3 + size + 2 and target.gathers == [[1, 2]]
+    assert reached == [(0, size), (size + 1, 1), (size + 2, 1)]
+
+
 @pytest.mark.parametrize('layout', ['accepted', 'correction', 'bonus', 'empty'])
 @pytest.mark.parametrize('compact,entropy', [(False, True), (True, False), (True, True)])
 @torch.inference_mode()
