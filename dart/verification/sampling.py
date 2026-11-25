@@ -62,7 +62,7 @@ def speculative_accept_step(
         accept_prob = min(1.0, p_d / q_d)
     u = float(torch.rand((), device=p.device, generator=generator))
     if u < accept_prob:
-        return draft_token, True
+        return int(draft_token), True
 
     if q_row is None:
         residual = p.clone()

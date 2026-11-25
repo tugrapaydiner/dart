@@ -111,20 +111,19 @@ def _block_result(tokens, p_len, draft_tokens, preds, eos_ids, logits=None):
 
     off = p_len - 1  # preds[off + i] is the target's choice for drafts[i]
     m = 0
+    committed = []
     accepted_eos = False
     while m < k and draft_tokens[m] == preds[off + m]:
-        is_eos = draft_tokens[m] in eos_ids
+        token = int(preds[off + m])
+        committed.append(token)
         m += 1
-        if is_eos:
+        if token in eos_ids:
             accepted_eos = True
             break
 
-    if accepted_eos:
-        committed = list(draft_tokens[:m])
-        finished = True
-    else:
-        committed = list(draft_tokens[:m]) + [preds[off + m]]
-        finished = committed[-1] in eos_ids
+    if not accepted_eos:
+        committed.append(int(preds[off + m]))
+    finished = committed[-1] in eos_ids
 
     # Predictive entropy at the decided (on-trajectory) position - drives the
     # scheduler's entropy gate.  Row off+m produced the correction/bonus token;

@@ -86,8 +86,8 @@ def _verify_tokens(target, state, pending_block, draft_tokens):
     for i in range(k):
         if draft_tokens[i] != pred:
             break
-        accepted.append(draft_tokens[i])
-        if draft_tokens[i] in target.eos_token_ids:
+        accepted.append(pred)
+        if pred in target.eos_token_ids:
             # EOS accepted: stop here; no correction/bonus token needed.
             return VerifyResult(
                 committed=list(accepted),
@@ -97,7 +97,7 @@ def _verify_tokens(target, state, pending_block, draft_tokens):
                 finished=True,
                 pending_divergence=divergence,
             )
-        logits = target.forward_block(state, [draft_tokens[i]])
+        logits = target.forward_block(state, [pred])
         pred = int(torch.argmax(logits[-1]).item())
 
     m = len(accepted)

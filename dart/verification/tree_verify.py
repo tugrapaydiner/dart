@@ -281,10 +281,11 @@ def _verify_branches(target, state, pending_block, draft_tree, n, edges, base_le
     cur_parent = -1
     cur_row = p_len - 1           # row deciding the next position
     accepted_eos = False
-    correction: int | None = None
-    want = preds[cur_row]
+    committed = []
+    want = int(preds[cur_row])
     while True:
-        if edges is not None and type(want) is int:
+        committed.append(want)
+        if edges is not None:
             nxt = edges.get((cur_parent, want))
         else:
             if children is None:  # Some scalar IDs compare by value but hash by identity.
@@ -293,23 +294,17 @@ def _verify_branches(target, state, pending_block, draft_tree, n, edges, base_le
                     children.setdefault(p, []).append(i)
             nxt = next((c for c in children.get(cur_parent, ()) if draft_tree.tokens[c] == want), None)
         if nxt is None:
-            correction = want  # target's own token; may terminate the walk
             break
         path.append(nxt)
-        if draft_tree.tokens[nxt] in target.eos_token_ids:
+        if want in target.eos_token_ids:
             accepted_eos = True
             break
         cur_parent = nxt
         cur_row = p_len + (nxt if slots is None else slots[nxt])
-        want = int(_cpu_greedy_indices(logits[cur_row])) if path_only else preds[cur_row]
+        want = int(_cpu_greedy_indices(logits[cur_row]) if path_only else preds[cur_row])
 
     m = len(path)
-    if accepted_eos:
-        committed = [draft_tree.tokens[i] for i in path]
-        finished = True
-    else:
-        committed = [draft_tree.tokens[i] for i in path] + [int(correction)]
-        finished = committed[-1] in target.eos_token_ids
+    finished = committed[-1] in target.eos_token_ids
 
     if accepted_eos or not compute_entropy:
         entropy = 0.0

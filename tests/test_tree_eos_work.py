@@ -6,7 +6,9 @@ import pytest
 import torch
 
 from dart.models.replay import CudaGraphTarget
+from dart.verification.block_verify import verify_block_greedy
 from dart.verification.greedy import verify_greedy_reference
+from dart.verification.sampling import verify_block_sampling
 from dart.verification.state_checks import _cache_failures, _reference_forward
 from dart.verification.synthetic import _synthetic_models
 from dart.verification.tree_verify import DraftTree, verify_tree_greedy
@@ -354,3 +356,44 @@ def test_pruned_block_limit_preserves_tree_admission(monkeypatch, constraint):
     else:
         result = verify_tree_greedy(target, state, 10, tree)
         assert result.committed == [11, 12, 13] and target.trees == [([11, 12], [-1, 0])]
+
+
+@pytest.mark.parametrize("verifier", ["reference", "block", "tree", "sampling"])
+@pytest.mark.parametrize("tensor_ids", [False, True])
+@pytest.mark.parametrize("terminal", [False, True])
+def test_accepted_scalar_ids_match_integer_proposals(models, verifier, tensor_ids, terminal):
+    class UnhashableToken(int):
+        __hash__ = None
+
+    target, reference = models
+    prefix, pending = [5, 7, 9], [4, 6]
+    tokens = []
+    for _ in range(4):
+        logits = _reference_forward(reference, prefix + pending + tokens).logits[0, -1]
+        tokens.append(int(logits.argmax()))
+    assert tokens[2] not in tokens[:2]
+    target.eos_token_ids = frozenset([tokens[2]]) if terminal else frozenset()
+
+    def run(drafts):
+        state, _ = target.prefill(prefix)
+        if verifier == "tree":
+            wrong = (tokens[0] + 1) % target.model.config.vocab_size
+            tree = DraftTree([wrong, *drafts], [-1, -1, 1, 2])
+            result = verify_tree_greedy(target, state, pending, tree)
+        elif verifier == "sampling":
+            result = verify_block_sampling(target, state, pending, drafts, temperature=1e-5,
+                                           generator=torch.Generator().manual_seed(19))
+        else:
+            verify = verify_block_greedy if verifier == "block" else verify_greedy_reference
+            result = verify(target, state, pending, drafts)
+        return state, result
+
+    _, expected = run(tokens[:3])
+    wrap = torch.tensor if tensor_ids else UnhashableToken
+    state, actual = run([wrap(token) for token in tokens[:3]])
+    assert actual == expected and actual.finished == terminal
+    assert actual.committed == (tokens[:3] if terminal else tokens)
+    assert all(type(token) is int for token in actual.committed)
+    live = prefix + pending + actual.committed[:-1]
+    native = _reference_forward(reference, live)
+    assert not _cache_failures(state, native.past_key_values, len(live), atol=2e-6, rtol=2e-5)
