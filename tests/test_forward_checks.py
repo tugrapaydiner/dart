@@ -222,7 +222,7 @@ def test_reference_independence_and_eval_mode_are_required(fault):
 
 
 @pytest.mark.parametrize("entry", ["block", "tree", "comparison", "sequence", "forward"])
-@pytest.mark.parametrize("alias", ["parameter", "buffer_view"])
+@pytest.mark.parametrize("alias", ["parameter", "buffer_view", "external_overlap"])
 def test_state_reference_storage_is_checked_before_inference(entry, alias):
     target, reference = models()
     independent = copy.deepcopy(target)
@@ -231,11 +231,18 @@ def test_state_reference_storage_is_checked_before_inference(entry, alias):
         reference.lm_head.weight = torch.nn.Parameter(weight.detach(), requires_grad=False)
         with torch.no_grad():
             weight.zero_()  # This changes the reference too.
-    else:
+    elif alias == "buffer_view":
         backing = torch.arange(4)
         target.model.register_buffer("probe", backing[:3])
         reference.register_buffer("probe", backing[1:])
         assert target.model.probe.data_ptr() != reference.probe.data_ptr()
+    else:
+        backing = bytearray(16)
+        left = torch.frombuffer(backing, dtype=torch.float32, count=3)
+        right = torch.frombuffer(backing, dtype=torch.float32, offset=8)
+        target.model.register_buffer("probe", left)
+        reference.register_parameter("probe", torch.nn.Parameter(right))
+        assert left.untyped_storage().data_ptr() != right.untyped_storage().data_ptr()
 
     calls = []
     case = RoundCase("round", (5, 7), 11, (13,), (-1,))
@@ -250,6 +257,20 @@ def test_state_reference_storage_is_checked_before_inference(entry, alias):
             else:
                 check_verifier_state(target, reference, case, verifier=entry, inspect_tree=entry == "tree")
     assert not calls
+
+
+@pytest.mark.parametrize("reverse", [False, True])
+def test_adjacent_external_storage_can_be_checked(reverse):
+    target, reference = models()
+    backing = bytearray(16)
+    a = torch.frombuffer(backing, dtype=torch.int16, count=4)
+    b = torch.frombuffer(backing, dtype=torch.uint8, offset=8)
+    if reverse:
+        a, b = b, a
+    target.model.register_buffer("probe", a)
+    target.model.register_buffer("probe_alias", a[1:])
+    reference.register_buffer("probe", b)
+    assert check_forward_paths(target, reference, (5, 7), (11,)).passed
 
 
 def test_state_reference_storage_is_rechecked_between_candidates(monkeypatch):

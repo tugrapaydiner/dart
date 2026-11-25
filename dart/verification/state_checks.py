@@ -104,12 +104,20 @@ def _hidden_failures(target, result, expected, *, atol, rtol):
 
 
 def _check_reference_storage(model, reference):
-    def storages(module):
-        return ((tensor.device, tensor.untyped_storage().data_ptr())
-                for tensor in chain(module.parameters(), module.buffers()) if tensor.numel())
+    devices = {}
+    for owner, module in enumerate((model, reference)):
+        for tensor in chain(module.parameters(), module.buffers()):
+            if tensor.numel():
+                storage = tensor.untyped_storage()
+                start = storage.data_ptr()
+                devices.setdefault(tensor.device, []).append((start, start + storage.nbytes(), owner))
 
-    if not set(storages(reference)).isdisjoint(storages(model)):
-        raise ValueError("target and reference must not share tensor storage")
+    for ranges in devices.values():
+        ends = [0, 0]
+        for start, end, owner in sorted(ranges):
+            if start < ends[1 - owner]:
+                raise ValueError("target and reference must not share tensor storage")
+            ends[owner] = max(ends[owner], end)  # Views within one model may overlap.
 
 
 def _cache_pairs(cache, *, read_only=False):
