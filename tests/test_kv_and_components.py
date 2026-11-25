@@ -74,6 +74,82 @@ def test_quantized_kv_cache_ages_and_crops():
     assert k2.size(-2) == 6
 
 
+def _cache_size_read_reference(cache):
+    total = 0
+    for store in cache._kq + cache._vq:
+        if store.q is None:
+            continue
+        batch, heads, tokens, width = store.q.shape
+        bits = sum(store.bits_per_token.to(torch.int64).flatten().tolist())
+        total += bits * batch * heads * width // 8 + 8 * batch * heads * tokens
+    return total + sum(t.numel() * t.element_size() for t in cache._kw + cache._vw if t is not None)
+
+
+@pytest.mark.parametrize("width", [3, 8])
+def test_cache_size_read_batches_current_widths_after_crop(width, monkeypatch):
+    cache = QuantizedKVCache(QuantSpec(bits=3, sink_len=1, window_len=2))
+    rows = torch.arange(9 * width, dtype=torch.float32).reshape(1, 1, 9, width)
+    for layer in range(3):
+        cache.update(rows + layer, rows.flip((-1,)), layer)
+    reads = []
+    for crop in (9, 6, 3):
+        cache.crop(crop)
+        store = cache._vq[1]
+        store.bits_per_token[0] = 5  # Public width tensors can change between reports.
+        expected = _cache_size_read_reference(cache)
+        reads.clear()
+        with monkeypatch.context() as patch:
+            for name in ("item", "tolist"):
+                original = getattr(torch.Tensor, name)
+
+                def counted(tensor, *args, fn=original, **kwargs):
+                    reads.append(tensor.numel())
+                    return fn(tensor, *args, **kwargs)
+
+                patch.setattr(torch.Tensor, name, counted)
+            stats = cache.stats()
+        assert stats["logical_compressed_bytes"] == expected
+        assert len(reads) <= 1
+
+
+@pytest.mark.parametrize("override", ["instance", "class"])
+def test_cache_size_read_keeps_custom_accounting(override, monkeypatch):
+    cache = QuantizedKVCache(QuantSpec(window_len=0))
+    rows = torch.ones(1, 2, 4, 3)
+    for layer in range(2):
+        cache.update(rows, rows, layer)
+    stores = cache._kq + cache._vq
+    calls = []
+    original = QuantStore.logical_bytes
+
+    def measure(store):
+        calls.append(id(store))
+        return original(store) + 17
+
+    expected = _cache_size_read_reference(cache)
+    if override == "class":
+        monkeypatch.setattr(QuantStore, "logical_bytes", measure)
+        measured = stores
+    else:
+        monkeypatch.setattr(stores[-1], "logical_bytes", lambda: measure(stores[-1]))
+        measured = stores[-1:]
+    assert cache.stats()["logical_compressed_bytes"] == expected + 17 * len(measured)
+    assert calls == [id(store) for store in measured]
+
+
+def test_cache_size_read_accepts_mixed_store_layouts():
+    cache = QuantizedKVCache(QuantSpec(window_len=1))
+    assert cache.stats()["logical_compressed_bytes"] == 0
+    rows = torch.ones(1, 2, 6, 3)
+    cache.update(rows, rows, 2)  # Earlier layers still have empty stores.
+    cache.update(rows[..., :3, :], rows[..., :3, :], 0)
+    bits = cache._vq[2].bits_per_token
+    cache._vq[2].bits_per_token = torch.stack((bits, bits), dim=1)[:, 0]
+    assert cache.stats()["logical_compressed_bytes"] == _cache_size_read_reference(cache)
+    cache._vq[2].bits_per_token = bits.float() + 0.75
+    assert cache.stats()["logical_compressed_bytes"] == _cache_size_read_reference(cache)
+
+
 @pytest.mark.parametrize("keyword", ["cache_kwargs", "kwargs"])
 def test_quantized_cache_accepts_attention_metadata(keyword):
     spec = QuantSpec(bits=4, sink_len=1, window_len=2)

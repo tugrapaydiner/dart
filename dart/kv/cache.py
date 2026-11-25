@@ -121,10 +121,33 @@ class QuantStore:
     def logical_bytes(self) -> int:
         if self.q is None:
             return 0
+        bits = int(self.bits_per_token.to(torch.int64).sum().item())
+        return self._bytes_from_bits(bits)
+
+    def _bytes_from_bits(self, bits: int) -> int:
         b, h, t, d = self.q.shape
-        data_bits = int(self.bits_per_token.to(torch.int64).sum().item()) * b * h * d
-        meta = b * h * t * 2 * 4  # scale + zero, fp32
-        return data_bits // 8 + meta
+        return bits * b * h * d // 8 + b * h * t * 8  # Scale and zero are FP32.
+
+
+_NATIVE_LOGICAL_BYTES = QuantStore.logical_bytes
+
+
+def _store_bytes(stores) -> int:
+    if QuantStore.logical_bytes is _NATIVE_LOGICAL_BYTES and all(
+        type(s) is QuantStore and "logical_bytes" not in vars(s) for s in stores
+    ):
+        live = [s for s in stores if s.q is not None]
+        if len(live) > 1:
+            widths = [s.bits_per_token for s in live]
+            first = widths[0]
+            if type(first) is Tensor and first.device.type in ("cpu", "cuda") and all(
+                type(w) is Tensor and w.ndim == 1 and w.layout == torch.strided
+                and w.dtype == torch.uint8 and w.shape == first.shape and w.device == first.device
+                for w in widths
+            ):
+                totals = torch.stack(widths).sum(dim=1, dtype=torch.int64).tolist()  # One host read.
+                return sum(s._bytes_from_bits(bits) for s, bits in zip(live, totals))
+    return sum(s.logical_bytes() for s in stores)
 
 
 @dataclass
@@ -336,7 +359,7 @@ class QuantizedKVCache(DynamicCache):
 
     # -------------------------------------------------------------- #
     def stats(self) -> dict:
-        logical = sum(s.logical_bytes() for s in self._kq + self._vq)
+        logical = _store_bytes(self._kq + self._vq)
         fp_bytes = sum(
             t.numel() * t.element_size()
             for t in self._kw + self._vw
