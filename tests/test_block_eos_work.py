@@ -420,3 +420,41 @@ def test_sampling_terminal_requires_pending_before_forward():
         sampling.verify_block_sampling(target, state, [], [11, 12], generator=rng)
     assert target.calls == [] and state.seq_len == 3
     assert torch.equal(rng.get_state(), original_rng)
+
+
+@pytest.mark.parametrize("drafts,eos,vocab,threads,full_q,rows", [
+    ([40, 12, 13, 14], (), 32_003, 1, False, [1]),
+    ([11, 40, 13, 14], (), 32_003, 1, False, [1, 4]),
+    ([11, 12, 13, 14], (), 32_003, 1, False, [1, 4]),
+    ([40, 12, 13, 14], (11,), 32_003, 1, False, [1]),
+    ([11, 12, 13, 14], (13,), 32_003, 1, False, [1, 2]),
+    ([40, 12, 13, 14], (), 31_999, 1, False, [5]),
+    ([40, 12, 13, 14], (), 32_003, 2, False, [5]),
+    ([40, 12, 13, 14], (), 32_003, 1, True, [5]),
+    ([40], (), 32_003, 1, False, [2]),
+])
+def test_sampling_reached_probabilities(drafts, eos, vocab, threads, full_q, rows, monkeypatch):
+    target = CountingTarget(eos, False, vocab)
+    control = CountingTarget(eos, False, vocab)
+    pending = [8, 10]
+    state, other = SimpleNamespace(seq_len=3), SimpleNamespace(seq_len=3)
+    rng = torch.Generator().manual_seed(17)
+    reference_rng = torch.Generator().manual_seed(17)
+    q = torch.zeros(len(drafts), vocab)
+    q[torch.arange(len(drafts)), drafts] = 1  # The same one-hot proposal in dense form.
+    expected = sampling.verify_block_sampling(control, other, pending, drafts, q, reference_rng, 0.75)
+    sizes = []
+    softmax = sampling._softmax_with_temperature
+
+    def normalize(scores, temperature):
+        sizes.append(scores.numel() // vocab)
+        return softmax(scores, temperature)
+
+    monkeypatch.setattr(torch, "get_num_threads", lambda: threads)
+    monkeypatch.setattr(sampling, "_softmax_with_temperature", normalize)
+    result = sampling.verify_block_sampling(target, state, pending, drafts, q if full_q else None, rng, 0.75)
+
+    assert result == expected and state.seq_len == other.seq_len
+    assert torch.equal(rng.get_state(), reference_rng.get_state())
+    assert target.calls == control.calls
+    assert sizes == rows

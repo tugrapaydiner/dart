@@ -85,6 +85,16 @@ def _softmax_with_temperature(logits: Tensor, temperature: float) -> Tensor:
     return torch.softmax(scores, dim=-1)
 
 
+def _sampling_rows(logits: Tensor, temperature: float, one_hot: bool):
+    if (one_hot and type(logits) is Tensor and logits.device.type == "cpu" and logits.layout == torch.strided
+            and logits.size(0) >= 3 and logits.size(-1) >= 32_000 and torch.get_num_threads() == 1):
+        yield _softmax_with_temperature(logits[0], temperature)
+        logits = logits[1:]  # Only an accepted first draft can reach the suffix.
+    probs = _softmax_with_temperature(logits, temperature)
+    for index in range(probs.size(0)):
+        yield probs[index]
+
+
 @torch.inference_mode()
 def verify_block_sampling(
     target: TargetModel,
@@ -108,7 +118,7 @@ def verify_block_sampling(
     forward_drafts = _draft_before_eos(target, base_len, pending_len, drafts)
     try:
         logits = target.forward_block(state, pending_block + forward_drafts)
-        probs = _softmax_with_temperature(logits[pending_len - 1:], temperature)
+        probs = _sampling_rows(logits[pending_len - 1:], temperature, draft_probs is None)
         result = _sample_drafts(probs, draft_probs, drafts, target.eos_token_ids, pending_len, generator)
         target.crop(state, base_len + pending_len - 1 + len(result.committed))
         return result
@@ -123,9 +133,10 @@ def _sample_drafts(probs, draft_probs, drafts, eos_ids, pending_len, generator):
     n_accepted = 0
     finished = False
     for i in range(k):
+        row = next(probs)
         q_row = draft_probs[i] if draft_probs is not None else None
         token, accepted = speculative_accept_step(
-            probs[i], q_row, drafts[i], generator
+            row, q_row, drafts[i], generator
         )
         committed.append(token)
         if accepted:
@@ -136,7 +147,7 @@ def _sample_drafts(probs, draft_probs, drafts, eos_ids, pending_len, generator):
         if not accepted:
             break
     else:
-        bonus = int(torch.multinomial(probs[k], 1, generator=generator).item())
+        bonus = int(torch.multinomial(next(probs), 1, generator=generator).item())
         committed.append(bonus)
         finished = bonus in eos_ids
 
