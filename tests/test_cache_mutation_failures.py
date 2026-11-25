@@ -7,7 +7,12 @@ from dart.models import target as target_module
 from dart.verification import block_verify
 from dart.verification.block_verify import verify_block_greedy
 from dart.verification.greedy import verify_greedy_reference
-from dart.verification.state_checks import _cache_pairs, _reference_forward
+from dart.verification.sampling import verify_block_sampling
+from dart.verification.state_checks import (
+    _cache_failures,
+    _cache_pairs,
+    _reference_forward,
+)
 from dart.verification.synthetic import _synthetic_models
 from dart.verification.tree_verify import DraftTree, verify_tree_greedy
 from tests.test_replay_predictions import execution as execution
@@ -291,3 +296,62 @@ def test_failed_greedy_round_preserves_a_replay_request(execution, monkeypatch, 
     assert caught.value is error and state.seq_len == 4 and not state._failed
     _, expected = base.prefill([5, 6, 7, 11, 13])
     torch.testing.assert_close(target.forward_block(state, [13])[-1], expected, atol=2e-6, rtol=2e-5)
+
+
+@pytest.mark.parametrize("execution", ["cpu_static"], indirect=True)
+@pytest.mark.parametrize("prepared", [False, True])
+@pytest.mark.parametrize("failure", ["missing_row", "cancelled_bonus"])
+def test_sampling_round_failure_retries_from_the_original_prefix(execution, monkeypatch, prepared, failure):
+    base, replay = execution
+    target = replay if prepared else base
+    prompt, pending, drafts = [5, 6, 7], [11, 13], [17, 19]
+    state, _ = target.prefill(prompt)
+    fresh, _ = target.prefill(prompt)
+    native = _reference_forward(base.model, prompt + pending + drafts)
+    q = native.logits[0, -3:-1].float().softmax(-1)
+    rng = torch.Generator().manual_seed(17)
+
+    with monkeypatch.context() as fault:
+        if failure == "cancelled_bonus":
+            def cancel(*args, **kwargs):
+                raise Cancelled("bonus sample interrupted")
+            fault.setattr(torch, "multinomial", cancel)
+            with pytest.raises(Cancelled, match="bonus sample"):
+                verify_block_sampling(target, state, pending, drafts, q, rng)
+        else:
+            with pytest.raises(IndexError):
+                verify_block_sampling(target, state, pending, drafts, q[:1], rng)
+
+    prefix = _reference_forward(base.model, prompt)
+    assert not state._failed
+    assert not _cache_failures(state, prefix.past_key_values, len(prompt), atol=2e-6, rtol=2e-5)
+    control_rng = torch.Generator().set_state(rng.get_state())  # Both retries start at the next draw.
+    actual = verify_block_sampling(target, state, pending, drafts, q, rng)
+    expected = verify_block_sampling(target, fresh, pending, drafts, q, control_rng)
+    assert actual == expected and actual.n_draft_accepted == len(drafts)
+    assert torch.equal(rng.get_state(), control_rng.get_state())
+    assert not _cache_failures(state, native.past_key_values, len(prompt + pending + drafts), atol=2e-6, rtol=2e-5)
+
+
+@pytest.mark.parametrize("cleanup", ["raises", "leaves_extra_rows"])
+def test_sampling_round_failure_preserves_the_error_if_rollback_fails(models, monkeypatch, cleanup):
+    target, _ = models
+    target.record_hidden = True
+    state, _ = target.prefill([5, 6, 7])
+    error = Cancelled("bonus sample interrupted")
+
+    def cancel(*args, **kwargs):
+        raise error
+
+    def bad_crop(*args):
+        if cleanup == "raises":
+            raise RuntimeError("rollback failed")
+
+    monkeypatch.setattr(torch, "multinomial", cancel)
+    monkeypatch.setattr(target, "crop", bad_crop)
+    with pytest.raises(Cancelled) as caught:
+        verify_block_sampling(target, state, 11, [])
+    assert caught.value is error and state._failed
+    assert target.last_hidden_block is None
+    with pytest.raises(RuntimeError, match="cache is invalid"):
+        target.forward_block(state, [13])

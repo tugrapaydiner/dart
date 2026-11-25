@@ -32,6 +32,7 @@ from torch import Tensor
 from dart.models.target import TargetModel, TargetState
 from dart.runtime.types import VerifyResult
 from dart.verification.block_verify import _draft_before_eos
+from dart.verification.greedy import _restore_failed_round
 
 
 def speculative_accept_step(
@@ -93,18 +94,28 @@ def verify_block_sampling(
 ) -> VerifyResult:
     """Sampling analogue of verify_block_greedy: one target pass checks the
     whole block; KV for rejected suffixes is cropped.  Same state contract
-    as the greedy verifiers (see verification/greedy.py)."""
+    as the greedy verifiers (see verification/greedy.py). A failed decision
+    rolls back the request cache. Random draws already made stay consumed."""
     pending_block = [pending] if isinstance(pending, int) else list(pending)
     if not pending_block:
         raise ValueError("pending block must contain at least one token")
     drafts = list(draft_tokens)
-    k = len(drafts)
     base_len = state.seq_len
+    pending_len = len(pending_block)
+    forward_drafts = _draft_before_eos(target, base_len, pending_len, drafts)
+    try:
+        logits = target.forward_block(state, pending_block + forward_drafts)
+        probs = _softmax_with_temperature(logits[pending_len - 1:], temperature)
+        result = _sample_drafts(probs, draft_probs, drafts, target.eos_token_ids, pending_len, generator)
+        target.crop(state, base_len + pending_len - 1 + len(result.committed))
+        return result
+    except BaseException:
+        _restore_failed_round(target, state, base_len)
+        raise
 
-    forward_drafts = _draft_before_eos(target, base_len, len(pending_block), drafts)
-    logits = target.forward_block(state, pending_block + forward_drafts)
-    probs = _softmax_with_temperature(logits[len(pending_block) - 1:], temperature)
 
+def _sample_drafts(probs, draft_probs, drafts, eos_ids, pending_len, generator):
+    k = len(drafts)
     committed: list[int] = []
     n_accepted = 0
     finished = False
@@ -116,7 +127,7 @@ def verify_block_sampling(
         committed.append(token)
         if accepted:
             n_accepted += 1
-        if token in target.eos_token_ids:
+        if token in eos_ids:
             finished = True
             break
         if not accepted:
@@ -124,14 +135,13 @@ def verify_block_sampling(
     else:
         bonus = int(torch.multinomial(probs[k], 1, generator=generator).item())
         committed.append(bonus)
-        finished = bonus in target.eos_token_ids
+        finished = bonus in eos_ids
 
-    target.crop(state, base_len + len(pending_block) - 1 + len(committed))
     return VerifyResult(
         committed=committed,
         n_draft_proposed=k,
         n_draft_accepted=n_accepted,
         all_accepted=(n_accepted == k),
         finished=finished,
-        hidden_index=len(pending_block) + len(committed) - 2,
+        hidden_index=pending_len + len(committed) - 2,
     )
