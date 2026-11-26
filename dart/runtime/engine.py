@@ -33,6 +33,7 @@ from typing import Callable, Optional
 
 import torch
 
+from dart.drafters.ar_draft import ARDrafter
 from dart.drafters.base import Drafter, NullDrafter
 from dart.drafters.compressed_kv import CompressedKVDrafter
 from dart.kv.prefetch import SyncPrefetcher, ThreadPrefetcher
@@ -544,7 +545,8 @@ class DartEngine:
                 t0 = time.perf_counter()
                 per_round = min(draft_len, max_draft)
                 build_draft = self._round_drafts
-                if (type(drafter) is CompressedKVDrafter and drafter.dm is target and drafter._state is None
+                if ((type(drafter) is ARDrafter or (type(drafter) is CompressedKVDrafter and drafter._state is None))
+                        and drafter.dm is target
                         and config.mode == "exact" and not park_kv and self._propose is _PROPOSE
                         and _native_method(getattr(build_draft, "_profiled_method", build_draft), self, _ROUND_DRAFTS)):
                     build_draft = partial(build_draft, verified_state=state)

@@ -184,3 +184,79 @@ def test_verified_draft_prefix_is_used_during_profiling(monkeypatch):
                                  reference="draft", repeats=1)
     assert lengths[:2] == [len(prompt), 1]
     assert report["samples"][0]["verify_target_calls"] > 0
+
+
+@pytest.mark.parametrize("verifier", ["block", "tree"])
+def test_shared_ar_prefix_only_forwards_the_pending_token(verifier):
+    target = build_tiny_target()
+    target.eos_token_ids = frozenset()
+    prompt = random_prompt(213, 8)
+    expected = target.greedy_generate(prompt, 10)
+    widths = []
+
+    def record(module, args, kwargs):
+        widths.append(kwargs["input_ids"].size(-1))
+
+    record._dart_observer = True
+    with target.model.register_forward_pre_hook(record, with_kwargs=True):
+        with DartEngine(target, ARDrafter(target), verifier=verifier) as engine:
+            result = engine.generate(prompt, DecodeConfig(max_new_tokens=10, draft_len=2))
+    assert result.token_ids == expected
+    assert widths == [len(prompt)] + [1, 1, 3] * 3
+
+
+@pytest.mark.parametrize("setting", ["different_model", "sampling", "hidden", "hook", "custom_forward"])
+def test_shared_ar_prefix_respects_draft_execution(monkeypatch, setting):
+    target = build_tiny_target()
+    draft_model = build_tiny_target(seed=9) if setting == "different_model" else target
+    target.eos_token_ids = draft_model.eos_token_ids = frozenset()
+    draft = ARDrafter(draft_model)
+    prompt = random_prompt(214, 8)
+    widths = []
+
+    def record(module, args, kwargs):
+        widths.append(kwargs["input_ids"].size(-1))
+
+    record._dart_observer = setting != "hook"
+    if setting == "hidden":
+        target.record_hidden = True
+    if setting == "custom_forward":
+        forward = target.forward_block
+        monkeypatch.setattr(target, "forward_block", lambda state, tokens: forward(state, tokens))
+    mode = "exact_sampling" if setting == "sampling" else "exact"
+    with draft_model.model.register_forward_pre_hook(record, with_kwargs=True), DartEngine(target, draft) as engine:
+        engine.generate(prompt, DecodeConfig(mode=mode, max_new_tokens=6, draft_len=2, seed=17))
+    assert len(prompt) + 1 in widths
+
+
+def test_shared_ar_prefix_keeps_owned_cache_and_reuses_one_token_extensions(monkeypatch):
+    target = build_tiny_target()
+    draft = ARDrafter(target)
+    prefix = random_prompt(215, 8)
+    with torch.inference_mode():
+        source, _ = target.prefill(prefix)
+        draft._reuse_verified_prefix(source, prefix + [3], 1)
+        old = draft._state
+        assert draft._processed == prefix and old.seq_len == len(prefix)
+        for left, right in zip(old.cache.layers, source.cache.layers, strict=True):
+            for owned, original in ((left.keys, right.keys), (left.values, right.values)):
+                assert torch.equal(owned, original)
+                assert owned.untyped_storage().data_ptr() != original.untyped_storage().data_ptr()
+        draft._reuse_verified_prefix(source, prefix + [3], 1)
+        assert draft._state is old
+        target.forward_block(source, [3, 4])
+        clone = torch.Tensor.clone
+
+        def interrupt(tensor, *args, **kwargs):
+            if tensor is source.cache.layers[-1].keys:
+                raise RuntimeError("interrupted copy")
+            return clone(tensor, *args, **kwargs)
+
+        with monkeypatch.context() as hooks:
+            hooks.setattr(torch.Tensor, "clone", interrupt)
+            with pytest.raises(RuntimeError, match="interrupted copy"):
+                draft._reuse_verified_prefix(source, prefix + [3, 4, 5], 1)
+        assert draft._state is old and old.seq_len == len(prefix) and draft._processed == prefix
+        draft._reuse_verified_prefix(source, prefix + [3, 4, 5], 1)
+        assert draft._state.seq_len == source.seq_len == len(prefix) + 2
+        assert draft._processed == prefix + [3, 4]

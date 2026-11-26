@@ -26,21 +26,10 @@ from __future__ import annotations
 from typing import Optional
 
 import torch
-from torch.nn.modules import module as nn_module
-from transformers.cache_utils import DynamicCache, DynamicLayer
 
 from dart.drafters.ar_draft import ARDrafter
 from dart.kv.cache import QuantizedKVCache, QuantSpec
-from dart.models.target import (
-    _TARGET_FORWARD,
-    _TARGET_PREFILL,
-    TargetModel,
-    TargetState,
-    _native_method,
-)
-
-_TARGET_BLOCK = TargetModel.forward_block
-_TARGET_RUN = TargetModel._run_model
+from dart.models.target import TargetModel, TargetState
 
 
 class CompressedKVDrafter(ARDrafter):
@@ -88,33 +77,11 @@ class CompressedKVDrafter(ARDrafter):
     @torch.inference_mode()
     def _reuse_verified_prefix(self, source: TargetState, committed: list[int], width: int) -> None:
         length = len(committed) - 1  # The pending token still needs a draft forward.
-        target = self.dm
         if (self._state is not None or width < 1 or length < 1 or length + width > self.spec.window_len
-                or self.store_factory is not None or type(target) is not TargetModel or target.record_hidden
-                or target.dtype != torch.float32 or not target._native_cpu_llama()
-                or type(source) is not TargetState or source._failed or type(source.cache) is not DynamicCache):
+                or self.store_factory is not None):
             return
-        for owner, method, original in (
-            (self, self.propose, _COMPRESSED_PROPOSE), (self, self._sync, _AR_SYNC),
-            (self, self._make_cache, _MAKE_CACHE), (target, target.prefill, _TARGET_PREFILL),
-            (target, target.forward_block, _TARGET_BLOCK), (target, target._forward, _TARGET_FORWARD),
-            (target, target._run_model, _TARGET_RUN),
-        ):
-            if not _native_method(getattr(method, "_profiled_method", method), owner, original):
-                return
-        if nn_module._global_forward_hooks or nn_module._global_forward_pre_hooks:
-            return
-        for module in target.model.modules():
-            if (module.training or "forward" in vars(module)
-                    or any(not getattr(hook, "_dart_observer", False) for hooks in
-                           (module._forward_hooks, module._forward_pre_hooks) for hook in hooks.values())):
-                return
-
-        layers = source.cache.layers
-        if len(layers) != target.model.config.num_hidden_layers or any(
-            type(layer) is not DynamicLayer or layer.get_seq_length() != length
-            or layer.keys.dtype != torch.float32 or layer.values.dtype != torch.float32 for layer in layers
-        ):
+        layers = self._verified_layers(source, length, _COMPRESSED_PROPOSE, _MAKE_CACHE)
+        if not layers:
             return
         cache = self._make_cache()
         for i, layer in enumerate(layers):
@@ -158,5 +125,4 @@ class CompressedKVDrafter(ARDrafter):
 
 
 _COMPRESSED_PROPOSE = CompressedKVDrafter.propose
-_AR_SYNC = ARDrafter._sync
 _MAKE_CACHE = CompressedKVDrafter._make_cache
