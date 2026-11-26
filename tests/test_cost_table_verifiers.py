@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from functools import wraps
 from importlib.metadata import version
 
 import pytest
@@ -95,3 +96,125 @@ def test_factory_reads_the_verifier_menu():
     with engine:
         assert engine.scheduler.verifiers == ("block", "tree")
         engine.generate([5, 6, 7, 5, 6, 7], DecodeConfig(max_new_tokens=6))
+
+
+class PlainDraft:
+    name = "plain"
+    requires_entropy = False
+
+    def propose(self, committed, max_tokens):
+        return [committed[-1]] * max_tokens
+
+    def observe(self, result):
+        pass
+
+
+@pytest.mark.parametrize("menu", [("block", "tree"), ("tree", "block")])
+def test_chain_verifier_probe_reaches_a_different_lane(menu):
+    target = build_tiny_target()
+    target.eos_token_ids = frozenset()
+    prompt = [5, 6, 7, 5, 6, 8, 5, 6]
+    policy = CostTableScheduler(SchedulerConfig(available_lanes=["plain", "ngram"]), draft_lengths=(2,),
+                                verifiers=menu, warmup_rounds=1, max_probe_rounds=3, retry_interval=128)
+    lanes = {"plain": PlainDraft(), "ngram": NGramDrafter(tree_width=3)}
+    with DartEngine(target, lanes=lanes, scheduler=policy) as engine:
+        output = engine.generate(prompt, DecodeConfig(max_new_tokens=20))
+        assert output.token_ids == target.greedy_generate(prompt, 20)
+        assert list(policy.counts)[:4] == ["target_only", f"plain:2:{menu[0]}", f"ngram:2:{menu[0]}",
+                                           f"ngram:2:{menu[1]}"]
+        assert policy.probe_rounds == 3
+        lanes["plain"] = NGramDrafter(tree_width=2)
+        engine.generate(prompt, DecodeConfig(max_new_tokens=12))
+        assert {f"plain:2:{v}" for v in menu} <= set(policy.counts)
+
+
+@pytest.mark.parametrize("menu", [("block", "tree"), ("tree", "block")])
+def test_chain_verifier_probe_keeps_clipped_tree_width(menu):
+    policy = CostTableScheduler(SchedulerConfig(available_lanes=["a", "b"]), draft_lengths=(8, 2),
+                                verifiers=menu)
+    current = state()
+    current.chain_only_lanes = frozenset({"a"})
+    current.max_tree_nodes = 3
+    arms = set(policy._candidates(None, current).values())
+    assert arms == {("a", 8, "block"), ("a", 3, "tree"), ("a", 2, menu[0]),
+                    ("b", 8, "block"), ("b", 3, "tree"), ("b", 2, "block"), ("b", 2, "tree")}
+    current.max_tree_nodes = 0
+    assert set(policy._candidates({"a"}, current).values()) == {("a", 8, "block"), ("a", 2, "block")}
+
+
+def test_chain_verifier_probe_reuses_a_tree_width_when_the_output_budget_shrinks():
+    policy = CostTableScheduler(SchedulerConfig(available_lanes=["a"]), draft_lengths=(8,),
+                                verifiers=("block", "tree"), warmup_rounds=1)
+    current = state()
+    current.chain_only_lanes = frozenset({"a"})
+    current.max_tree_nodes = 3
+    for _ in range(3):
+        action = policy.choose_action(current)
+        policy.observe(action.lane, result(1), round_ms=1.0)
+    assert set(policy.counts) == {"target_only", "a:8:block", "a:3:tree"}
+    current.max_draft_tokens = 3
+    policy.choose_action(current)
+    assert policy.probe_rounds == 2
+
+
+@pytest.mark.parametrize("override", ["verify", "_resolve_verifier", "_round_drafts", "_propose"])
+def test_chain_verifier_probe_preserves_custom_dispatch(monkeypatch, override):
+    policy = planner()
+    with DartEngine(build_tiny_target(), lanes={"ngram": PlainDraft()}, scheduler=policy) as engine:
+        native = getattr(engine, override)
+
+        @wraps(native)
+        def custom(*args, **kwargs):
+            return native(*args, **kwargs)
+
+        monkeypatch.setattr(engine, override, custom)
+        for step in range(3):
+            _, _, _, lane = engine._pick_lane(DecodeConfig(), 8, step)
+            policy.observe(lane, result(1), round_ms=1.0)
+    assert set(policy.counts) == {"target_only", "ngram:2:block", "ngram:2:tree"}
+
+
+def test_chain_verifier_probe_keeps_dynamic_tree_providers():
+    class DynamicDraft(PlainDraft):
+        def __getattr__(self, name):
+            if name == "propose_tree":
+                return self.propose
+            raise AttributeError(name)
+
+    policy = planner()
+    with DartEngine(build_tiny_target(), lanes={"ngram": DynamicDraft()}, scheduler=policy) as engine:
+        for step in range(3):
+            _, _, _, lane = engine._pick_lane(DecodeConfig(), 8, step)
+            policy.observe(lane, result(1), round_ms=1.0)
+    assert set(policy.counts) == {"target_only", "ngram:2:block", "ngram:2:tree"}
+
+
+def test_chain_verifier_probe_leaves_an_unselected_tree_hook_alone():
+    class LazyTree(PlainDraft):
+        @property
+        def propose_tree(self):
+            raise AssertionError("tree hook was read before its lane was selected")
+
+    policy = planner()
+    with DartEngine(build_tiny_target(), lanes={"ngram": LazyTree()}, scheduler=policy) as engine:
+        for step in range(3):
+            _, _, _, lane = engine._pick_lane(DecodeConfig(), 8, step)
+            policy.observe(lane, result(1), round_ms=1.0)
+    assert "ngram:2:tree" in policy.counts
+
+
+def test_chain_verifier_probe_keeps_the_same_choices_under_profiling():
+    from benchmarks.profiling import profile_methods
+
+    target = build_tiny_target()
+    target.eos_token_ids = frozenset()
+    config = DecodeConfig(max_new_tokens=16)
+    policy = planner(max_probe_rounds=2)
+    with DartEngine(target, lanes={"ngram": PlainDraft()}, scheduler=policy) as engine:
+        def method(prompt):
+            return engine.generate(prompt, config)
+
+        report = profile_methods({"timed": method}, [[5, 6, 5, 6]], target, {"timed": engine},
+                                 reference="timed", repeats=1)
+    assert set(policy.counts) == {"target_only", "ngram:2:block", "ngram:4:block"}
+    assert report["samples"][0]["verify_target_calls"] > 0

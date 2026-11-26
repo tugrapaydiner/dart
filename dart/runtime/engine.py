@@ -26,7 +26,7 @@ import uuid
 from collections.abc import Iterable
 from contextlib import ExitStack, closing
 from functools import partial
-from inspect import Parameter, signature, unwrap
+from inspect import Parameter, getattr_static, signature, unwrap
 from itertools import islice
 from sys import maxsize
 from typing import Callable, Optional
@@ -36,7 +36,7 @@ import torch
 from dart.drafters.base import Drafter, NullDrafter
 from dart.kv.prefetch import SyncPrefetcher, ThreadPrefetcher
 from dart.kv.residency import ResidencyStats, move_cache
-from dart.models.target import TargetModel, prefill_for_generation
+from dart.models.target import TargetModel, _native_method, prefill_for_generation
 from dart.runtime.metrics import (
     DecodeMetrics,
     TraceLogger,
@@ -44,7 +44,7 @@ from dart.runtime.metrics import (
     output_hash,
     reset_gpu_memory_stats,
 )
-from dart.runtime.time_scheduler import TimeScheduler
+from dart.runtime.time_scheduler import CostTableScheduler, TimeScheduler
 from dart.runtime.types import (
     DecodeConfig,
     DecodeState,
@@ -199,6 +199,25 @@ class DartEngine:
         st = drafter.kv_stats()
         return st.get("logical_compressed_bytes", 0) / 1e9 if st else 0.0
 
+    def _chain_only_lanes(self, allowed: set[str]) -> frozenset[str]:
+        for method, native in ((self._round_drafts, _ROUND_DRAFTS), (self._resolve_verifier, _RESOLVE_VERIFIER)):
+            if not _native_method(getattr(method, "_profiled_method", method), self, native):
+                return frozenset()
+        if self._propose is not _PROPOSE:
+            return frozenset()
+        for name, native in (("block", verify_block_greedy), ("tree", verify_tree_greedy)):
+            if (self.verify if name == self.verifier_name else _VERIFIERS[name]) is not native:
+                return frozenset()
+
+        plain = set()
+        for name in allowed:
+            drafter = self.lanes[name]
+            cls = type(drafter)
+            if (cls.__getattribute__ is object.__getattribute__ and not hasattr(cls, "__getattr__")
+                    and getattr_static(cls, "propose_tree", None) is None and not hasattr(drafter, "propose_tree")):
+                plain.add(name)
+        return frozenset(plain)
+
     def _pick_lane(
         self, config: DecodeConfig, prompt_len: int, generated_len: int,
         entropy_ewma: float = 0.0,
@@ -232,6 +251,8 @@ class DartEngine:
             max_tree_nodes=config.max_tree_nodes,
             default_verifier=self.verifier_name,
         )
+        if isinstance(self.scheduler, CostTableScheduler) and len(self.scheduler.verifiers or ()) == 2:
+            s.chain_only_lanes = self._chain_only_lanes(allowed)
         action = self.scheduler.choose_action(s, allowed=allowed)
         d = self.lanes.get(action.lane, self._null)
         n = action.canvas_len if action.canvas_len > 0 else action.draft_len
@@ -629,3 +650,8 @@ class DartEngine:
             unverified_tokens=unverified_tokens, divergence_total=divergence_total,
             trailing_unverified=max(0, len(pending_block) - 1), res_stats=res_stats, kv_gb=kv_gb,
         )
+
+
+_ROUND_DRAFTS = DartEngine._round_drafts
+_RESOLVE_VERIFIER = DartEngine._resolve_verifier
+_PROPOSE = DartEngine._propose

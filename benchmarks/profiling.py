@@ -73,6 +73,7 @@ def profile_methods(
         @wraps(resolve)
         def wrapped(*args, **kwargs):
             return timer(observe(resolve(*args, **kwargs)), "verify_ms")
+        wrapped._profiled_method = resolve
         return wrapped
 
     expected = [list(tokens(methods[reference](prompt))) for prompt in prompts]
@@ -99,6 +100,7 @@ def profile_methods(
                             return call(*args, **kwargs)
                         finally:
                             totals[phase] += (stamp() - start) * 1_000
+                    run._profiled_method = call
                     return run
 
                 with ExitStack() as stack:

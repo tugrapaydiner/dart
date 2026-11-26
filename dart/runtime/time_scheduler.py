@@ -159,8 +159,8 @@ class CostTableScheduler(TimeScheduler):
     must beat by ``min_time_saving``. Diffusion arms use the selected length as
     their canvas budget too. Lengths are gated and clipped to the round budget
     before forming keys, so equivalent choices share one cost estimate. Tree
-    budgets also respect the request's node cap. All arms share the request's
-    probe budget.
+    budgets also respect the request's node cap. Lanes known to execute the
+    same chain with either verifier share a probe at matching widths.
     """
 
     requires_free_memory = False
@@ -200,4 +200,13 @@ class CostTableScheduler(TimeScheduler):
                         continue
                     key = f"{lane}:{size}" + (f":{verifier}" if verifier is not None else "")
                     arms[key] = (lane, size, verifier)
+
+        if state.chain_only_lanes and self.verifiers and len(self.verifiers) == 2:
+            first, second = self.verifiers
+            for key, (lane, size, verifier) in list(arms.items()):
+                if lane in state.chain_only_lanes and verifier == second:
+                    other = f"{lane}:{size}:{first}"
+                    if other in arms:
+                        keep_measured = key in self.counts and other not in self.counts
+                        del arms[other if keep_measured else key]
         return arms
