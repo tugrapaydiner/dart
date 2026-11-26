@@ -34,7 +34,6 @@ the suite validates the tiny reference target).  Greedy/exact mode only.
 
 from __future__ import annotations
 
-import operator
 from collections.abc import Iterable
 from dataclasses import dataclass
 
@@ -42,7 +41,11 @@ import torch
 
 from dart.models.target import TargetModel, TargetState
 from dart.runtime.types import VerifyResult
-from dart.verification.greedy import _cpu_greedy_indices, _restore_failed_round
+from dart.verification.greedy import (
+    _cpu_greedy_indices,
+    _restore_failed_round,
+    _scalar_token_id,
+)
 
 
 def _check_parent(index: int, parent: int) -> None:
@@ -161,19 +164,6 @@ def _is_chain(tree: DraftTree) -> bool:
 
 
 
-def _scalar_edge_id(token) -> int | None:
-    if isinstance(token, int) and type(token) is not bool:
-        if type(token).__eq__ is int.__eq__ and type(token).__int__ is int.__int__:
-            return int(token)
-    if (type(token) is torch.Tensor and token.device.type == "cpu" and token.ndim == 0
-            and token.layout == torch.strided and token.dtype != torch.bool):
-        try:
-            return operator.index(token)
-        except TypeError:
-            pass
-    return None
-
-
 def _index_tree_edges(tree: DraftTree) -> tuple[DraftTree, dict[tuple[int, int], int] | None]:
     if len(tree.parent) != len(tree.tokens):
         return tree, None
@@ -183,7 +173,7 @@ def _index_tree_edges(tree: DraftTree) -> tuple[DraftTree, dict[tuple[int, int],
         if type(parent) is not int or not -1 <= parent < index:
             return tree, None
         if type(token) is not int:
-            token = _scalar_edge_id(token)
+            token = _scalar_token_id(token)
             if token is None:
                 return tree, None  # Keep the target's normal input checks.
         parent = slots[parent] if parent >= 0 else -1
@@ -193,31 +183,29 @@ def _index_tree_edges(tree: DraftTree) -> tuple[DraftTree, dict[tuple[int, int],
     return tree, edges
 
 
-def _live_tree_rows(target, tree: DraftTree, context_len: int):
+def _live_tree_rows(target, tree: DraftTree, edges, context_len: int):
     eos = target.eos_token_ids
-    if not eos or not any(type(token) is int and token in eos for token in tree.tokens):
+    if not eos or edges is None or not any(token in eos for _, token in edges):
         return None
     config = getattr(getattr(target, "model", None), "config", None)
     vocab = getattr(config, "vocab_size", None)
-    if type(vocab) is not int or len(tree.parent) != len(tree.tokens) or any(
-        type(token) is not int or not 0 <= token < vocab for token in tree.tokens
-    ):
-        return None  # Keep normal admission for unknown or invalid inputs.
+    if type(vocab) is not int:
+        return None
     depths = []
-    for index, parent in enumerate(tree.parent):
-        if type(parent) is not int or not -1 <= parent < index:
-            return None
+    for parent, token in edges:
+        if not 0 <= token < vocab:
+            return None  # The full forward checks invalid IDs.
         depths.append(0 if parent < 0 else depths[parent] + 1)
     length = context_len + max(depths) + 1
     for limit in (getattr(config, "max_position_embeddings", None), getattr(target, "context_limit", None)):
         if limit is not None and (type(limit) is not int or length > limit):
             return None
     tokens, parents, slots = [], [], {}
-    for index, (token, parent) in enumerate(zip(tree.tokens, tree.parent)):
+    for index, (parent, token) in enumerate(edges):
         if token in eos or (parent >= 0 and parent not in slots):
             continue  # EOS and its descendants never supply a decision row.
         slots[index] = len(tokens)
-        tokens.append(token)
+        tokens.append(tree.tokens[index])
         parents.append(-1 if parent < 0 else slots[parent])
     return tokens, parents, slots
 
@@ -273,7 +261,7 @@ def verify_tree_greedy(
 
 def _verify_branches(target, state, pending_block, draft_tree, n, edges, base_len, compute_entropy):
     p_len = len(pending_block)
-    live = _live_tree_rows(target, draft_tree, base_len + p_len)
+    live = _live_tree_rows(target, draft_tree, edges, base_len + p_len)
     tokens, parents, slots = (draft_tree.tokens, draft_tree.parent, None) if live is None else live
     causal = live is not None and _fits_causal_block(target, p_len, parents)
     path_only = False

@@ -397,3 +397,67 @@ def test_accepted_scalar_ids_match_integer_proposals(models, verifier, tensor_id
     live = prefix + pending + actual.committed[:-1]
     native = _reference_forward(reference, live)
     assert not _cache_failures(state, native.past_key_values, len(live), atol=2e-6, rtol=2e-5)
+
+
+@pytest.mark.parametrize("mode", ["block", "tree", "sampling"])
+@pytest.mark.parametrize("accepted", [False, True])
+@pytest.mark.parametrize("tensor_ids", [False, True])
+def test_scalar_terminal_work_matches_integer_rows(mode, accepted, tensor_ids):
+    class Token(int):
+        __hash__ = None
+
+    eos = 12 if accepted else 50
+    parents = [-1, 0, -1, 2, 3]
+    ids = [50, 51, 11, 12, 13] if mode == "tree" else ([11, 12, 13] if accepted else [50, 51, 52])
+
+    def run(values):
+        target = TreeTarget([eos], False)
+        state = SimpleNamespace(seq_len=3)
+        gen = torch.Generator().manual_seed(11)
+        if mode == "tree":
+            result = verify_tree_greedy(target, state, [9, 10], DraftTree(values, parents))
+        elif mode == "block":
+            result = verify_block_greedy(target, state, [9, 10], values)
+        else:
+            result = verify_block_sampling(target, state, [9, 10], values, generator=gen, temperature=1e-4)
+        return result, state.seq_len, gen.get_state(), target
+
+    wrap = torch.tensor if tensor_ids else Token
+    expected, length, rng, plain = run(ids)
+    actual, kept, state, target = run([wrap(v) for v in ids])
+    assert actual == expected and actual.hidden_index == expected.hidden_index and kept == length
+    assert torch.equal(state, rng)
+    assert target.calls == plain.calls and target.trees == plain.trees
+
+
+@pytest.mark.parametrize("dtype", [torch.int16, torch.uint8])
+@pytest.mark.parametrize("full,accepted", [(False, True), (False, False), (True, True), (True, False)])
+def test_scalar_terminal_work_sampling_indices(dtype, full, accepted):
+    from dart.verification.sampling import speculative_accept_step
+
+    token = 2
+    p = torch.tensor([0., 0., 1.] if accepted else [1., 0., 0.])
+    q = torch.tensor([0., 0., 1.]) if full else None
+    gen = torch.Generator().manual_seed(7)
+    control = torch.Generator().manual_seed(7)
+    expected = speculative_accept_step(p, q, token, control)
+    assert speculative_accept_step(p, q, torch.tensor(token, dtype=dtype), gen) == expected
+    assert expected == ((2, True) if accepted else (0, False))
+    assert torch.equal(gen.get_state(), control.get_state())
+
+
+@pytest.mark.parametrize("mode", ["block", "tree", "sampling"])
+def test_scalar_terminal_work_checks_skipped_ids(models, monkeypatch, mode):
+    target, _ = models
+    target.eos_token_ids = frozenset({2})
+    state, _ = target.prefill([5, 7])
+    ids = [torch.tensor(2), torch.tensor(target.model.config.vocab_size), torch.tensor(8)]
+    monkeypatch.setattr(target.model, "forward", lambda **kwargs: pytest.fail("invalid token reached the model"))
+    with pytest.raises(ValueError, match="outside the model vocabulary"):
+        if mode == "tree":
+            verify_tree_greedy(target, state, 10, DraftTree(ids, [-1, 0, -1]))
+        elif mode == "block":
+            verify_block_greedy(target, state, 10, ids)
+        else:
+            verify_block_sampling(target, state, 10, ids)
+    assert state.seq_len == 2 and not state._failed

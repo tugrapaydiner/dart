@@ -298,9 +298,9 @@ def test_eos_preserves_full_block_limits(models, verify, pending, drafts, execut
             target.close()
 
 
-@pytest.mark.parametrize('suffix', [[3.5], [True], [torch.tensor(4)]])
+@pytest.mark.parametrize('suffix,rows', [([3.5], 3), ([True], 3), ([torch.tensor(4)], 1)])
 @torch.inference_mode()
-def test_converted_suffix_keeps_existing_execution(models, monkeypatch, suffix):
+def test_terminal_suffix_work_depends_on_token_type(models, monkeypatch, suffix, rows):
     target, _ = models
     target.eos_token_ids = frozenset([2])
     state, _ = target.prefill([5, 7, 9])
@@ -312,7 +312,7 @@ def test_converted_suffix_keeps_existing_execution(models, monkeypatch, suffix):
 
     monkeypatch.setattr(target, 'forward_block', observe)
     verify_block_greedy(target, state, 10, [2] + suffix)
-    assert len(calls) == 1 and len(calls[0]) == 3
+    assert len(calls) == 1 and len(calls[0]) == rows
 
 
 @pytest.mark.parametrize('context,width,rows', [(8, 5, 3), (None, None, 3), ('8', 5, 5), (8, True, 5)])

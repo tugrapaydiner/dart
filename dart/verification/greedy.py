@@ -24,10 +24,27 @@ Postcondition (L = len(result.committed)):
 
 from __future__ import annotations
 
+import operator
+
 import torch
 
 from dart.models.target import TargetModel, TargetState
 from dart.runtime.types import VerifyResult
+
+
+def _scalar_token_id(token) -> int | None:
+    if type(token) is int:
+        return token
+    if isinstance(token, int) and type(token) is not bool:
+        if type(token).__eq__ is int.__eq__ and type(token).__int__ is int.__int__:
+            return int(token)
+    if (type(token) is torch.Tensor and token.device.type == "cpu" and token.ndim == 0
+            and token.layout == torch.strided and token.dtype != torch.bool):
+        try:
+            return operator.index(token)
+        except TypeError:
+            pass
+    return None
 
 
 def _cpu_greedy_indices(rows: torch.Tensor) -> torch.Tensor:

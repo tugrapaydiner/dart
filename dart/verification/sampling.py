@@ -32,7 +32,7 @@ from torch import Tensor
 from dart.models.target import TargetModel, TargetState
 from dart.runtime.types import VerifyResult
 from dart.verification.block_verify import _draft_before_eos
-from dart.verification.greedy import _restore_failed_round
+from dart.verification.greedy import _restore_failed_round, _scalar_token_id
 
 
 def speculative_accept_step(
@@ -48,6 +48,10 @@ def speculative_accept_step(
     Exactness requires only that ``draft_token`` was actually sampled
     from ``q_row`` (trivially true for one-hot).
     """
+    if type(draft_token) is not int:
+        token_id = _scalar_token_id(draft_token)
+        if token_id is not None:
+            draft_token = token_id  # A byte tensor would index probabilities as a mask.
     p_d = float(p[draft_token])
     q_d = 1.0 if q_row is None else float(q_row[draft_token])
     if q_d <= 0.0:

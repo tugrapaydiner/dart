@@ -25,12 +25,19 @@ import torch
 from dart.models.replay import CudaGraphTarget
 from dart.models.target import TargetModel, TargetState, _native_method
 from dart.runtime.types import VerifyResult
-from dart.verification.greedy import _cpu_greedy_indices, _restore_failed_round
+from dart.verification.greedy import (
+    _cpu_greedy_indices,
+    _restore_failed_round,
+    _scalar_token_id,
+)
 
 
 def _draft_before_eos(target, base_len: int, pending_len: int, draft_tokens: list[int]) -> list[int]:
+    if len(draft_tokens) == 0 or not target.eos_token_ids:
+        return draft_tokens
     for index, token in enumerate(draft_tokens):
-        if type(token) is int and token in target.eos_token_ids:
+        token_id = token if type(token) is int else _scalar_token_id(token)
+        if token_id is not None and token_id in target.eos_token_ids:
             config = getattr(getattr(target, "model", None), "config", None)
             vocab_size = getattr(config, "vocab_size", None)
             context = getattr(target, "context_limit", getattr(config, "max_position_embeddings", None))
@@ -39,7 +46,7 @@ def _draft_before_eos(target, base_len: int, pending_len: int, draft_tokens: lis
             fits_context = context is None or (type(context) is int and base_len + width <= context)
             fits_block = block is None or (type(block) is int and width <= block)
             if fits_context and fits_block and type(vocab_size) is int and all(
-                type(value) is int and 0 <= value < vocab_size for value in draft_tokens[index:]
+                value is not None and 0 <= value < vocab_size for value in map(_scalar_token_id, draft_tokens[index:])
             ):
                 return draft_tokens[:index]  # EOS and its tail need no forward.
             break  # The full forward handles bounds and invalid IDs.
