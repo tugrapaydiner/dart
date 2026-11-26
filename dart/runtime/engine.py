@@ -34,6 +34,7 @@ from typing import Callable, Optional
 import torch
 
 from dart.drafters.base import Drafter, NullDrafter
+from dart.drafters.compressed_kv import CompressedKVDrafter
 from dart.kv.prefetch import SyncPrefetcher, ThreadPrefetcher
 from dart.kv.residency import ResidencyStats, move_cache
 from dart.models.target import TargetModel, _native_method, prefill_for_generation
@@ -319,8 +320,12 @@ class DartEngine:
             fn = partial(fn, compute_entropy=False)
         return fn
 
-    def _round_drafts(self, drafter, committed, per_round, verifier, sampling, config, tree_limits=None):
+    def _round_drafts(self, drafter, committed, per_round, verifier, sampling, config, tree_limits=None, *,
+                      verified_state=None):
         """Return (drafts, draft_probs) for one round, clamped to its budget."""
+        if verified_state is not None and (verifier != "tree" or not hasattr(drafter, "propose_tree")):
+            width = min(per_round, config.max_tree_nodes) if verifier == "tree" else per_round
+            drafter._reuse_verified_prefix(verified_state, committed, width)
         if verifier != "tree":
             return self._propose(drafter, committed, per_round, sampling)
         # Tree-capable drafters propose several candidate branches;
@@ -538,7 +543,12 @@ class DartEngine:
 
                 t0 = time.perf_counter()
                 per_round = min(draft_len, max_draft)
-                drafts, draft_probs = self._round_drafts(
+                build_draft = self._round_drafts
+                if (type(drafter) is CompressedKVDrafter and drafter.dm is target and drafter._state is None
+                        and config.mode == "exact" and not park_kv and self._propose is _PROPOSE
+                        and _native_method(getattr(build_draft, "_profiled_method", build_draft), self, _ROUND_DRAFTS)):
+                    build_draft = partial(build_draft, verified_state=state)
+                drafts, draft_probs = build_draft(
                     drafter, committed_seq, per_round, verifier, sampling, config, tree_limits,
                 )
                 t1 = time.perf_counter()

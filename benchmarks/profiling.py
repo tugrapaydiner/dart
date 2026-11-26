@@ -29,6 +29,7 @@ def _verifier_work(stack, target):
                 totals["verify_target_calls"] += 1
                 totals["verify_input_positions"] += input_ids.numel()
             return forward(state, input_ids=input_ids, **kwargs)
+        counted._profiled_method = forward
         return counted
 
     for item in targets:
@@ -103,6 +104,7 @@ def profile_methods(
                     run._profiled_method = call
                     return run
 
+                before_forward._dart_observer = after_forward._dart_observer = True
                 with ExitStack() as stack:
                     stack.callback(target.model.register_forward_pre_hook(before_forward).remove)
                     stack.callback(target.model.register_forward_hook(after_forward).remove)
