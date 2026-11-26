@@ -29,7 +29,7 @@ from typing import Optional
 import torch
 from torch import Tensor
 
-from dart.kv.cache import QuantSpec, QuantStore
+from dart.kv.cache import QuantSpec, QuantStore, _compact_cache_view
 
 
 def random_orthogonal(dim: int, seed: int) -> Tensor:
@@ -143,14 +143,12 @@ class PolarVQStore:
                 else:
                     kept_sink += take
             remaining -= take
-        self._order = new_order
+        packed = scale = None
+        if kept_polar:
+            packed = _compact_cache_view(self.packed[..., :kept_polar, :])
+            scale = _compact_cache_view(self.scale[..., :kept_polar, :])
         self._sink.crop(kept_sink)
-        if self.packed is not None:
-            if kept_polar == 0:
-                self.packed = self.scale = None
-            else:
-                self.packed = self.packed[..., :kept_polar, :]
-                self.scale = self.scale[..., :kept_polar, :]
+        self._order, self.packed, self.scale = new_order, packed, scale
 
     def logical_bytes(self) -> int:
         polar = 0

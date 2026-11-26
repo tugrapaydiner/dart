@@ -57,6 +57,19 @@ def dequantize_blockwise(q: Tensor, scale: Tensor, zero: Tensor, dtype) -> Tenso
     return (q.to(torch.float32) * scale + zero).to(dtype)
 
 
+def _compact_cache_view(view: Tensor) -> Tensor:
+    """Release the old allocation when a trimmed view keeps half or less."""
+    if type(view) is not Tensor or view.layout != torch.strided or view.device.type not in ("cpu", "cuda"):
+        return view
+    try:
+        backing = view.untyped_storage().nbytes()
+    except (RuntimeError, NotImplementedError):
+        return view  # Some tensor transforms hide their storage.
+    if backing and backing >= 2 * view.nbytes:
+        return view.clone(memory_format=torch.contiguous_format)
+    return view
+
+
 @runtime_checkable
 class KVStore(Protocol):
     """Pluggable codec for aged-out KV tokens (the KVCompressor backend of
@@ -115,10 +128,12 @@ class QuantStore:
         if length == 0:
             self.q = self.scale = self.zero = self.bits_per_token = None
             return
-        self.q = self.q[..., :length, :]
-        self.scale = self.scale[..., :length, :]
-        self.zero = self.zero[..., :length, :]
-        self.bits_per_token = self.bits_per_token[:length]
+        self.q, self.scale, self.zero, self.bits_per_token = (
+            _compact_cache_view(self.q[..., :length, :]),
+            _compact_cache_view(self.scale[..., :length, :]),
+            _compact_cache_view(self.zero[..., :length, :]),
+            _compact_cache_view(self.bits_per_token[:length]),
+        )
 
     def logical_bytes(self) -> int:
         if self.q is None:
@@ -285,8 +300,10 @@ class QuantizedKVCache(DynamicCache):
         if kw is None or kw.size(-2) <= spec.window_len:
             return
         n_out = kw.size(-2) - spec.window_len
-        k_out, self._kw[layer_idx] = kw[..., :n_out, :], kw[..., n_out:, :]
-        v_out, self._vw[layer_idx] = vw[..., :n_out, :], vw[..., n_out:, :]
+        k_out, v_out = kw[..., :n_out, :], vw[..., :n_out, :]
+        self._kw[layer_idx], self._vw[layer_idx] = (
+            _compact_cache_view(kw[..., n_out:, :]), _compact_cache_view(vw[..., n_out:, :]),
+        )
 
         start = self._kq[layer_idx].length  # absolute position of first aged token
         bits = [self._bits_at(start + i, layer_idx) for i in range(n_out)]
@@ -356,8 +373,10 @@ class QuantizedKVCache(DynamicCache):
             else:
                 keep_w = max_length - qlen
                 if self._kw[li] is not None and self._kw[li].size(-2) > keep_w:
-                    self._kw[li] = self._kw[li][..., :keep_w, :]
-                    self._vw[li] = self._vw[li][..., :keep_w, :]
+                    self._kw[li], self._vw[li] = (
+                        _compact_cache_view(self._kw[li][..., :keep_w, :]),
+                        _compact_cache_view(self._vw[li][..., :keep_w, :]),
+                    )
 
     # -------------------------------------------------------------- #
     def stats(self) -> dict:

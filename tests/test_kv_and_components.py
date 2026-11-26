@@ -102,6 +102,69 @@ def test_quantized_kv_cache_ages_and_crops():
     assert k2.size(-2) == 6
 
 
+@pytest.mark.parametrize("heads,window", [(1, 0), (1, 3), (2, 3)])
+def test_recent_retained_storage_after_aging(heads, window):
+    cache = QuantizedKVCache(QuantSpec(window_len=window))
+    keys = torch.arange(2 * heads * 12 * 2, dtype=torch.float32).reshape(2, heads, 12, 2)
+    values = keys.flip((-1,))
+    actual = cache.update(keys, values, 0)
+    for got, original, recent in zip(actual, (keys, values), (cache._kw[0], cache._vw[0])):
+        assert torch.equal(got, original)  # Each row contains its two endpoints.
+        assert torch.equal(recent, original[..., 12 - window:, :])
+        assert recent.untyped_storage().nbytes() == recent.nbytes
+        assert recent.untyped_storage().data_ptr() != original.untyped_storage().data_ptr()
+    next_rows = cache.update(keys[..., :1, :], values[..., :1, :], 0)
+    for got, original in zip(next_rows, (keys, values)):
+        assert torch.equal(got, torch.cat((original, original[..., :1, :]), dim=-2))
+
+
+def test_recent_retained_storage_after_successive_crops():
+    cache = QuantizedKVCache(QuantSpec(window_len=16))
+    keys = torch.arange(64, dtype=torch.float32).view(1, 2, 16, 2)
+    values = keys + 100
+    cache.update(keys, values, 0)
+    cache.crop(12)
+    for recent, source in zip((cache._kw[0], cache._vw[0]), (keys, values)):
+        assert recent.untyped_storage().data_ptr() == source.untyped_storage().data_ptr()
+    cache.crop(8)
+    for recent, source in zip((cache._kw[0], cache._vw[0]), (keys, values)):
+        assert recent.untyped_storage().nbytes() == recent.nbytes
+        assert torch.equal(recent, source[..., :8, :])
+    updated = cache.update(keys[..., -1:, :], values[..., -1:, :], 0)
+    for got, source in zip(updated, (keys, values)):
+        assert torch.equal(got, torch.cat((source[..., :8, :], source[..., -1:, :]), -2))
+
+
+@pytest.mark.parametrize("polar", [False, True])
+def test_archive_retained_storage_after_successive_crops(polar):
+    from dart.kv.compressors.turboquant_like import PolarVQStore
+
+    store = PolarVQStore() if polar else QuantStore()
+    rows = torch.arange(2 * 16 * 8, dtype=torch.float32).sin().reshape(1, 2, 16, 8)
+    store.append(rows[..., :2, :], 8)
+    store.append(rows[..., 2:, :], 4)
+    original = store.dequantize(torch.float32)
+
+    def archive():
+        if polar:
+            return store.packed, store.scale
+        return store.q, store.scale, store.zero, store.bits_per_token
+
+    pointers = [t.untyped_storage().data_ptr() for t in archive()]
+    store.crop(11)
+    assert pointers == [t.untyped_storage().data_ptr() for t in archive()]
+    store.crop(5)
+    assert all(t.untyped_storage().nbytes() == t.nbytes for t in archive())
+    torch.testing.assert_close(store.dequantize(torch.float32), original[..., :5, :], rtol=0, atol=0)
+    store.append(rows[..., -2:, :], 4)
+    torch.testing.assert_close(
+        store.dequantize(torch.float32), torch.cat((original[..., :5, :], original[..., -2:, :]), -2),
+        rtol=0, atol=0,
+    )
+    store.crop(0)
+    assert store.length == 0 and store.dequantize(torch.float32) is None
+
+
 def _cache_size_read_reference(cache):
     total = 0
     for store in cache._kq + cache._vq:
