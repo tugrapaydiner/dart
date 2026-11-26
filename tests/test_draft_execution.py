@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from contextlib import closing
+from contextlib import closing, contextmanager
 from unittest.mock import patch
 
 import pytest
@@ -56,28 +56,27 @@ def propose(drafter, prompt, budget, sampling):
     return drafter.propose(prompt, budget), None
 
 
-def count_forwards(target, monkeypatch):
+@contextmanager
+def count_forwards(target):
     calls = []
-    original = target.model.forward
 
-    def forward(*args, **kwargs):
+    def record(module, args, kwargs):
         calls.append(kwargs['input_ids'].shape[-1])
-        return original(*args, **kwargs)
 
-    monkeypatch.setattr(target.model, 'forward', forward)
-    return calls
+    with target.model.register_forward_pre_hook(record, with_kwargs=True):
+        yield calls
 
 
 @pytest.mark.parametrize('sampling', [False, True])
 @pytest.mark.parametrize('budget', [0, 1, 4])
-def test_drafting_skips_the_unused_final_forward(models, monkeypatch, sampling, budget):
+def test_drafting_skips_the_unused_final_forward(models, sampling, budget):
     target, reference = models
     prompt = [5, 6, 7]
     generator = torch.Generator().manual_seed(23)
     expected, rows = reference_proposals(reference, prompt, budget, sampling, generator)
     drafter = ARDrafter(target, sample_temperature=0.7, seed=23)
-    calls = count_forwards(target, monkeypatch)
-    actual, probabilities = propose(drafter, prompt, budget, sampling)
+    with count_forwards(target) as calls:
+        actual, probabilities = propose(drafter, prompt, budget, sampling)
     assert actual == expected
     assert calls == ([len(prompt)] + [1] * (budget - 1) if budget else [])
     assert torch.equal(drafter.gen.get_state(), generator.get_state())
@@ -98,7 +97,7 @@ def test_drafting_skips_the_unused_final_forward(models, monkeypatch, sampling, 
 
 @pytest.mark.parametrize('sampling', [False, True])
 @pytest.mark.parametrize('eos_offset', [1, 2, 3, 4])
-def test_draft_eos_never_runs_an_extra_forward(models, monkeypatch, sampling, eos_offset):
+def test_draft_eos_never_runs_an_extra_forward(models, sampling, eos_offset):
     target, _ = models
     prompt = [5, 6, 7]
     drafter = ARDrafter(target, sample_temperature=0.7, seed=23)
@@ -109,10 +108,14 @@ def test_draft_eos_never_runs_an_extra_forward(models, monkeypatch, sampling, eo
     drafter.reset()
     drafter.gen.manual_seed(23)
     target.eos_token_ids = frozenset({eos})
-    calls = count_forwards(target, monkeypatch)
-    actual, rows = propose(drafter, prompt, 4, sampling)
+    head_rows = []
+    with count_forwards(target) as calls, target.model.get_output_embeddings().register_forward_pre_hook(
+        lambda module, args: head_rows.append(args[0].shape[1])
+    ):
+        actual, rows = propose(drafter, prompt, 4, sampling)
     assert actual == tokens[:first_eos]
     assert calls == [len(prompt)] + [1] * (first_eos - 1)
+    assert head_rows == [1] * first_eos
     assert drafter._state.seq_len == len(prompt)
     if sampling:
         torch.testing.assert_close(rows, probabilities[:first_eos], atol=0, rtol=0)
@@ -135,12 +138,12 @@ def test_repeat_extension_and_rejected_drafts_keep_reference_proposals(models, s
 
 
 @pytest.mark.parametrize('budget', [1, 4])
-def test_compressed_drafting_also_skips_the_unused_forward(models, monkeypatch, budget):
+def test_compressed_drafting_also_skips_the_unused_forward(models, budget):
     target, _ = models
     drafter = CompressedKVDrafter(target, QuantSpec(bits=4, sink_len=1, window_len=2))
     prompt = [5, 6, 7, 8, 9, 10]
-    calls = count_forwards(target, monkeypatch)
-    assert len(drafter.propose(prompt, budget)) == budget
+    with count_forwards(target) as calls:
+        assert len(drafter.propose(prompt, budget)) == budget
     assert calls == [len(prompt)] + [1] * (budget - 1)
     assert drafter._state.seq_len == len(prompt)
 
@@ -158,15 +161,15 @@ def test_generation_after_shortened_drafting_matches_independent_hf(models, comp
 
 @pytest.mark.parametrize("added", [[], [22], [22, 23]])
 @torch.inference_mode()
-def test_block_sparse_reuses_matching_compacted_prefix(models, monkeypatch, added):
+def test_block_sparse_reuses_matching_compacted_prefix(models, added):
     target, reference = models
     lane = BlockSparseKVDrafter(target, block_size=4, top_k=0, sink_blocks=1, recent_blocks=1)
     prompt = list(range(5, 22))
     lane.propose(prompt, 3)
-    calls = count_forwards(target, monkeypatch)
     compacted = prompt[:4] + prompt[16:] + added
     expected = reference(input_ids=torch.tensor([compacted]), use_cache=True)
-    assert lane.propose(prompt + added, 1) == [int(expected.logits[0, -1].argmax())]
+    with count_forwards(target) as calls:
+        assert lane.propose(prompt + added, 1) == [int(expected.logits[0, -1].argmax())]
     assert calls == [max(1, len(added))]
     assert lane._state.seq_len == len(compacted)
     for cached, fresh in zip(lane._state.cache.layers, expected.past_key_values.layers, strict=True):
