@@ -107,9 +107,11 @@ def test_prefill_restriction_matches_full_hf_generations(device, dtype):
 
 @pytest.mark.parametrize("record_hidden", [False, True])
 @pytest.mark.parametrize("wrapper", ["legacy", "kwargs_only", "positional_only"])
-def test_models_without_explicit_logit_restriction_use_full_prefill(monkeypatch, record_hidden, wrapper):
-    original = build_tiny_target()
-    forward = original.model.forward
+@pytest.mark.parametrize("replace_after_init", [False, True])
+def test_live_prefill_signature_without_explicit_logit_restriction(monkeypatch, record_hidden, wrapper, replace_after_init):
+    target = build_tiny_target()
+    target.record_hidden = record_hidden
+    forward = target.model.forward
 
     def legacy(input_ids, attention_mask, past_key_values, use_cache, output_hidden_states):
         return forward(input_ids=input_ids, attention_mask=attention_mask, past_key_values=past_key_values,
@@ -124,8 +126,9 @@ def test_models_without_explicit_logit_restriction_use_full_prefill(monkeypatch,
         return forward(**kwargs)
 
     wrappers = {"legacy": legacy, "kwargs_only": kwargs_only, "positional_only": positional_only}
-    monkeypatch.setattr(original.model, "forward", wrappers[wrapper])
-    target = TargetModel(original.model, record_hidden=record_hidden)
+    monkeypatch.setattr(target.model, "forward", wrappers[wrapper])
+    if not replace_after_init:
+        target = TargetModel(target.model, record_hidden=record_hidden)
     rows = []
     handle = target.model.get_output_embeddings().register_forward_pre_hook(lambda module, args: rows.append(args[0].shape[1]))
     try:
@@ -135,6 +138,40 @@ def test_models_without_explicit_logit_restriction_use_full_prefill(monkeypatch,
         assert (target.last_hidden_block is not None) is record_hidden
     finally:
         handle.remove()
+
+
+@pytest.mark.parametrize("entry", ["baseline", "engine"])
+def test_live_prefill_signature_restores_one_row_projection(entry):
+    model = build_tiny_target().model
+    native = model.forward
+    prompt = [7, 9, 11, 9]
+    rows = []
+
+    def full(**kwargs):
+        assert "logits_to_keep" not in kwargs
+        return native(**kwargs)
+
+    def limited(*, logits_to_keep=0, **kwargs):
+        return native(logits_to_keep=logits_to_keep, **kwargs)
+
+    def run():
+        rows.clear()
+        if entry == "baseline":
+            tokens = target.greedy_generate(prompt, 3)
+        else:
+            with DartEngine(target, NGramDrafter()) as engine:
+                tokens = engine.generate(prompt, DecodeConfig(max_new_tokens=3)).token_ids
+        return rows[0], tokens
+
+    with model.lm_head.register_forward_pre_hook(lambda module, args: rows.append(args[0].shape[1])):
+        with patch.object(model, "forward", full):
+            target = TargetModel(model)
+            width, expected = run()
+            assert width == len(prompt)
+            with patch.object(model, "forward", limited):
+                assert run() == (1, expected)
+            assert run() == (len(prompt), expected)
+        assert run() == (1, expected)
 
 
 @pytest.mark.parametrize("error", [ValueError, TypeError])

@@ -49,6 +49,16 @@ def _native_method(method, target, original):
     return getattr(method, "__self__", None) is target and getattr(method, "__func__", None) is original
 
 
+def _accepts_logits_to_keep(forward):
+    try:
+        parameter = inspect.signature(forward).parameters.get("logits_to_keep")
+    except (TypeError, ValueError):
+        return False
+    return parameter is not None and parameter.kind in (
+        inspect.Parameter.POSITIONAL_OR_KEYWORD, inspect.Parameter.KEYWORD_ONLY
+    )
+
+
 @dataclass
 class TargetState:
     """Mutable KV-cache state for one sequence.
@@ -110,14 +120,9 @@ class TargetModel:
         # belong to rejected drafts and are off-trajectory.
         self.record_hidden = record_hidden
         self.last_hidden_block: Optional[Tensor] = None
-        try:
-            parameter = inspect.signature(self.model.forward).parameters.get("logits_to_keep")
-            self._last_prefill_logits = (
-                torch.device(self.device).type == "cpu" and parameter is not None  # Only CPU showed a consistent gain.
-                and parameter.kind in (inspect.Parameter.POSITIONAL_OR_KEYWORD, inspect.Parameter.KEYWORD_ONLY)
-            )
-        except (TypeError, ValueError):
-            self._last_prefill_logits = False
+        forward = self.model.forward
+        self._prefill_method = getattr(forward, "__func__", None)
+        self._last_prefill_logits = torch.device(self.device).type == "cpu" and _accepts_logits_to_keep(forward)
 
     # ------------------------------------------------------------------ #
     # Construction
@@ -263,9 +268,15 @@ class TargetModel:
             last_logits_only=last_logits_only,
         )
 
+    def _can_limit_prefill_logits(self) -> bool:
+        forward = self.model.forward
+        if self._prefill_method is not None and _native_method(forward, self.model, self._prefill_method):
+            return self._last_prefill_logits
+        return torch.device(self.device).type == "cpu" and _accepts_logits_to_keep(forward)
+
     def _run_model(self, state: TargetState | None, *, last_logits_only: bool = False, **kwargs) -> Tensor:
         try:
-            if last_logits_only and self._last_prefill_logits:
+            if last_logits_only and self._can_limit_prefill_logits():
                 kwargs["logits_to_keep"] = 1
             cache = state.cache if state is not None else None
             out = self.model(past_key_values=cache, use_cache=state is not None,
