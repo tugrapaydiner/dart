@@ -145,22 +145,29 @@ def test_archive_retained_storage_after_successive_crops(polar):
     store.append(rows[..., 2:, :], 4)
     original = store.dequantize(torch.float32)
 
-    def archive():
+    def archive(codec):
         if polar:
-            return store.packed, store.scale
-        return store.q, store.scale, store.zero, store.bits_per_token
+            return codec.packed, codec.scale
+        return codec.q, codec.scale, codec.zero, codec.bits_per_token
 
-    pointers = [t.untyped_storage().data_ptr() for t in archive()]
+    keep = 3 if polar else 5  # The polar store keeps two sink tokens separately.
+    prefix = [t.narrow(0 if t.ndim == 1 else -2, 0, keep).clone() for t in archive(store)]
+    pointers = [t.untyped_storage().data_ptr() for t in archive(store)]
     store.crop(11)
-    assert pointers == [t.untyped_storage().data_ptr() for t in archive()]
+    assert pointers == [t.untyped_storage().data_ptr() for t in archive(store)]
     store.crop(5)
-    assert all(t.untyped_storage().nbytes() == t.nbytes for t in archive())
-    torch.testing.assert_close(store.dequantize(torch.float32), original[..., :5, :], rtol=0, atol=0)
-    store.append(rows[..., -2:, :], 4)
-    torch.testing.assert_close(
-        store.dequantize(torch.float32), torch.cat((original[..., :5, :], original[..., -2:, :]), -2),
-        rtol=0, atol=0,
-    )
+    for got, wanted in zip(archive(store), prefix, strict=True):
+        assert got.untyped_storage().nbytes() == got.nbytes
+        assert torch.equal(got, wanted)
+
+    tail = type(store)()
+    extra = rows[..., -2:, :]
+    tail.append(extra, 4)
+    store.append(extra, 4)
+    for got, kept, added in zip(archive(store), prefix, archive(tail), strict=True):
+        assert torch.equal(got, torch.cat((kept, added), dim=0 if got.ndim == 1 else -2))
+    expected = torch.cat((original[..., :5, :], tail.dequantize(torch.float32)), dim=-2)
+    torch.testing.assert_close(store.dequantize(torch.float32), expected)
     store.crop(0)
     assert store.length == 0 and store.dequantize(torch.float32) is None
 
