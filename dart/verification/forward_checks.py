@@ -7,7 +7,7 @@ from dataclasses import dataclass
 
 import torch
 
-from dart.verification.differential import CheckFailure, InvalidCheckCase
+from dart.verification.differential import CheckFailure, InvalidCheckCase, _tokens
 from dart.verification.state_checks import (
     _cache_pairs,
     _check_reference_storage,
@@ -28,15 +28,28 @@ class ForwardComparison:
 
 
 @dataclass(frozen=True)
+class PredictionComparison:
+    failures: tuple[CheckFailure, ...]
+    cache_bitwise: bool = False
+
+    @property
+    def passed(self) -> bool:
+        return not self.failures
+
+
+@dataclass(frozen=True)
 class ForwardCheck:
     candidate_full: ForwardComparison
     candidate_incremental: ForwardComparison
     incremental_full: ForwardComparison
+    predictions_full: PredictionComparison | None = None
+    predictions_incremental: PredictionComparison | None = None
 
     @property
     def passed(self) -> bool:
-        return all(check.passed for check in (
+        return all(check is None or check.passed for check in (
             self.candidate_full, self.candidate_incremental, self.incremental_full,
+            self.predictions_full, self.predictions_incremental,
         ))
 
 
@@ -78,6 +91,22 @@ def _equal(actual, expected, *, atol, rtol):
     return close, bitwise
 
 
+def _compare_cache(pairs, length, expected, *, atol, rtol):
+    failures = []
+    if length != expected.length:
+        failures.append(CheckFailure("cache_length", detail="cache lengths differ"))
+    cache_bitwise = len(pairs) == len(expected.cache)
+    if not cache_bitwise:
+        failures.append(CheckFailure("cache_layers", detail="cache layer counts differ"))
+    for index, (a, e) in enumerate(zip(pairs, expected.cache)):
+        for name, got, wanted in zip(("keys", "values"), a, e):
+            close, bitwise = _equal(got, wanted, atol=atol, rtol=rtol)
+            cache_bitwise = cache_bitwise and bitwise
+            if not close:
+                failures.append(CheckFailure("cache_values", index, f"{name} shape, dtype or values differ"))
+    return failures, cache_bitwise
+
+
 def _compare(actual, expected, *, atol, rtol):
     failures = []
     close, logits_bitwise = _equal(actual.logits, expected.logits, atol=atol, rtol=rtol)
@@ -88,18 +117,18 @@ def _compare(actual, expected, *, atol, rtol):
             failures.append(CheckFailure("tokens", detail="next-token IDs differ"))
         if not close:
             failures.append(CheckFailure("logits", detail="nonfinite logits or values differ beyond tolerance"))
-    if actual.length != expected.length:
-        failures.append(CheckFailure("cache_length", detail="cache lengths differ"))
-    cache_bitwise = len(actual.cache) == len(expected.cache)
-    if not cache_bitwise:
-        failures.append(CheckFailure("cache_layers", detail="cache layer counts differ"))
-    for index, (a, e) in enumerate(zip(actual.cache, expected.cache)):
-        for name, got, wanted in zip(("keys", "values"), a, e):
-            close, bitwise = _equal(got, wanted, atol=atol, rtol=rtol)
-            cache_bitwise = cache_bitwise and bitwise
-            if not close:
-                failures.append(CheckFailure("cache_values", index, f"{name} shape, dtype or values differ"))
+    cache_failures, cache_bitwise = _compare_cache(actual.cache, actual.length, expected, atol=atol, rtol=rtol)
+    failures.extend(cache_failures)
     return ForwardComparison(tuple(failures), logits_bitwise, cache_bitwise)
+
+
+def _compare_predictions(ids, pairs, length, expected, *, atol, rtol):
+    failures, cache_bitwise = _compare_cache(pairs, length, expected, atol=atol, rtol=rtol)
+    wanted = tuple(expected.logits.argmax(-1).tolist())
+    if ids != wanted:
+        first = next((i for i, (a, b) in enumerate(zip(ids, wanted)) if a != b), min(len(ids), len(wanted)))
+        failures.append(CheckFailure("tokens", first, "compact next-token IDs differ"))
+    return PredictionComparison(tuple(failures), cache_bitwise)
 
 
 def _validate(target, reference, prefix, tokens):
@@ -129,7 +158,9 @@ def check_forward_paths(target, reference_model, prefix: Sequence[int], tokens: 
     The reference computes full-prefix and native cached forwards; the target
     uses its own prefill/forward methods. Every pair must pass. Agreement with
     the cached reference never waives disagreement with the full reference.
-    Logit and cache dtypes are preserved and must match within each pair.
+    Targets with compact predictions enabled also check their IDs and KV from
+    a fresh prefill against the same two references. Logit and cache dtypes
+    are preserved and must match within each pair.
     Reference errors propagate; candidate errors remain failed comparisons.
     Results retain no tensors and write no files. This is a local forward check,
     not a generation, EOS, tree, performance or all-input correctness check.
@@ -159,4 +190,15 @@ def check_forward_paths(target, reference_model, prefix: Sequence[int], tokens: 
     except Exception as error:
         failure = ForwardComparison((CheckFailure("exception", detail=f"{type(error).__name__}: {error}"),))
         against_full = against_incremental = failure
-    return ForwardCheck(against_full, against_incremental, reference_check)
+    predictions_full = predictions_incremental = None
+    if getattr(target, "capture_predictions", False):
+        try:
+            state, _ = target.prefill(list(prefix))
+            ids = _tokens(target.forward_predictions(state, list(tokens)))
+            pairs = _cache_pairs(state.cache, read_only=True)
+            predictions_full = _compare_predictions(ids, pairs, state.seq_len, full, atol=atol, rtol=rtol)
+            predictions_incremental = _compare_predictions(ids, pairs, state.seq_len, incremental, atol=atol, rtol=rtol)
+        except Exception as error:
+            failure = PredictionComparison((CheckFailure("exception", detail=f"{type(error).__name__}: {error}"),))
+            predictions_full = predictions_incremental = failure
+    return ForwardCheck(against_full, against_incremental, reference_check, predictions_full, predictions_incremental)

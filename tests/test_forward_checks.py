@@ -372,3 +372,82 @@ def test_reference_legacy_key_value_layers(monkeypatch, path, extra):
         monkeypatch.setattr(target, "prefill", lambda *args: pytest.fail("candidate ran with an invalid reference"))
         with pytest.raises(ValueError, match="legacy cache"):
             check_forward_paths(target, reference, (5, 6, 7), (11, 13))
+
+
+@pytest.mark.parametrize(("fault", "kind"), [
+    ("wrong_id", "tokens"), ("missing_id", "tokens"), ("boolean_id", "exception"),
+    ("short_cache", "cache_length"), ("wrong_value", "cache_values"), ("exception", "exception"),
+])
+def test_compact_forward_check_detects_prediction_only_faults(monkeypatch, fault, kind):
+    base, reference = models()
+    target = CudaGraphTarget(base, capacity=16, max_block_tokens=4, capture_predictions=True, replay=False)
+    try:
+        original = target.forward_predictions
+
+        def damaged(state, tokens):
+            ids = original(state, tokens)
+            if fault == "wrong_id":
+                ids[1] = (ids[1] + 1) % reference.config.vocab_size
+            elif fault == "missing_id":
+                ids.pop()
+            elif fault == "boolean_id":
+                ids[0] = True
+            elif fault == "short_cache":
+                target.crop(state, state.seq_len - 1)
+            elif fault == "wrong_value":
+                state.cache.storage[0, 1, ..., 0, :].add_(1)
+            else:
+                raise RuntimeError("prediction failed")
+            return ids
+
+        monkeypatch.setattr(target, "forward_predictions", damaged)
+        report = check_forward_paths(target, reference, (3, 5, 7), (11, 13, 17, 19))
+        assert not report.passed
+        assert report.candidate_full.passed and report.candidate_incremental.passed and report.incremental_full.passed
+        for check in (report.predictions_full, report.predictions_incremental):
+            assert kind in {f.kind for f in check.failures}
+    finally:
+        target.close()
+
+
+@pytest.mark.parametrize("enabled", [False, True])
+def test_compact_forward_check_uses_fresh_state_and_reuses_reference(monkeypatch, enabled):
+    base, reference = models()
+    target = CudaGraphTarget(base, capacity=16, max_block_tokens=4, capture_predictions=enabled, replay=False)
+    try:
+        prefix_lengths, reference_widths = [], []
+        prediction, forward = target.forward_predictions, reference.forward
+
+        def observe(state, tokens):
+            prefix_lengths.append(state.seq_len)
+            return prediction(state, tokens)
+
+        def counted(*args, **kwargs):
+            reference_widths.append(kwargs["input_ids"].shape[-1])
+            return forward(*args, **kwargs)
+
+        monkeypatch.setattr(target, "forward_predictions", observe)
+        monkeypatch.setattr(reference, "forward", counted)
+        report = check_forward_paths(target, reference, (3, 5, 7), (11, 13))
+        assert report.passed, report
+        assert prefix_lengths == ([3] if enabled else [])
+        assert reference_widths == [5, 3, 2]
+        for check in (report.predictions_full, report.predictions_incremental):
+            assert check.passed if enabled else check is None
+        json.dumps(asdict(report), allow_nan=False)
+    finally:
+        target.close()
+
+
+def test_compact_forward_check_propagates_cancellation(monkeypatch):
+    base, reference = models()
+    target = CudaGraphTarget(base, capacity=16, max_block_tokens=4, capture_predictions=True, replay=False)
+    try:
+        def cancel(*args):
+            raise KeyboardInterrupt("cancelled")
+
+        monkeypatch.setattr(target, "forward_predictions", cancel)
+        with pytest.raises(KeyboardInterrupt, match="cancelled"):
+            check_forward_paths(target, reference, (3, 5, 7), (11, 13))
+    finally:
+        target.close()
