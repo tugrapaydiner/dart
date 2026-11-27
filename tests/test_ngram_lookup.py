@@ -157,3 +157,43 @@ def test_bounded_packing_rejects_invalid_caps_before_lookup(cap):
 
     with pytest.raises(ValueError, match="max_nodes"):
         DraftTree.from_branches(branches(), max_nodes=cap)
+
+
+@pytest.mark.parametrize("length", [512, 1024])
+@pytest.mark.parametrize("tree", [False, True])
+def test_recent_ngram_matches_avoid_copying_the_whole_window(length, tree):
+    read_sizes = []
+
+    class History(list):
+        def __getitem__(self, key):
+            value = super().__getitem__(key)
+            if isinstance(key, slice):
+                read_sizes.append(len(value))
+            return value
+
+    suffix = [7, 8, 9, 10]
+    tail = suffix + [40, 41] + suffix + [50, 51] + suffix
+    history = History([0] * (length - len(tail)) + tail)
+    drafter = NGramDrafter(tree_width=2)
+    if tree:
+        expected = DraftTree.from_branches([[50, 51], [40, 41]])
+        assert drafter.propose_tree(history, 2) == expected
+    else:
+        assert drafter.propose(history, 2) == [50, 51]
+    assert max(read_sizes, default=0) <= 128
+
+
+@pytest.mark.parametrize("scan", [None, 268, 516])
+@pytest.mark.parametrize("end", [686, 687, 688])
+def test_long_lookup_keeps_older_longer_matches_and_tree_order(scan, end):
+    suffix = [7, 8, 9, 10]
+    sequence = [0] * 720
+    for position, token in [(95, 31), (214, 32), (end, 33)]:
+        sequence[position - 3:position + 3] = suffix + [token, token]
+    sequence[698:701] = [9, 10, 36]
+    sequence[-4:] = suffix
+    drafter = NGramDrafter(min_ngram=2, max_ngram=4, tree_width=5, max_scan=scan)
+    branches = reference_branches(sequence, 2, 2, 4, scan, 5)
+    assert drafter.propose(sequence, 2) == branches[0]
+    for cap in (1, 3, 7, None):
+        assert drafter.propose_tree(sequence, 2, max_nodes=cap) == DraftTree.from_branches(branches, max_nodes=cap)

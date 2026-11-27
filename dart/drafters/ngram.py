@@ -14,11 +14,35 @@ the single verify pass can accept whichever one the target picks.
 
 from __future__ import annotations
 
-from collections.abc import Collection, Iterator
+from collections.abc import Callable, Collection, Iterator
 from numbers import Integral
 
 from dart.runtime.types import VerifyResult
 from dart.verification.tree_verify import DraftTree
+
+_RECENT_WINDOW = 32
+
+
+def _recent_first_index(committed: list[int], start: int, end: int) -> Callable[[int, int, int], int]:
+    split = end - _RECENT_WINDOW
+    recent = committed[end - 1:split - 1:-1]
+    older = None
+
+    def index(token: int, lower: int, upper: int) -> int:
+        nonlocal older
+        if lower < _RECENT_WINDOW:
+            try:
+                return recent.index(token, lower, upper)
+            except ValueError:
+                if upper <= _RECENT_WINDOW:
+                    raise
+        if older is None:
+            before = start - 1 if start else None
+            older = committed[split - 1:before:-1]  # Load older tokens on a miss.
+        offset = older.index(token, max(0, lower - _RECENT_WINDOW), upper - _RECENT_WINDOW)
+        return _RECENT_WINDOW + offset
+
+    return index
 
 
 class NGramDrafter:
@@ -61,18 +85,23 @@ class NGramDrafter:
         stop = seq_len - scan_from - self.min_ngram
         if stop <= 0:
             return
-        candidates = committed[scan_from:seq_len - 1]
-        candidates.reverse()
+        window_size = seq_len - 1 - scan_from
+        if window_size > 256:
+            index = _recent_first_index(committed, scan_from, seq_len - 1)
+        else:
+            candidates = committed[scan_from:seq_len - 1]
+            candidates.reverse()
+            index = candidates.index
         last = committed[-1]
         try:
-            first = candidates.index(last, 0, stop)  # Every suffix ends in this token.
+            first = index(last, 0, stop)  # Every suffix ends in this token.
         except ValueError:
             return
         found: list[list[int]] = []
-        longest = min(self.max_ngram, len(candidates) - first)
+        longest = min(self.max_ngram, window_size - first)
         for n in range(longest, self.min_ngram - 1, -1):
             pattern = committed[seq_len - n :]
-            offset, stop = first, len(candidates) - n + 1
+            offset, stop = first, window_size - n + 1
             while True:
                 start = seq_len - n - 1 - offset
                 if committed[start : start + n] == pattern:
@@ -90,7 +119,7 @@ class NGramDrafter:
                 if offset + 1 >= stop:
                     break
                 try:
-                    offset = candidates.index(last, offset + 1, stop)
+                    offset = index(last, offset + 1, stop)
                 except ValueError:
                     break
             if found:
