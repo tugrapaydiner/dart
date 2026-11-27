@@ -260,3 +260,41 @@ def test_shared_ar_prefix_keeps_owned_cache_and_reuses_one_token_extensions(monk
         draft._reuse_verified_prefix(source, prefix + [3, 4, 5], 1)
         assert draft._state.seq_len == source.seq_len == len(prefix) + 2
         assert draft._processed == prefix + [3, 4]
+
+
+@pytest.mark.parametrize("compressed", [False, True])
+@pytest.mark.parametrize("verifier", ["block", "tree"])
+def test_pinned_draft_prefix_before_first_offload(monkeypatch, compressed, verifier):
+    from dart.kv.prefetch import ThreadPrefetcher
+
+    target = build_tiny_target()
+    target.eos_token_ids = frozenset()
+    draft = CompressedKVDrafter(target, QuantSpec(window_len=32)) if compressed else ARDrafter(target)
+    prompt = random_prompt(216, 8)
+    expected = target.greedy_generate(prompt, 10)
+    events, widths = [], []
+    reuse, submit = draft._reuse_verified_prefix, ThreadPrefetcher.prefetch
+
+    def copy_prefix(state, tokens, width):
+        events.append("reuse")
+        return reuse(state, tokens, width)
+
+    def park(worker, move):
+        events.append("park")
+        return submit(worker, move)
+
+    def record(module, args, kwargs):
+        widths.append(kwargs["input_ids"].size(-1))
+
+    record._dart_observer = True
+    monkeypatch.setattr(draft, "_reuse_verified_prefix", copy_prefix)
+    monkeypatch.setattr(ThreadPrefetcher, "prefetch", park)
+    config = DecodeConfig(max_new_tokens=10, draft_len=2, full_kv_residency="cpu_pinned")
+    with target.model.register_forward_pre_hook(record, with_kwargs=True), DartEngine(target, draft, verifier=verifier) as engine:
+        for _ in range(2):
+            events.clear()
+            widths.clear()
+            out = engine.generate(prompt, config)
+            assert out.token_ids == expected and len(out.rounds) > 1
+            assert widths[:2] == [len(prompt), 1]
+            assert events == ["reuse"] + ["park"] * (len(out.rounds) - 1)

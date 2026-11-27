@@ -547,7 +547,7 @@ class DartEngine:
                 build_draft = self._round_drafts
                 if ((type(drafter) is ARDrafter or (type(drafter) is CompressedKVDrafter and drafter._state is None))
                         and drafter.dm is target
-                        and config.mode == "exact" and not park_kv and self._propose is _PROPOSE
+                        and config.mode == "exact" and pending_park is None and self._propose is _PROPOSE
                         and _native_method(getattr(build_draft, "_profiled_method", build_draft), self, _ROUND_DRAFTS)):
                     build_draft = partial(build_draft, verified_state=state)
                 drafts, draft_probs = build_draft(
