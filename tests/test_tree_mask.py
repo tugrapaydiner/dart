@@ -176,3 +176,27 @@ def test_sibling_mask_avoids_python_matrix(shared, dtype, monkeypatch):
     second = tree_mask(tuple(parents), 31, dtype=dtype)
     assert first.data_ptr() != second.data_ptr()
     assert torch.equal(second, expected)
+
+
+@pytest.mark.parametrize("prefix", [0, 57])
+@pytest.mark.parametrize("dtype", [torch.bool, torch.bfloat16, torch.float32])
+def test_irregular_cpu_mask_uses_compact_rows(monkeypatch, prefix, dtype):
+    parents = (-1, 0, 0, 2, 1, -1, 3, 5, 2, 7, 1)
+    visible = expected_mask(parents, prefix)
+    expected = visible if dtype == torch.bool else torch.zeros(visible.shape, dtype=dtype).masked_fill_(
+        ~visible, torch.finfo(dtype).min)
+    tensor = torch.tensor
+
+    def check(data, *args, **kwargs):
+        if isinstance(data, list) and data and isinstance(data[0], list):
+            pytest.fail("irregular mask copied a square Python table")
+        return tensor(data, *args, **kwargs)
+
+    monkeypatch.setattr(torch, "tensor", check)
+    with torch.device("meta"):
+        first = tree_mask(parents, prefix, device="cpu", dtype=dtype)
+        second = tree_mask(list(parents), prefix, device=torch.device("cpu"), dtype=dtype)
+    assert first.is_contiguous() and first.data_ptr() != second.data_ptr()
+    assert torch.equal(first, expected)
+    first.fill_(False if dtype == torch.bool else 1)
+    assert torch.equal(second, expected)

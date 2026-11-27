@@ -25,6 +25,26 @@ def linear_block_mask(prefix_len: int, block_len: int, device: str = "cpu") -> T
     return k_pos <= q_pos
 
 
+def _packed_cpu_mask(parent, prefix_len, device, dtype, visible, blocked):
+    n = len(parent)
+    additive = dtype != torch.bool
+    empty_row = bytes([additive]) * n  # A set bit marks a blocked cell in an additive mask.
+    cells = bytearray()
+    for i, p in enumerate(parent):
+        if type(p) is not int or not -1 <= p < i:
+            raise ValueError("tree parents must be -1 or a preceding index")
+        cells.extend(empty_row if p < 0 else cells[p * n:(p + 1) * n])
+        cells[i * n + i] = not additive
+
+    flags = torch.frombuffer(cells, dtype=torch.bool).view(n, n)
+    mask = torch.full((n, prefix_len + n), visible, dtype=dtype, device=device)
+    if additive:
+        mask[:, prefix_len:].masked_fill_(flags, blocked)
+    else:
+        mask[:, prefix_len:].copy_(flags)
+    return mask
+
+
 def tree_mask(
     parent: list[int], prefix_len: int, device: str = "cpu", *, dtype: torch.dtype = torch.bool,
 ) -> Tensor:
@@ -53,6 +73,11 @@ def tree_mask(
             mask[:, prefix_len + anchor + 1:].fill_(blocked)  # Siblings share at most the first tree column.
             mask[:, prefix_len:].fill_diagonal_(visible)
             return mask
+
+    if (n >= 8 and type(parent) in (list, tuple)
+            and (device == "cpu" or isinstance(device, torch.device) and device.type == "cpu")
+            and dtype in (torch.bool, torch.float16, torch.bfloat16, torch.float32, torch.float64)):
+        return _packed_cpu_mask(parent, prefix_len, device, dtype, visible, blocked)
 
     rows = []
     for i, p in enumerate(parent):
