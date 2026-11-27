@@ -44,6 +44,12 @@ class _CacheStorage:
         self.exposed = True
 
 
+def _check_kv_storage(tensor, packed_shape, workspace):
+    if (packed_shape != workspace.shape or tensor.dtype != workspace.dtype
+            or tensor.device != workspace.device or tensor.layout != workspace.layout):
+        raise ValueError("cache storage does not match the prepared replay workspace")
+
+
 class ReplayCache(DynamicCache):
     """A request-owned KV snapshot; only its valid prefix can be read.
 
@@ -66,7 +72,7 @@ class ReplayCache(DynamicCache):
         self._buffer = _CacheStorage(value)
 
     @classmethod
-    def from_dynamic(cls, cache: DynamicCache, capacity: int, owner: object):
+    def from_dynamic(cls, cache: DynamicCache, capacity: int, owner: object, *, workspace=None):
         if type(cache) is not DynamicCache or not cache.layers:
             raise ValueError("replay requires an initialized full DynamicCache")
         length = cache.get_seq_length()
@@ -76,11 +82,17 @@ class ReplayCache(DynamicCache):
         shape = keys.shape
         if keys.ndim != 4 or shape[0] != 1 or shape[-2] != length:
             raise ValueError("replay requires a batch-one cache")
+        packed_shape = (len(cache.layers), 2, *shape[:2], capacity, shape[-1])
+        if workspace is not None:
+            _check_kv_storage(keys, packed_shape, workspace)
         for layer in cache.layers:
             for tensor in (layer.keys, layer.values):
-                if tensor.shape != shape or tensor.dtype != keys.dtype or tensor.device != keys.device:
-                    raise ValueError("replay cache layers must have matching shapes, devices and dtypes")
-        storage = keys.new_empty((len(cache.layers), 2, *shape[:2], capacity, shape[-1]))
+                if (tensor.shape != shape or tensor.dtype != keys.dtype or tensor.device != keys.device
+                        or tensor.layout != keys.layout):
+                    raise ValueError(
+                        "replay cache layers must have matching shapes, devices and dtypes, with the same layout"
+                    )
+        storage = keys.new_empty(packed_shape)
         for index, layer in enumerate(cache.layers):
             storage[index, 0, ..., :length, :].copy_(layer.keys)
             storage[index, 1, ..., :length, :].copy_(layer.values)
@@ -489,10 +501,17 @@ class CudaGraphTarget(TargetModel):
             return self._resident_length
         return 0
 
-    def _restore_prefix(self, cache):
-        storage = cache._buffer.tensor if type(cache) is ReplayCache else cache.storage
-        if cache.owner is not self._owner or storage.shape != self._workspace.storage.shape:
+    def _request_storage(self, cache):
+        if cache.owner is not self._owner:
             raise ValueError("cache belongs to a different replay target")
+        storage = cache._buffer.tensor if type(cache) is ReplayCache else cache.storage
+        _check_kv_storage(storage, storage.shape, self._workspace.storage)
+        if cache.length > self.capacity:
+            raise ValueError("cache prefix exceeds replay capacity")
+        return storage
+
+    def _restore_prefix(self, cache):
+        storage = self._request_storage(cache)
         if self._workspace_dirty:
             self._resident_cache = None
             self._workspace.storage.zero_()  # Failed work may leave NaNs in masked rows.
@@ -522,7 +541,7 @@ class CudaGraphTarget(TargetModel):
             self._check_context_length(state.seq_len + count)
             cache = state.cache
             if not isinstance(cache, ReplayCache):
-                cache = ReplayCache.from_dynamic(cache, self.capacity, self._owner)
+                cache = ReplayCache.from_dynamic(cache, self.capacity, self._owner, workspace=self._workspace.storage)
             block = self._greedy_blocks[count]
             storage = self._restore_prefix(cache)
             self._start_block(block, ids, cache.length, count)
@@ -583,7 +602,7 @@ class CudaGraphTarget(TargetModel):
                 raise ValueError(f"block exceeds prepared replay size {self.max_block_tokens}")
             cache = state.cache
             if not isinstance(cache, ReplayCache):
-                cache = ReplayCache.from_dynamic(cache, self.capacity, self._owner)
+                cache = ReplayCache.from_dynamic(cache, self.capacity, self._owner, workspace=self._workspace.storage)
             block = self._blocks.get(width)
             storage = self._restore_prefix(cache)
             logits = self._run_replay_block(block, input_ids, start=cache.length)
@@ -635,11 +654,7 @@ class CudaGraphTarget(TargetModel):
         cache = state.cache
         if not isinstance(cache, ReplayCache):
             return super()._gather_tree_rows(state, keep_len, path)
-        storage = cache._buffer.tensor if type(cache) is ReplayCache else cache.storage
-        workspace = self._workspace.storage
-        if (storage.shape != workspace.shape or storage.device != workspace.device
-                or storage.dtype != workspace.dtype or cache.length > self.capacity):
-            raise ValueError("cache storage does not match the prepared replay workspace")
+        storage = self._request_storage(cache)
         first = path[0] if type(path) in (list, tuple) and path else -1
         if (first >= len(path) and type(storage) is torch.Tensor and storage.is_contiguous()
                 and all(offset == first + i for i, offset in enumerate(path))):

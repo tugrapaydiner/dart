@@ -142,6 +142,68 @@ def test_mutable_storage_alias_always_restores(pair, monkeypatch, access):
     assert copies == [4, 5, 6]
 
 
+@pytest.mark.parametrize('packed', [False, True])
+@pytest.mark.parametrize('bad_format, mode', [('half', 'logits'), ('integer', '2'), ('meta', 'predictions'),
+                                              ('sparse', 'logits')])
+def test_incompatible_kv_preserves_the_request(pair, packed, bad_format, mode):
+    base, target = pair
+    state, _ = target.prefill([3, 5, 7])
+    ref, _ = base.prefill([3, 5, 7])
+    if packed:
+        forward(base, target, ref, state, 'logits', 11)
+    cache = state.cache
+    length = state.seq_len
+    convert = {'half': lambda t: t.half(), 'integer': lambda t: t.to(torch.int8),
+               'meta': lambda t: t.to('meta'), 'sparse': lambda t: t.to_sparse()}[bad_format]
+    if packed:
+        saved = cache.storage
+        cache.storage = convert(saved)
+    else:
+        saved = [(layer.keys, layer.values) for layer in cache.layers]
+        for layer, (keys, values) in zip(cache.layers, saved):
+            layer.keys, layer.values = convert(keys), convert(values)
+
+    other, _ = target.prefill([2, 4])
+    target.forward_predictions(other, [13])
+    workspace = target._workspace.storage.clone()
+    with pytest.raises(ValueError, match='cache storage does not match'):
+        forward(base, target, ref, state, mode, 17)
+    assert state.cache is cache and state.seq_len == length and not state._failed
+    assert target._resident_cache() is other.cache and not target._workspace_dirty
+    assert torch.equal(target._workspace.storage, workspace)
+
+    if packed:
+        cache.storage = saved
+    else:
+        for layer, (keys, values) in zip(cache.layers, saved):
+            layer.keys, layer.values = keys, values
+    forward(base, target, ref, state, mode, 17)
+    check_cache(state, ref)
+
+
+@pytest.mark.parametrize('invalid', ['heads', 'mixed_layout'])
+def test_incompatible_dynamic_cache_fails_before_snapshot_allocation(pair, monkeypatch, invalid):
+    _, target = pair
+    state, _ = target.prefill([3, 5, 7])
+    if invalid == 'heads':
+        for layer in state.cache.layers:
+            layer.keys = layer.keys.repeat(1, 2, 1, 1)
+            layer.values = layer.values.repeat(1, 2, 1, 1)
+    else:
+        state.cache.layers[-1].values = state.cache.layers[-1].values.to_sparse()
+    new_empty = torch.Tensor.new_empty
+
+    def allocate(tensor, shape, *args, **kwargs):
+        if len(shape) == 6:
+            pytest.fail('allocated a full snapshot for an incompatible cache')
+        return new_empty(tensor, shape, *args, **kwargs)
+
+    monkeypatch.setattr(torch.Tensor, 'new_empty', allocate)
+    with pytest.raises(ValueError, match='cache storage does not match|matching shapes'):
+        target.forward_predictions(state, [11])
+    assert state.seq_len == 3 and not state._failed
+
+
 @pytest.mark.parametrize('mode', ['logits', '4'])
 @pytest.mark.parametrize('error_type', [RuntimeError, KeyboardInterrupt])
 def test_failed_execution_invalidates_workspace_reuse(pair, monkeypatch, mode, error_type):
