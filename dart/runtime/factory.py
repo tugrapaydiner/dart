@@ -18,6 +18,7 @@ import torch
 import yaml
 
 from dart.diffusion.reconciliation import ReconcilePolicy
+from dart.drafters.adaptive_lookup import AdaptiveLookupDrafter
 from dart.drafters.ar_draft import ARDrafter
 from dart.drafters.base import NullDrafter
 from dart.drafters.compressed_kv import CompressedKVDrafter
@@ -132,6 +133,11 @@ def build_tiny_target(seed: int, spec: Optional[dict] = None) -> TargetModel:
 
 
 def build_lane(name: str, spec: dict, target: TargetModel):
+    if name == "adaptive_lookup":
+        return AdaptiveLookupDrafter(
+            spec.get("block_costs", {}), spec.get("tree_costs", {}),
+            max_history=spec.get("max_history", 1024), eos_token_ids=target.eos_token_ids,
+        )
     if name == "ngram":
         return NGramDrafter(
             max_ngram=spec.get("max_ngram", 4),
