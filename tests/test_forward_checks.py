@@ -4,6 +4,7 @@ import copy
 import gc
 import json
 import weakref
+from contextlib import closing
 from dataclasses import asdict
 from types import SimpleNamespace
 
@@ -140,6 +141,104 @@ def test_logit_dtype_difference_is_not_hidden_by_conversion(monkeypatch):
     report = check_forward_paths(target, reference, (5, 6), (11,))
     assert report.incremental_full.passed and not report.passed
     assert not report.candidate_full.passed and not report.candidate_incremental.logits_bitwise
+
+
+@pytest.mark.parametrize(("fault", "kind"), [
+    ("winner", "prefill_tokens"), ("value", "prefill_logits"), ("dtype", "prefill_logits"),
+    ("nonfinite", "prefill_logits"), ("shape", "prefill_logits_shape"),
+])
+def test_prefill_forward_check_detects_fault_with_clean_block(monkeypatch, fault, kind):
+    target, reference = models()
+    original = target.prefill
+
+    def damaged(prompt):
+        state, scores = original(prompt)
+        if fault == "winner":
+            scores = scores.roll(1)
+        elif fault == "value":
+            scores = scores + 0.25
+        elif fault == "dtype":
+            scores = scores.double()
+        elif fault == "nonfinite":
+            scores[0] = float("nan")
+        else:
+            scores = scores.unsqueeze(0)
+        return state, scores
+
+    monkeypatch.setattr(target, "prefill", damaged)
+    report = check_forward_paths(target, reference, (3, 5, 7), (11, 13))
+    assert report.incremental_full.passed and not report.passed
+    for check in (report.candidate_full, report.candidate_incremental):
+        assert kind in {f.kind for f in check.failures}
+        assert all(f.kind.startswith("prefill_") for f in check.failures)
+
+
+@pytest.mark.parametrize("damage_full", [False, True])
+def test_prefill_forward_check_distinguishes_reference_paths(monkeypatch, damage_full):
+    target, reference = models()
+    original = reference.forward
+    widths = []
+
+    def changed(*args, **kwargs):
+        width = kwargs["input_ids"].shape[-1]
+        widths.append(width)
+        output = original(*args, **kwargs)
+        if width == (5 if damage_full else 3):
+            output.logits[:, 2].add_(1)
+        return output
+
+    monkeypatch.setattr(reference, "forward", changed)
+    report = check_forward_paths(target, reference, (3, 5, 7), (11, 13))
+    assert widths == [5, 3, 2] and not report.incremental_full.passed
+    assert report.candidate_full.passed is not damage_full
+    assert report.candidate_incremental.passed is damage_full
+
+
+def test_prefill_forward_check_detects_fault_in_second_prefill(monkeypatch):
+    base, reference = models()
+    with closing(CudaGraphTarget(base, capacity=16, max_block_tokens=4, capture_predictions=True, replay=False)) as target:
+        original = target.prefill
+        calls = []
+
+        def damaged(prompt):
+            state, scores = original(prompt)
+            calls.append(state.seq_len)
+            return state, scores.roll(1) if len(calls) == 2 else scores
+
+        monkeypatch.setattr(target, "prefill", damaged)
+        report = check_forward_paths(target, reference, (3, 5, 7), (11, 13))
+        assert calls == [3, 3] and report.candidate_full.passed and report.candidate_incremental.passed
+        assert report.incremental_full.passed and not report.passed
+        for check in (report.predictions_full, report.predictions_incremental):
+            assert "prefill_tokens" in {f.kind for f in check.failures}
+
+
+def test_prefill_forward_check_owns_borrowed_score_rows(monkeypatch):
+    target, reference = models()
+    prefill, block, native = target.prefill, target.forward_block, reference.forward
+    borrowed = {}
+
+    def candidate(prompt):
+        state, scores = prefill(prompt)
+        borrowed["candidate"] = scores
+        return state, scores
+
+    def forward_block(state, tokens):
+        borrowed.pop("candidate").fill_(50)
+        return block(state, tokens)
+
+    def reference_forward(*args, **kwargs):
+        if "reference" in borrowed:
+            borrowed.pop("reference").fill_(70)
+        out = native(*args, **kwargs)
+        if kwargs["input_ids"].shape[1] == 3:
+            borrowed["reference"] = out.logits
+        return out
+
+    monkeypatch.setattr(target, "prefill", candidate)
+    monkeypatch.setattr(target, "forward_block", forward_block)
+    monkeypatch.setattr(reference, "forward", reference_forward)
+    assert check_forward_paths(target, reference, (3, 5, 7), (11, 13)).passed and not borrowed
 
 
 def test_snapshot_ownership_survives_reference_output_reuse(monkeypatch):

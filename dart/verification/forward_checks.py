@@ -58,23 +58,27 @@ class _Snapshot:
     logits: torch.Tensor
     cache: tuple[tuple[torch.Tensor, torch.Tensor], ...]
     length: int
+    prefill_logits: torch.Tensor
 
 
-def _snapshot(logits, cache, length):
+def _snapshot(logits, cache, length, prefill_logits):
     pairs = _cache_pairs(cache)
     if not pairs:
         raise ValueError("forward checks require a populated KV cache")
     return _Snapshot(logits.detach().clone(),
-                     tuple(tuple(tensor.detach().clone() for tensor in pair) for pair in pairs), length)
+                     tuple(tuple(tensor.detach().clone() for tensor in pair) for pair in pairs), length, prefill_logits)
 
 
-def _reference_snapshot(output, width, length, vocab, *, full):
+def _reference_snapshot(output, width, length, vocab, *, prefill_logits=None):
+    full = prefill_logits is None
     if output.logits.shape != (1, length if full else width, vocab):
         raise ValueError("reference returned an invalid logit shape")
     cache = output.past_key_values
     if hasattr(cache, "get_seq_length") and int(cache.get_seq_length()) != length:
         raise ValueError("reference returned an invalid cache length")
-    snapshot = _snapshot(output.logits[0, -width:], cache, length)
+    if full:
+        prefill_logits = output.logits[0, -width - 1].detach().clone()
+    snapshot = _snapshot(output.logits[0, -width:], cache, length, prefill_logits)
     if (snapshot.logits.shape != (width, vocab)
             or any(tensor.ndim != 4 or tensor.shape[-2] != length for pair in snapshot.cache for tensor in pair)):
         raise ValueError("reference returned invalid logit or cache shapes")
@@ -107,28 +111,39 @@ def _compare_cache(pairs, length, expected, *, atol, rtol):
     return failures, cache_bitwise
 
 
-def _compare(actual, expected, *, atol, rtol):
+def _compare_logits(actual, expected, *, atol, rtol, prefix=""):
     failures = []
-    close, logits_bitwise = _equal(actual.logits, expected.logits, atol=atol, rtol=rtol)
-    if actual.logits.shape != expected.logits.shape:
-        failures.append(CheckFailure("logits_shape", detail="logit shapes differ"))
+    close, bitwise = _equal(actual, expected, atol=atol, rtol=rtol)
+    if actual.shape != expected.shape:
+        failures.append(CheckFailure(prefix + "logits_shape", detail="logit shapes differ"))
     else:
-        if actual.logits.argmax(-1).tolist() != expected.logits.argmax(-1).tolist():
-            failures.append(CheckFailure("tokens", detail="next-token IDs differ"))
+        if actual.argmax(-1).tolist() != expected.argmax(-1).tolist():
+            failures.append(CheckFailure(prefix + "tokens", detail="next-token IDs differ"))
         if not close:
-            failures.append(CheckFailure("logits", detail="nonfinite logits or values differ beyond tolerance"))
+            failures.append(CheckFailure(prefix + "logits", detail="logit dtype, finiteness or values differ"))
+    return failures, bitwise
+
+
+def _compare(actual, expected, *, atol, rtol):
+    failures, logits_bitwise = _compare_logits(actual.logits, expected.logits, atol=atol, rtol=rtol)
+    prompt, _ = _compare_logits(actual.prefill_logits, expected.prefill_logits, atol=atol, rtol=rtol, prefix="prefill_")
     cache_failures, cache_bitwise = _compare_cache(actual.cache, actual.length, expected, atol=atol, rtol=rtol)
-    failures.extend(cache_failures)
-    return ForwardComparison(tuple(failures), logits_bitwise, cache_bitwise)
+    return ForwardComparison((*prompt, *failures, *cache_failures), logits_bitwise, cache_bitwise)
 
 
-def _compare_predictions(ids, pairs, length, expected, *, atol, rtol):
+def _compare_predictions(ids, prefill_logits, pairs, length, expected, *, atol, rtol):
+    prompt, _ = _compare_logits(prefill_logits, expected.prefill_logits, atol=atol, rtol=rtol, prefix="prefill_")
     failures, cache_bitwise = _compare_cache(pairs, length, expected, atol=atol, rtol=rtol)
     wanted = tuple(expected.logits.argmax(-1).tolist())
     if ids != wanted:
         first = next((i for i, (a, b) in enumerate(zip(ids, wanted)) if a != b), min(len(ids), len(wanted)))
         failures.append(CheckFailure("tokens", first, "compact next-token IDs differ"))
-    return PredictionComparison(tuple(failures), cache_bitwise)
+    return PredictionComparison((*prompt, *failures), cache_bitwise)
+
+
+def _candidate_prefill(target, prefix):
+    state, logits = target.prefill(list(prefix))
+    return state, logits.detach().clone()  # The next forward can reuse the score buffer.
 
 
 def _validate(target, reference, prefix, tokens):
@@ -156,8 +171,9 @@ def check_forward_paths(target, reference_model, prefix: Sequence[int], tokens: 
 
     Supply idle, separate eval-mode models with matching weights and settings.
     The reference computes full-prefix and native cached forwards; the target
-    uses its own prefill/forward methods. Every pair must pass. Agreement with
-    the cached reference never waives disagreement with the full reference.
+    uses its own prefill/forward methods. Each pair checks the prompt's next-token
+    logits and winning ID as well as the block. The logits_bitwise flag describes
+    the block rows. Every comparison must pass.
     Targets with compact predictions enabled also check their IDs and KV from
     a fresh prefill against the same two references. Logit and cache dtypes
     are preserved and must match within each pair.
@@ -170,21 +186,25 @@ def check_forward_paths(target, reference_model, prefix: Sequence[int], tokens: 
     prefix, tokens = tuple(prefix), tuple(tokens)
     length, width = len(prefix) + len(tokens), len(tokens)
     output = _reference_forward(reference_model, (*prefix, *tokens))
-    full = _reference_snapshot(output, width, length, reference_model.config.vocab_size, full=True)
+    full = _reference_snapshot(output, width, length, reference_model.config.vocab_size)
     del output
     prefill = _reference_forward(reference_model, prefix)
+    if prefill.logits.shape != (1, len(prefix), reference_model.config.vocab_size):
+        raise ValueError("reference returned an invalid prefill logit shape")
+    prefill_logits = prefill.logits[0, -1].detach().clone()
     cache = prefill.past_key_values
     del prefill
     ids = torch.tensor([tokens], dtype=torch.long, device=reference_model.device)
     mask = torch.ones((1, length), dtype=torch.long, device=reference_model.device)
     output = reference_model(input_ids=ids, attention_mask=mask, past_key_values=cache, use_cache=True)
-    incremental = _reference_snapshot(output, width, length, reference_model.config.vocab_size, full=False)
+    incremental = _reference_snapshot(output, width, length, reference_model.config.vocab_size,
+                                      prefill_logits=prefill_logits)
     del cache, output
     reference_check = _compare(incremental, full, atol=atol, rtol=rtol)
     try:
-        state, _ = target.prefill(list(prefix))
+        state, prefill_logits = _candidate_prefill(target, prefix)
         logits = target.forward_block(state, list(tokens))
-        candidate = _snapshot(logits, state.cache, state.seq_len)
+        candidate = _snapshot(logits, state.cache, state.seq_len, prefill_logits)
         against_full = _compare(candidate, full, atol=atol, rtol=rtol)
         against_incremental = _compare(candidate, incremental, atol=atol, rtol=rtol)
     except Exception as error:
@@ -193,11 +213,12 @@ def check_forward_paths(target, reference_model, prefix: Sequence[int], tokens: 
     predictions_full = predictions_incremental = None
     if getattr(target, "capture_predictions", False):
         try:
-            state, _ = target.prefill(list(prefix))
+            state, prefill_logits = _candidate_prefill(target, prefix)
             ids = _tokens(target.forward_predictions(state, list(tokens)))
             pairs = _cache_pairs(state.cache, read_only=True)
-            predictions_full = _compare_predictions(ids, pairs, state.seq_len, full, atol=atol, rtol=rtol)
-            predictions_incremental = _compare_predictions(ids, pairs, state.seq_len, incremental, atol=atol, rtol=rtol)
+            predictions_full = _compare_predictions(ids, prefill_logits, pairs, state.seq_len, full, atol=atol, rtol=rtol)
+            predictions_incremental = _compare_predictions(ids, prefill_logits, pairs, state.seq_len, incremental,
+                                                          atol=atol, rtol=rtol)
         except Exception as error:
             failure = PredictionComparison((CheckFailure("exception", detail=f"{type(error).__name__}: {error}"),))
             predictions_full = predictions_incremental = failure
