@@ -181,6 +181,65 @@ def test_incompatible_kv_preserves_the_request(pair, packed, bad_format, mode):
     check_cache(state, ref)
 
 
+@pytest.mark.parametrize('mode, axis', [('logits', -2), ('predictions', -2), ('2', -2),
+                                        ('logits', -1), ('gather', 0)])
+def test_broadcast_snapshot_rejected_before_writing(pair, mode, axis):
+    base, target = pair
+    state, _ = target.prefill([3, 5, 7])
+    ref, _ = base.prefill([3, 5, 7])
+    forward(base, target, ref, state, 'predictions', 11)
+    saved = state.cache.storage
+    broadcast = saved.narrow(axis, 0, 1).expand_as(saved)
+    state.cache.storage = broadcast
+    before = broadcast.contiguous().view(torch.uint8).clone()
+    other, _ = target.prefill([2, 4])
+    target.forward_predictions(other, [13])
+    workspace = target._workspace.storage.clone()
+
+    def step():
+        if mode == 'gather':
+            target.gather_tree_tail(state, 1, [2, 0])
+        else:
+            forward(base, target, ref, state, mode, 17)
+
+    with pytest.raises(ValueError, match='broadcast'):
+        step()
+    assert state.cache.storage is broadcast and state.seq_len == 4 and not state._failed
+    assert torch.equal(broadcast.contiguous().view(torch.uint8), before)
+    assert target._resident_cache() is other.cache and not target._workspace_dirty
+    assert torch.equal(target._workspace.storage.view(torch.uint8), workspace.view(torch.uint8))
+
+    state.cache.storage = saved
+    if mode == 'gather':
+        base.gather_tree_tail(ref, 1, [2, 0])
+        step()
+        forward(base, target, ref, state, 'logits', 17)
+    else:
+        step()
+    check_cache(state, ref)
+
+
+def test_writable_strided_snapshot_preserves_external_updates(pair):
+    base, target = pair
+    state, _ = target.prefill([3, 5, 7])
+    ref, _ = base.prefill([3, 5, 7])
+    forward(base, target, ref, state, 'predictions', 11)
+    with torch.inference_mode():
+        saved = state.cache.storage
+        backing = saved.new_zeros((*saved.shape[:-1], 2 * saved.size(-1)))
+        view = backing[..., 1::2]
+        strides = list(view.stride())
+        strides[2] = 0  # Batch size is one.
+        view = view.as_strided(view.shape, strides)
+        view.copy_(saved)
+        state.cache.storage = view
+        view[0, 1, ..., 0, :].add_(0.25)
+        ref.cache.layers[0].values[..., 0, :].add_(0.25)
+    forward(base, target, ref, state, '2', 17)
+    check_cache(state, ref)
+    assert state.cache.storage is view and backing[..., ::2].count_nonzero() == 0
+
+
 @pytest.mark.parametrize('invalid', ['heads', 'mixed_layout'])
 def test_incompatible_dynamic_cache_fails_before_snapshot_allocation(pair, monkeypatch, invalid):
     _, target = pair

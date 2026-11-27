@@ -506,6 +506,10 @@ class CudaGraphTarget(TargetModel):
             raise ValueError("cache belongs to a different replay target")
         storage = cache._buffer.tensor if type(cache) is ReplayCache else cache.storage
         _check_kv_storage(storage, storage.shape, self._workspace.storage)
+        if not storage.is_contiguous() and any(
+            size > 1 and stride == 0 for size, stride in zip(storage.shape, storage.stride())
+        ):
+            raise ValueError("replay cache storage cannot broadcast writable KV entries")
         if cache.length > self.capacity:
             raise ValueError("cache prefix exceeds replay capacity")
         return storage
