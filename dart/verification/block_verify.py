@@ -103,8 +103,17 @@ def _block_predictions(logits, p_len, drafts):
 
     if len(drafts) >= 3 and type(drafts[0]) is int:
         predictions = _cpu_greedy_indices(logits[:p_len]).tolist()
-        if predictions[-1] == drafts[0]:  # A first rejection leaves the remaining rows unused.
-            predictions.extend(_cpu_greedy_indices(logits[p_len:]).tolist())
+        if predictions[-1] != drafts[0]:
+            return predictions
+        start = p_len
+        if (len(drafts) >= 6 and type(logits) is torch.Tensor and type(drafts) is list
+                and type(drafts[1]) is int and type(drafts[2]) is int):
+            next_two = _cpu_greedy_indices(logits[start:start + 2]).tolist()
+            predictions.extend(next_two)
+            if next_two != drafts[1:3]:  # A mismatch makes the remaining rows unnecessary.
+                return predictions
+            start += 2
+        predictions.extend(_cpu_greedy_indices(logits[start:]).tolist())
         return predictions
     return _cpu_greedy_indices(logits).tolist()
 

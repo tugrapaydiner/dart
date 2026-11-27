@@ -78,6 +78,12 @@ def test_no_eos_keeps_full_block(drafts, eos):
     ([11, 50, 13, 14], [], 32_000, 1, False, True, "split"),
     ([11, 12, 13, 14], [], 32_000, 1, False, False, "split"),
     ([11, 12, 13, 14], [14], 32_000, 1, False, True, "split"),
+    ([11, 50, 13, 14, 15, 16, 17, 18], [12], 32_000, 1, False, True, "early"),
+    ([11, 12, 50, 14, 15, 16], [], 32_000, 1, False, False, "early"),
+    ([11, 12, 13, 50, 15, 16], [], 32_000, 1, False, True, "tail"),
+    (list(range(11, 19)), [], 32_000, 1, False, False, "tail"),
+    (list(range(11, 19)), [18], 32_000, 1, False, True, "tail"),
+    ([11, 50, 13, 14, 15], [], 32_000, 1, False, False, "split"),
     ([50, 12], [], 32_000, 1, False, False, "full"),
     ([50, 12, 13, 14], [], 31_999, 1, False, False, "full"),
     ([50, 12, 13, 14], [], 32_000, 2, False, False, "full"),
@@ -103,6 +109,7 @@ def test_block_prediction_rows(pending, drafts, eos, vocab, threads, capture, en
     forwarded = drafts[:next((i for i, token in enumerate(drafts) if token in eos), len(drafts))]
     assert target.calls == [pending + forwarded]
     expected_rows = {"prefix": [len(pending)], "split": [len(pending), len(forwarded)],
+                     "early": [len(pending), 2], "tail": [len(pending), 2, len(forwarded) - 2],
                      "full": [len(pending) + len(forwarded)], "captured": []}
     assert rows == expected_rows[scans]
     expected_op = "max" if vocab >= 32_000 and threads == 1 else "argmax"
@@ -118,6 +125,23 @@ def test_block_prediction_rows(pending, drafts, eos, vocab, threads, capture, en
         torch.testing.assert_close(result.entropy, float(-(probs * probs.clamp_min(1e-12).log()).sum()))
     else:
         assert result.entropy == 0
+
+
+@pytest.mark.parametrize("position", [1, 2])
+def test_custom_draft_comparison_runs_only_when_reached(position, monkeypatch):
+    class Token(int):
+        def __eq__(self, other):
+            comparisons.append(int(self))
+            return super().__eq__(other)
+
+    comparisons = []
+    drafts = list(range(11, 19))
+    drafts[position] = Token(50)
+    state = SimpleNamespace(seq_len=3)
+    monkeypatch.setattr(torch, "get_num_threads", lambda: 1)
+    result = verify_block_greedy(CountingTarget([], False, 32_000), state, 10, drafts, compute_entropy=False)
+    assert result.committed == list(range(11, 12 + position))
+    assert comparisons == [50]
 
 
 @pytest.mark.parametrize("layout", ["contiguous", "padded", "strided", "double", "subclass"])
