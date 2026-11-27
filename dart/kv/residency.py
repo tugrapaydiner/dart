@@ -70,18 +70,27 @@ def move_cache(cache: DynamicCache, device: str | torch.device, pin: bool = Fals
     """
     stats = ResidencyStats()
     target = torch.device(device)
-    if not torch.cuda.is_available() and target.type != "cpu":
+    to_host = target.type == "cpu"
+    if not to_host and not torch.cuda.is_available():
         return stats  # nothing to do on CPU-only hosts
     if target.type == "cuda" and target.index is None:
         target = torch.device("cuda", torch.cuda.current_device())  # Tensors report an explicit index.
+    host_slots = []
+    sources = set()
     for get, set_ in _layer_slots(cache):
         t = get()
         if t is None or not isinstance(t, torch.Tensor) or t.device == target:
             continue
-        moved = t.to(device, non_blocking=True)
-        if pin and target.type == "cpu":
-            moved = moved.pin_memory()
-        set_(moved)
+        if to_host and t.device.type == "cuda":
+            host_slots.append((set_, t.to(device, non_blocking=True)))
+            sources.add(t.device)
+        else:
+            moved = t.to(device, non_blocking=not to_host)
+            set_(moved.pin_memory() if pin and to_host else moved)
         stats.moved_tensors += 1
         stats.moved_bytes += t.numel() * t.element_size()
+    for source in sources:
+        torch.cuda.current_stream(source).synchronize()  # Wait once for this device's copies.
+    for set_, moved in host_slots:
+        set_(moved.pin_memory() if pin else moved)
     return stats

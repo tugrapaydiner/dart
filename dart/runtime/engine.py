@@ -68,6 +68,12 @@ _VERIFIERS: dict[str, VerifyFn] = {
 }
 
 
+def _park_cache(cache, ready):
+    if ready is not None:
+        ready.synchronize()  # The verifier may use a different stream.
+    return move_cache(cache, "cpu", pin=True)
+
+
 def _tree_keywords(propose) -> tuple[str, ...]:
     try:
         params = signature(propose, follow_wrapped=False).parameters
@@ -630,13 +636,9 @@ class DartEngine:
                     )
                     self.trace.log_round(run_id, rec, result.committed)
                     if park_kv and not finished and len(generated) < config.max_new_tokens:
-                        # Offload the verifier KV to host, overlapped with the next
-                        # round's drafting.  Capture the cache object now so a later
-                        # forward rebinding state.cache can't race the worker.
-                        cache_ref = state.cache
-                        pending_park = prefetcher.prefetch(
-                            lambda c=cache_ref: move_cache(c, "cpu", pin=True)
-                        )
+                        ready = (torch.cuda.current_stream(target.device).record_event()
+                                 if torch.device(target.device).type == "cuda" else None)
+                        pending_park = prefetcher.prefetch(partial(_park_cache, state.cache, ready))
 
                 rounds.append(rec)
                 metrics.record_round(rec)
