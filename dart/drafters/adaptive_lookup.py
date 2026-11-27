@@ -3,12 +3,14 @@
 from __future__ import annotations
 
 import math
-from collections import Counter, defaultdict
+from collections import defaultdict
 from collections.abc import Collection, Mapping
 from numbers import Real
 from threading import local
 
 from dart.verification.tree_verify import DraftTree
+
+_MAX_ROOTS = 15
 
 
 def _costs(values: Mapping[int, float], minimum_rows: int) -> dict[int, float]:
@@ -29,11 +31,24 @@ class _History:
         self.eos = eos
         self.tokens: list[int] = []
         self.positions: dict[int, list[int]] = defaultdict(list)
-        self.counts: Counter[int] = Counter()
+        self.roots: list[int] = []
         self.survival = defaultdict(lambda: [0, 0])
         self.pending = []
         self.context = (0, False)
         self.offers = {}
+
+    def _rank_root(self, token: int, count: int) -> None:
+        roots = self.roots
+        if token in self.eos or (len(roots) == _MAX_ROOTS and count < len(self.positions[roots[-1]])):
+            return
+        if token in roots:
+            roots.remove(token)
+        index = 0
+        while index < len(roots) and len(self.positions[roots[index]]) > count:
+            index += 1
+        roots.insert(index, token)  # The most recent token wins a frequency tie.
+        if len(roots) > _MAX_ROOTS:
+            roots.pop()
 
     def _continuations(self):
         tokens = self.tokens
@@ -70,10 +85,8 @@ class _History:
             if len(pair) == 2:
                 offers["pair"] = pair
         else:
-            ranked = sorted((t for t in self.counts if t not in self.eos),
-                            key=lambda t: (self.counts[t], self.positions[t][-1]), reverse=True)
-            roots = [(t,) for t in ranked[:15]]
-            offers = {f"roots{n}": tuple(roots[:n]) for n in (2, 4, 8, 15) if roots}
+            roots = [(t,) for t in self.roots]
+            offers = {f"roots{n}": tuple(roots[:n]) for n in (2, 4, 8, _MAX_ROOTS) if roots}
         return context, offers
 
     def append(self, token: int) -> None:
@@ -87,8 +100,9 @@ class _History:
             tails = tuple(p[1:] for p in hits if len(p) > 1)
             if tails:
                 pending.append((context, name, depth + 1, tails))
-        self.positions[token].append(len(self.tokens))
-        self.counts[token] += 1
+        positions = self.positions[token]
+        positions.append(len(self.tokens))
+        self._rank_root(token, len(positions))
         self.tokens.append(token)
         self.context, self.offers = self._offers()
         pending.extend((self.context, name, 1, paths) for name, paths in self.offers.items())

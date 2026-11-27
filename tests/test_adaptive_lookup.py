@@ -1,3 +1,4 @@
+from collections import Counter
 from concurrent.futures import ThreadPoolExecutor
 from threading import Barrier
 
@@ -29,6 +30,22 @@ def test_frequent_roots_respect_prices_and_node_budget():
     assert drafter.propose_tree(tokens, 1, max_nodes=2) == DraftTree([2, 7], [-1, -1])
     assert drafter.propose_tree(tokens, 1, max_nodes=1) == DraftTree([], [])
     assert drafter.propose(tokens, 2) == []
+
+
+@pytest.mark.parametrize("width", [2, 4, 8, 15])
+def test_frequent_roots_follow_promotions_and_recency_ties(width):
+    drafter = AdaptiveLookupDrafter({1: 2}, {width + 1: 1}, eos_token_ids={99})
+    tokens = [99] * 30 + list(range(20))
+    drafter.after_prefill()
+    try:
+        for added in ([], [0, 21], [1, 1, 1, 22], list(range(18, 3, -1)) + [23], [0, 1, 2, 0, 24]):
+            tokens.extend(added)  # A new final token requests frequent roots.
+            counts = Counter(tokens)
+            latest = {token: i for i, token in enumerate(tokens) if token != 99}
+            expected = sorted(latest, key=lambda token: (counts[token], latest[token]), reverse=True)[:width]
+            assert drafter.propose_tree(tokens, 1) == DraftTree(expected, [-1] * width)
+    finally:
+        drafter.finish_request()
 
 
 def test_uses_recent_branches_and_prices_the_clipped_shape():
