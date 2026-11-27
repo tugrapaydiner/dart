@@ -9,7 +9,7 @@ no forward) so no per-layer attention internals are needed:
     block score = <mean embedding of block, mean embedding of recent window>
 
 Like the sink+window sparse lane this is *sequence compaction* (keep the
-selected blocks' tokens, drop the rest, prefill the compacted sequence), so
+selected blocks' tokens and draft on that sequence), so
 it stays independent of transformers cache internals.  The full verifier
 sees everything, so output is exact; block selection only moves acceptance
 (docs/design.md §9.3).
@@ -19,7 +19,7 @@ from __future__ import annotations
 
 import torch
 
-from dart.attention.block_sparse import block_sparse_mask, score_blocks, select_blocks
+from dart.attention.block_sparse import score_blocks, select_block_ids
 from dart.drafters.ar_draft import ARDrafter
 from dart.models.target import TargetModel
 
@@ -54,20 +54,22 @@ class BlockSparseKVDrafter(ARDrafter):
         vecs = emb(ids).detach().float()  # [N, D] - lookup only, no forward
         recent = vecs[-self.recent_blocks * self.block_size :]
         scores = score_blocks(recent, vecs, self.block_size)
-        kept = select_blocks(
+        kept = select_block_ids(
             scores, top_k=self.top_k,
             always_first=self.sink_blocks, always_last=self.recent_blocks,
         )
-        mask = block_sparse_mask(n, self.block_size, kept, device=str(self.dm.device))
-        compacted = [committed[i] for i in range(n) if bool(mask[i])]
+        compacted = []
+        for block in kept:
+            start = block * self.block_size
+            compacted.extend(committed[start : start + self.block_size])
         return compacted, True
 
     @torch.inference_mode()
     def propose(self, committed: list[int], max_tokens: int) -> list[int]:
         compacted, compacted_now = self._select(committed)
         self.compacted_last_round = compacted_now
-        if compacted_now:
-            # Selection changes round to round, so the compacted view is not a
-            # prefix-extension of the previous one: re-prefill it fresh.
+        try:
+            return super().propose(compacted, max_tokens)  # Checks the selected token prefix before reuse.
+        except BaseException:
             self.reset()
-        return super().propose(compacted, max_tokens)
+            raise

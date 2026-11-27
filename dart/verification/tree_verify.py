@@ -34,12 +34,23 @@ the suite validates the tiny reference target).  Greedy/exact mode only.
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from collections.abc import Iterable
+from dataclasses import dataclass
 
 import torch
 
 from dart.models.target import TargetModel, TargetState
 from dart.runtime.types import VerifyResult
+from dart.verification.greedy import (
+    _cpu_greedy_indices,
+    _restore_failed_round,
+    _scalar_token_id,
+)
+
+
+def _check_parent(index: int, parent: int) -> None:
+    if type(parent) is not int or not -1 <= parent < index:
+        raise ValueError(f"node {index}: parent {parent} must be -1 or a preceding index")
 
 
 @dataclass
@@ -50,37 +61,63 @@ class DraftTree:
 
     tokens: list[int]
     parent: list[int]
-    _depths: list[int] = field(default_factory=list, repr=False)
 
     def __post_init__(self) -> None:
+        self._check_size()
+        for index, parent in enumerate(self.parent):
+            _check_parent(index, parent)
+
+    def _check_size(self) -> None:
         if len(self.tokens) != len(self.parent):
             raise ValueError("tokens and parent must have equal length")
-        for i, p in enumerate(self.parent):
-            if p >= i or p < -1:
-                raise ValueError(
-                    f"node {i}: parent {p} must be -1 or a preceding index"
-                )
-        d: list[int] = []
-        for p in self.parent:
-            d.append(0 if p < 0 else d[p] + 1)
-        self._depths = d
 
     def __len__(self) -> int:
         return len(self.tokens)
 
     @property
     def depths(self) -> list[int]:
-        return self._depths
+        self._check_size()
+        depths: list[int] = []
+        for index, parent in enumerate(self.parent):
+            _check_parent(index, parent)
+            depths.append(0 if parent < 0 else depths[parent] + 1)
+        return depths
 
-    def truncate(self, max_tokens: int) -> "DraftTree":
-        if not self.tokens or max(self._depths) < max_tokens:
+    def truncate(self, max_tokens: int, *, max_nodes: int | None = None) -> "DraftTree":
+        """Keep nodes within the depth budget, in packing order, up to the node limit."""
+        self._check_size()
+        if max_nodes is not None and (type(max_nodes) is not int or max_nodes < 0):
+            raise ValueError("max_nodes must be a nonnegative integer")
+        count = len(self) if max_nodes is None else min(len(self), max_nodes)
+        if max_tokens >= count:
+            if count == len(self):
+                for index, parent in enumerate(self.parent):
+                    _check_parent(index, parent)
+            return self.limit(count)  # A path cannot be longer than the number of kept nodes.
+        if max_tokens <= 0:
+            return DraftTree([], []) if self.tokens else self
+
+        slots = {-1: (-1, 0)}  # Packed parent and depth of its children.
+        parents = []
+        for index, parent in enumerate(self.parent):
+            _check_parent(index, parent)
+            kept_parent = slots.get(parent)
+            if kept_parent is None or not kept_parent[1] < max_tokens:
+                continue
+            new_parent, depth = kept_parent
+            slots[index] = (len(parents), depth + 1)
+            parents.append(new_parent)
+            if len(parents) == count:
+                break
+        if len(parents) == len(self):
             return self
-        kept = [i for i, depth in enumerate(self._depths) if depth < max_tokens]
-        remap = {old: new for new, old in enumerate(kept)}
-        return DraftTree(
-            [self.tokens[i] for i in kept],
-            [-1 if self.parent[i] < 0 else remap[self.parent[i]] for i in kept],
-        )
+        return DraftTree([self.tokens[i] for i in slots if i != -1], parents)
+
+    def limit(self, max_nodes: int) -> "DraftTree":
+        """Keep the first ``max_nodes`` packed nodes; parents precede children."""
+        if len(self.tokens) <= max_nodes:
+            return self
+        return DraftTree(self.tokens[:max_nodes], self.parent[:max_nodes])
 
     @classmethod
     def chain(cls, tokens: list[int]) -> "DraftTree":
@@ -88,12 +125,18 @@ class DraftTree:
         return cls(list(tokens), [i - 1 for i in range(len(tokens))])
 
     @classmethod
-    def from_branches(cls, branches: list[list[int]]) -> "DraftTree":
+    def from_branches(cls, branches: Iterable[Iterable[int]], *, max_nodes: int | None = None) -> "DraftTree":
         """Pack independent candidate continuations, sharing common prefixes.
 
         Branches that start with the same tokens share nodes (a trie), so
         proposing [[a, b], [a, c]] costs three packed nodes, not four.
+        With a node limit, stop reading branches as soon as the tree is full.
         """
+        if max_nodes is not None:
+            if type(max_nodes) is not int or max_nodes < 0:
+                raise ValueError("max_nodes must be a nonnegative integer")
+            if max_nodes == 0:
+                return cls([], [])
         tokens: list[int] = []
         parent: list[int] = []
         # trie: (parent_idx, token) -> node_idx
@@ -106,10 +149,72 @@ class DraftTree:
                 if idx is None:
                     tokens.append(int(tok))
                     parent.append(p)
+                    if len(tokens) == max_nodes:
+                        return cls(tokens, parent)
                     idx = len(tokens) - 1
                     seen[key] = idx
                 p = idx
         return cls(tokens, parent)
+
+
+def _is_chain(tree: DraftTree) -> bool:
+    return len(tree.parent) == len(tree) and all(
+        type(parent) is int and parent == index - 1 for index, parent in enumerate(tree.parent)
+    )
+
+
+
+def _index_tree_edges(tree: DraftTree) -> tuple[DraftTree, dict[tuple[int, int], int] | None]:
+    if len(tree.parent) != len(tree.tokens):
+        return tree, None
+    edges = {}
+    slots = []
+    for index, (parent, token) in enumerate(zip(tree.parent, tree.tokens)):
+        if type(parent) is not int or not -1 <= parent < index:
+            return tree, None
+        if type(token) is not int:
+            token = _scalar_token_id(token)
+            if token is None:
+                return tree, None  # Keep the target's normal input checks.
+        parent = slots[parent] if parent >= 0 else -1
+        slots.append(edges.setdefault((parent, token), len(edges)))
+    if len(edges) < len(tree):
+        tree = DraftTree([token for _, token in edges], [parent for parent, _ in edges])
+    return tree, edges
+
+
+def _live_tree_rows(target, tree: DraftTree, edges, context_len: int):
+    eos = target.eos_token_ids
+    if not eos or edges is None or not any(token in eos for _, token in edges):
+        return None
+    config = getattr(getattr(target, "model", None), "config", None)
+    vocab = getattr(config, "vocab_size", None)
+    if type(vocab) is not int:
+        return None
+    depths = []
+    for parent, token in edges:
+        if not 0 <= token < vocab:
+            return None  # The full forward checks invalid IDs.
+        depths.append(0 if parent < 0 else depths[parent] + 1)
+    length = context_len + max(depths) + 1
+    for limit in (getattr(config, "max_position_embeddings", None), getattr(target, "context_limit", None)):
+        if limit is not None and (type(limit) is not int or length > limit):
+            return None
+    tokens, parents, slots = [], [], {}
+    for index, (parent, token) in enumerate(edges):
+        if token in eos or (parent >= 0 and parent not in slots):
+            continue  # EOS and its descendants never supply a decision row.
+        slots[index] = len(tokens)
+        tokens.append(tree.tokens[index])
+        parents.append(-1 if parent < 0 else slots[parent])
+    return tokens, parents, slots
+
+
+def _fits_causal_block(target, pending_len: int, parents: list[int]) -> bool:
+    limit = getattr(target, "max_block_tokens", None)
+    if limit is not None and (type(limit) is not int or pending_len + len(parents) > limit):
+        return False
+    return callable(getattr(target, "forward_block", None)) and all(p == i - 1 for i, p in enumerate(parents))
 
 
 @torch.inference_mode()
@@ -118,29 +223,58 @@ def verify_tree_greedy(
     state: TargetState,
     pending: int | list[int],
     draft_tree: "DraftTree | list[int]",
+    *,
+    compute_entropy: bool = True,
 ) -> VerifyResult:
     """Greedy tree verification.  Same state contract as the block verifier:
     on entry the cache covers everything before the pending block; on exit
-    it covers all committed tokens except the new pending one."""
+    it covers all committed tokens except the new pending one.
+    Set compute_entropy=False when no consumer needs that signal.
+    """
     if not isinstance(draft_tree, DraftTree):
         draft_tree = DraftTree.chain(list(draft_tree))
     pending_block = [pending] if isinstance(pending, int) else list(pending)
     if not pending_block:
         raise ValueError("pending block must contain at least one token")
-    p_len = len(pending_block)
     n = len(draft_tree)
-    base_len = state.seq_len
 
-    if n == 0:
-        # No drafts: identical to a plain target step via the block path.
+    chain = n == 0 or _is_chain(draft_tree)
+    if not chain:
+        draft_tree, edges = _index_tree_edges(draft_tree)
+        chain = len(draft_tree) < n and _is_chain(draft_tree)
+    if chain:
         from dart.verification.block_verify import verify_block_greedy
 
-        return verify_block_greedy(target, state, pending_block, [])
+        result = verify_block_greedy(target, state, pending_block, draft_tree.tokens, compute_entropy=compute_entropy)
+        if result.n_draft_proposed != n:
+            result.n_draft_proposed = n  # Count the submitted nodes.
+            result.all_accepted = False
+        return result
 
-    logits = target.forward_tree(
-        state, pending_block, draft_tree.tokens, draft_tree.parent
-    )
-    preds = torch.argmax(logits, dim=-1).tolist()
+    base_len = state.seq_len
+    try:
+        return _verify_branches(target, state, pending_block, draft_tree, n, edges, base_len, compute_entropy)
+    except BaseException:
+        _restore_failed_round(target, state, base_len)
+        raise
+
+
+def _verify_branches(target, state, pending_block, draft_tree, n, edges, base_len, compute_entropy):
+    p_len = len(pending_block)
+    live = _live_tree_rows(target, draft_tree, edges, base_len + p_len)
+    tokens, parents, slots = (draft_tree.tokens, draft_tree.parent, None) if live is None else live
+    causal = live is not None and _fits_causal_block(target, p_len, parents)
+    path_only = False
+    if causal and not compute_entropy and getattr(target, "capture_predictions", False):
+        preds = target.forward_predictions(state, pending_block + tokens)
+    else:
+        logits = (target.forward_block(state, pending_block + tokens) if causal
+                  else target.forward_tree(state, pending_block, tokens, parents))
+        path_only = logits.device.type == "cpu" and logits.size(-1) >= 32_000 and torch.get_num_threads() == 1
+        if path_only:
+            preds = _cpu_greedy_indices(logits[:p_len]).tolist()
+        else:
+            preds = torch.argmax(logits, dim=-1).tolist()
 
     # Divergence audit of unverified pending tokens (approx-mode metadata;
     # 0 in exact mode by construction) - matches the block verifier.
@@ -148,42 +282,38 @@ def verify_tree_greedy(
         1 for j in range(1, p_len) if pending_block[j] != preds[j - 1]
     )
 
-    children: dict[int, list[int]] = {}
-    for i, p in enumerate(draft_tree.parent):
-        children.setdefault(p, []).append(i)
-
     # Greedy argmax walk from the prefix down the tree.
     path: list[int] = []          # accepted node indices, root-first
+    children: dict[int, list[int]] | None = None
     cur_parent = -1
     cur_row = p_len - 1           # row deciding the next position
     accepted_eos = False
-    correction: int | None = None
+    committed = []
+    want = int(preds[cur_row])
     while True:
-        want = preds[cur_row]
-        nxt = next(
-            (c for c in children.get(cur_parent, [])
-             if draft_tree.tokens[c] == want),
-            None,
-        )
+        committed.append(want)
+        if edges is not None:
+            nxt = edges.get((cur_parent, want))
+        else:
+            if children is None:  # Some scalar IDs compare by value but hash by identity.
+                children = {}
+                for i, p in enumerate(draft_tree.parent):
+                    children.setdefault(p, []).append(i)
+            nxt = next((c for c in children.get(cur_parent, ()) if draft_tree.tokens[c] == want), None)
         if nxt is None:
-            correction = want  # target's own token; may terminate the walk
             break
         path.append(nxt)
-        if draft_tree.tokens[nxt] in target.eos_token_ids:
+        if want in target.eos_token_ids:
             accepted_eos = True
             break
         cur_parent = nxt
-        cur_row = p_len + nxt
+        cur_row = p_len + (nxt if slots is None else slots[nxt])
+        want = int(_cpu_greedy_indices(logits[cur_row]) if path_only else preds[cur_row])
 
     m = len(path)
-    if accepted_eos:
-        committed = [draft_tree.tokens[i] for i in path]
-        finished = True
-    else:
-        committed = [draft_tree.tokens[i] for i in path] + [int(correction)]
-        finished = committed[-1] in target.eos_token_ids
+    finished = committed[-1] in target.eos_token_ids
 
-    if accepted_eos:
+    if accepted_eos or not compute_entropy:
         entropy = 0.0
     else:
         dist = torch.softmax(logits[cur_row].float(), dim=-1)
@@ -192,7 +322,11 @@ def verify_tree_greedy(
     # Keep the accepted path's KV entries, drop every other packed node,
     # then align with the block verifier's postcondition (the final
     # committed token is the new pending one and is never in cache).
-    target.gather_tree_tail(state, base_len + p_len, path)
+    if not causal:  # A causal block keeps a contiguous prefix.
+        kept_path = path[:-1] if accepted_eos else path  # EOS stays pending.
+        if slots is not None:
+            kept_path = [slots[index] for index in kept_path]
+        target.gather_tree_tail(state, base_len + p_len, kept_path)
     target.crop(state, base_len + p_len - 1 + len(committed))
 
     return VerifyResult(

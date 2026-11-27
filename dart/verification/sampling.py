@@ -31,6 +31,8 @@ from torch import Tensor
 
 from dart.models.target import TargetModel, TargetState
 from dart.runtime.types import VerifyResult
+from dart.verification.block_verify import _draft_before_eos
+from dart.verification.greedy import _restore_failed_round, _scalar_token_id
 
 
 def speculative_accept_step(
@@ -46,6 +48,10 @@ def speculative_accept_step(
     Exactness requires only that ``draft_token`` was actually sampled
     from ``q_row`` (trivially true for one-hot).
     """
+    if type(draft_token) is not int:
+        token_id = _scalar_token_id(draft_token)
+        if token_id is not None:
+            draft_token = token_id  # A byte tensor would index probabilities as a mask.
     p_d = float(p[draft_token])
     q_d = 1.0 if q_row is None else float(q_row[draft_token])
     if q_d <= 0.0:
@@ -60,7 +66,7 @@ def speculative_accept_step(
         accept_prob = min(1.0, p_d / q_d)
     u = float(torch.rand((), device=p.device, generator=generator))
     if u < accept_prob:
-        return draft_token, True
+        return int(draft_token), True
 
     if q_row is None:
         residual = p.clone()
@@ -77,7 +83,20 @@ def speculative_accept_step(
 
 def _softmax_with_temperature(logits: Tensor, temperature: float) -> Tensor:
     t = max(float(temperature), 1e-6)
-    return torch.softmax(logits.float() / t, dim=-1)
+    scores = logits.float()
+    if t != 1.0:
+        scores = scores / t
+    return torch.softmax(scores, dim=-1)
+
+
+def _sampling_rows(logits: Tensor, temperature: float, one_hot: bool):
+    if (one_hot and type(logits) is Tensor and logits.device.type == "cpu" and logits.layout == torch.strided
+            and logits.size(0) >= 3 and logits.size(-1) >= 32_000 and torch.get_num_threads() == 1):
+        yield _softmax_with_temperature(logits[0], temperature)
+        logits = logits[1:]  # Only an accepted first draft can reach the suffix.
+    probs = _softmax_with_temperature(logits, temperature)
+    for index in range(probs.size(0)):
+        yield probs[index]
 
 
 @torch.inference_mode()
@@ -92,43 +111,55 @@ def verify_block_sampling(
 ) -> VerifyResult:
     """Sampling analogue of verify_block_greedy: one target pass checks the
     whole block; KV for rejected suffixes is cropped.  Same state contract
-    as the greedy verifiers (see verification/greedy.py)."""
+    as the greedy verifiers (see verification/greedy.py). A failed decision
+    rolls back the request cache. Random draws already made stay consumed."""
     pending_block = [pending] if isinstance(pending, int) else list(pending)
+    if not pending_block:
+        raise ValueError("pending block must contain at least one token")
     drafts = list(draft_tokens)
-    k = len(drafts)
     base_len = state.seq_len
+    pending_len = len(pending_block)
+    forward_drafts = _draft_before_eos(target, base_len, pending_len, drafts)
+    try:
+        logits = target.forward_block(state, pending_block + forward_drafts)
+        probs = _sampling_rows(logits[pending_len - 1:], temperature, draft_probs is None)
+        result = _sample_drafts(probs, draft_probs, drafts, target.eos_token_ids, pending_len, generator)
+        target.crop(state, base_len + pending_len - 1 + len(result.committed))
+        return result
+    except BaseException:
+        _restore_failed_round(target, state, base_len)
+        raise
 
-    logits = target.forward_block(state, pending_block + drafts)
-    probs = _softmax_with_temperature(logits, temperature)
-    off = len(pending_block) - 1  # row `off + i` is the distribution for drafts[i]
 
+def _sample_drafts(probs, draft_probs, drafts, eos_ids, pending_len, generator):
+    k = len(drafts)
     committed: list[int] = []
     n_accepted = 0
     finished = False
     for i in range(k):
+        row = next(probs)
         q_row = draft_probs[i] if draft_probs is not None else None
         token, accepted = speculative_accept_step(
-            probs[off + i], q_row, drafts[i], generator
+            row, q_row, drafts[i], generator
         )
         committed.append(token)
         if accepted:
             n_accepted += 1
-        if token in target.eos_token_ids:
+        if token in eos_ids:
             finished = True
             break
         if not accepted:
             break
     else:
-        bonus = int(torch.multinomial(probs[off + k], 1, generator=generator).item())
+        bonus = int(torch.multinomial(next(probs), 1, generator=generator).item())
         committed.append(bonus)
-        finished = bonus in target.eos_token_ids
+        finished = bonus in eos_ids
 
-    target.crop(state, base_len + len(pending_block) - 1 + len(committed))
     return VerifyResult(
         committed=committed,
         n_draft_proposed=k,
         n_draft_accepted=n_accepted,
         all_accepted=(n_accepted == k),
         finished=finished,
-        hidden_index=len(pending_block) + len(committed) - 2,
+        hidden_index=pending_len + len(committed) - 2,
     )

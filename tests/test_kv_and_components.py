@@ -38,6 +38,34 @@ def test_quantize_roundtrip_error(bits, tol):
     assert err <= tol * span
 
 
+@pytest.mark.parametrize("bits", [2, 3, 4, 6, 8])
+def test_fp16_cache_range_keeps_scales_and_endpoints(bits):
+    rows = torch.tensor([[-65504, -127, 65504], [0, 2**-22, 2**-20], [3, 3, 3]], dtype=torch.float16)
+    q, scale, zero = quantize_blockwise(rows, bits)
+    levels = (1 << bits) - 1
+    span = rows[:, -1:].float() - rows[:, :1].float()
+    torch.testing.assert_close(scale, span.clamp_min(1e-8) / levels, rtol=0, atol=0)
+    torch.testing.assert_close(zero, rows[:, :1].float(), rtol=0, atol=0)
+    assert q[:, 0].tolist() == [0, 0, 0]
+    assert q[:, -1].tolist() == [levels, levels, 0]
+
+    restored = dequantize_blockwise(q, scale, zero, torch.float32)
+    assert torch.all((restored - rows.float()).abs() <= scale * 0.5 + torch.finfo(torch.float32).eps * span)
+
+
+def test_fp16_cache_range_survives_aging_and_crop():
+    cache = QuantizedKVCache(QuantSpec(bits=8, sink_len=0, window_len=1))
+    keys = torch.tensor([[-65504, 65504], [0, 2**-20], [-2, 8]], dtype=torch.float16).view(1, 1, 3, 2)
+    values = keys.flip((-1,))
+    actual = cache.update(keys, values, 0)
+    for got, expected in zip(actual, (keys, values)):
+        torch.testing.assert_close(got, expected, rtol=0, atol=0)
+    cache.crop(1)
+    actual = cache.update(keys[..., 2:, :], values[..., 2:, :], 0)
+    for got, original in zip(actual, (keys, values)):
+        torch.testing.assert_close(got, original[..., [0, 2], :], rtol=0, atol=0)
+
+
 def test_quantstore_append_crop_and_bytes():
     s = QuantStore()
     x = torch.randn(1, 2, 4, 8)
@@ -72,6 +100,167 @@ def test_quantized_kv_cache_ages_and_crops():
     assert cache.get_seq_length() == 5
     k2, _ = cache.update(torch.randn(1, 2, 1, 8), torch.randn(1, 2, 1, 8), 0)
     assert k2.size(-2) == 6
+
+
+@pytest.mark.parametrize("heads,window", [(1, 0), (1, 3), (2, 3)])
+def test_recent_retained_storage_after_aging(heads, window):
+    cache = QuantizedKVCache(QuantSpec(window_len=window))
+    keys = torch.arange(2 * heads * 12 * 2, dtype=torch.float32).reshape(2, heads, 12, 2)
+    values = keys.flip((-1,))
+    actual = cache.update(keys, values, 0)
+    for got, original, recent in zip(actual, (keys, values), (cache._kw[0], cache._vw[0])):
+        assert torch.equal(got, original)  # Each row contains its two endpoints.
+        assert torch.equal(recent, original[..., 12 - window:, :])
+        assert recent.untyped_storage().nbytes() == recent.nbytes
+        assert recent.untyped_storage().data_ptr() != original.untyped_storage().data_ptr()
+    next_rows = cache.update(keys[..., :1, :], values[..., :1, :], 0)
+    for got, original in zip(next_rows, (keys, values)):
+        assert torch.equal(got, torch.cat((original, original[..., :1, :]), dim=-2))
+
+
+def test_recent_retained_storage_after_successive_crops():
+    cache = QuantizedKVCache(QuantSpec(window_len=16))
+    keys = torch.arange(64, dtype=torch.float32).view(1, 2, 16, 2)
+    values = keys + 100
+    cache.update(keys, values, 0)
+    cache.crop(12)
+    for recent, source in zip((cache._kw[0], cache._vw[0]), (keys, values)):
+        assert recent.untyped_storage().data_ptr() == source.untyped_storage().data_ptr()
+    cache.crop(8)
+    for recent, source in zip((cache._kw[0], cache._vw[0]), (keys, values)):
+        assert recent.untyped_storage().nbytes() == recent.nbytes
+        assert torch.equal(recent, source[..., :8, :])
+    updated = cache.update(keys[..., -1:, :], values[..., -1:, :], 0)
+    for got, source in zip(updated, (keys, values)):
+        assert torch.equal(got, torch.cat((source[..., :8, :], source[..., -1:, :]), -2))
+
+
+@pytest.mark.parametrize("polar", [False, True])
+def test_archive_retained_storage_after_successive_crops(polar):
+    from dart.kv.compressors.turboquant_like import PolarVQStore
+
+    store = PolarVQStore() if polar else QuantStore()
+    rows = torch.arange(2 * 16 * 8, dtype=torch.float32).sin().reshape(1, 2, 16, 8)
+    store.append(rows[..., :2, :], 8)
+    store.append(rows[..., 2:, :], 4)
+    original = store.dequantize(torch.float32)
+
+    def archive(codec):
+        if polar:
+            return codec.packed, codec.scale
+        return codec.q, codec.scale, codec.zero, codec.bits_per_token
+
+    keep = 3 if polar else 5  # The polar store keeps two sink tokens separately.
+    prefix = [t.narrow(0 if t.ndim == 1 else -2, 0, keep).clone() for t in archive(store)]
+    pointers = [t.untyped_storage().data_ptr() for t in archive(store)]
+    store.crop(11)
+    assert pointers == [t.untyped_storage().data_ptr() for t in archive(store)]
+    store.crop(5)
+    for got, wanted in zip(archive(store), prefix, strict=True):
+        assert got.untyped_storage().nbytes() == got.nbytes
+        assert torch.equal(got, wanted)
+
+    tail = type(store)()
+    extra = rows[..., -2:, :]
+    tail.append(extra, 4)
+    store.append(extra, 4)
+    for got, kept, added in zip(archive(store), prefix, archive(tail), strict=True):
+        assert torch.equal(got, torch.cat((kept, added), dim=0 if got.ndim == 1 else -2))
+    expected = torch.cat((original[..., :5, :], tail.dequantize(torch.float32)), dim=-2)
+    torch.testing.assert_close(store.dequantize(torch.float32), expected)
+    store.crop(0)
+    assert store.length == 0 and store.dequantize(torch.float32) is None
+
+
+def _cache_size_read_reference(cache):
+    total = 0
+    for store in cache._kq + cache._vq:
+        if store.q is None:
+            continue
+        batch, heads, tokens, width = store.q.shape
+        bits = sum(store.bits_per_token.to(torch.int64).flatten().tolist())
+        total += bits * batch * heads * width // 8 + 8 * batch * heads * tokens
+    return total + sum(t.numel() * t.element_size() for t in cache._kw + cache._vw if t is not None)
+
+
+@pytest.mark.parametrize("width", [3, 8])
+def test_cache_size_read_batches_current_widths_after_crop(width, monkeypatch):
+    cache = QuantizedKVCache(QuantSpec(bits=3, sink_len=1, window_len=2))
+    rows = torch.arange(9 * width, dtype=torch.float32).reshape(1, 1, 9, width)
+    for layer in range(3):
+        cache.update(rows + layer, rows.flip((-1,)), layer)
+    reads = []
+    for crop in (9, 6, 3):
+        cache.crop(crop)
+        store = cache._vq[1]
+        store.bits_per_token[0] = 5  # Public width tensors can change between reports.
+        expected = _cache_size_read_reference(cache)
+        reads.clear()
+        with monkeypatch.context() as patch:
+            for name in ("item", "tolist"):
+                original = getattr(torch.Tensor, name)
+
+                def counted(tensor, *args, fn=original, **kwargs):
+                    reads.append(tensor.numel())
+                    return fn(tensor, *args, **kwargs)
+
+                patch.setattr(torch.Tensor, name, counted)
+            stats = cache.stats()
+        assert stats["logical_compressed_bytes"] == expected
+        assert len(reads) <= 1
+
+
+@pytest.mark.parametrize("override", ["instance", "class"])
+def test_cache_size_read_keeps_custom_accounting(override, monkeypatch):
+    cache = QuantizedKVCache(QuantSpec(window_len=0))
+    rows = torch.ones(1, 2, 4, 3)
+    for layer in range(2):
+        cache.update(rows, rows, layer)
+    stores = cache._kq + cache._vq
+    calls = []
+    original = QuantStore.logical_bytes
+
+    def measure(store):
+        calls.append(id(store))
+        return original(store) + 17
+
+    expected = _cache_size_read_reference(cache)
+    if override == "class":
+        monkeypatch.setattr(QuantStore, "logical_bytes", measure)
+        measured = stores
+    else:
+        monkeypatch.setattr(stores[-1], "logical_bytes", lambda: measure(stores[-1]))
+        measured = stores[-1:]
+    assert cache.stats()["logical_compressed_bytes"] == expected + 17 * len(measured)
+    assert calls == [id(store) for store in measured]
+
+
+def test_cache_size_read_accepts_mixed_store_layouts():
+    cache = QuantizedKVCache(QuantSpec(window_len=1))
+    assert cache.stats()["logical_compressed_bytes"] == 0
+    rows = torch.ones(1, 2, 6, 3)
+    cache.update(rows, rows, 2)  # Earlier layers still have empty stores.
+    cache.update(rows[..., :3, :], rows[..., :3, :], 0)
+    bits = cache._vq[2].bits_per_token
+    cache._vq[2].bits_per_token = torch.stack((bits, bits), dim=1)[:, 0]
+    assert cache.stats()["logical_compressed_bytes"] == _cache_size_read_reference(cache)
+    cache._vq[2].bits_per_token = bits.float() + 0.75
+    assert cache.stats()["logical_compressed_bytes"] == _cache_size_read_reference(cache)
+
+
+@pytest.mark.parametrize("keyword", ["cache_kwargs", "kwargs"])
+def test_quantized_cache_accepts_attention_metadata(keyword):
+    spec = QuantSpec(bits=4, sink_len=1, window_len=2)
+    reference, cache = QuantizedKVCache(spec), QuantizedKVCache(spec)
+    keys = torch.arange(48, dtype=torch.float32).reshape(1, 2, 3, 8)
+    values = keys.flip((-1,))
+    for step in range(2):
+        metadata = {"cache_position": torch.arange(3) + 3 * step}
+        expected = reference.update(keys + step, values - step, 0, metadata)
+        actual = cache.update(keys + step, values - step, 0, **{keyword: metadata})
+        for got, wanted in zip(actual, expected):
+            torch.testing.assert_close(got, wanted, rtol=0, atol=0)
+    assert cache.stats() == reference.stats()
 
 
 # ----------------------- precision policy (14.3) --------------------- #
@@ -157,6 +346,134 @@ def test_compressed_kv_precision_policy_stays_exact():
         prompt, DecodeConfig(max_new_tokens=24, draft_len=4)
     )
     assert out.token_ids == base  # fine-grained KV precision, still byte-exact
+
+
+@torch.inference_mode()
+def _prompt_entropies(target, tokens):
+    ids = torch.tensor([tokens])
+    logits = target.model(ids, attention_mask=torch.ones_like(ids), use_cache=False).logits[0]
+    return [0.0] + torch.distributions.Categorical(logits=logits).entropy().tolist()
+
+
+@pytest.mark.parametrize("sampled", [False, True])
+def test_compressed_entropy_follows_evicted_positions(monkeypatch, sampled):
+    from dart.drafters.compressed_kv import CompressedKVDrafter
+    from tests.conftest import build_tiny_target, random_prompt
+
+    target = build_tiny_target()
+    tokens = random_prompt(73, 12)
+    expected = _prompt_entropies(target, tokens)
+    threshold = (min(expected[1:8]) + max(expected[1:8])) / 2
+    policy = PrecisionPolicy(default_bits=3, sink_len=0, high_entropy_threshold=threshold, high_entropy_bits=7)
+    lane = CompressedKVDrafter(target, QuantSpec(window_len=4, policy=policy))
+    calls = []
+    original = target.all_logits
+
+    def score(ids):
+        calls.append(len(ids))
+        return original(ids)
+
+    monkeypatch.setattr(target, "all_logits", score)
+    propose = lane.propose_with_probs if sampled else lane.propose
+    for n in range(6, 13):
+        propose(tokens[:n], 1)
+        bits = [7 if entropy >= threshold else 3 for entropy in expected[:n-4]]
+        for store in lane._state.cache._kq + lane._state.cache._vq:
+            assert store.bits_per_token.tolist() == bits
+        assert lane.entropy_at(n-5) == pytest.approx(expected[n-5], abs=2e-5)
+    assert set(bits) == {3, 7}
+    assert calls == [6, 12]
+
+
+@pytest.mark.parametrize("sampled", [False, True])
+def test_compressed_entropy_waits_for_a_committed_row(monkeypatch, sampled):
+    from dart.drafters.compressed_kv import CompressedKVDrafter
+    from tests.conftest import build_tiny_target, random_prompt
+
+    target = build_tiny_target()
+    target.record_hidden = True
+    policy = PrecisionPolicy(sink_len=0, high_entropy_threshold=1.0)
+    lane = CompressedKVDrafter(target, QuantSpec(window_len=32, policy=policy))
+    original = target.all_logits
+    calls = []
+
+    def score(ids):
+        calls.append(list(ids))
+        return original(ids)
+
+    monkeypatch.setattr(target, "all_logits", score)
+    propose = lane.propose_with_probs if sampled else lane.propose
+    ids = random_prompt(32, 6)
+    first = list(ids)
+    propose(ids, 2)
+    hidden = target.last_hidden_block
+    assert (lane.entropy_at(-1), lane.entropy_at(0), lane.entropy_at(len(ids))) == (None, 0.0, None)
+    assert calls == []
+    assert lane.entropy_at(3) == pytest.approx(_prompt_entropies(target, first)[3], abs=2e-5)
+    assert target.last_hidden_block is hidden
+    ids[0] = (ids[0] + 1) % target.model.config.vocab_size
+    assert lane.token_id_at(0) == first[0]
+    for context in (ids, ids[:4]):
+        propose(context, 1)
+        assert lane.entropy_at(2) == pytest.approx(_prompt_entropies(target, context)[2], abs=2e-5)
+        assert lane.token_id_at(0) == context[0]
+    assert calls == [first, ids, ids[:4]]
+    lane.finish_request()
+    assert lane.token_id_at(0) is None and lane.entropy_at(0) is None
+
+
+@pytest.mark.parametrize("threshold", [1.0, float("inf")])
+def test_compressed_entropy_matches_sampled_distribution(threshold):
+    from types import SimpleNamespace
+
+    from dart.drafters.compressed_kv import CompressedKVDrafter
+    from tests.conftest import build_tiny_target, random_prompt
+
+    target = build_tiny_target()
+    tokens = random_prompt(88, 8)
+    entropies = _prompt_entropies(target, tokens)
+    policy = PrecisionPolicy(default_bits=3, sink_len=0, syntax_token_ids=frozenset({tokens[0]}),
+                             syntax_bits=8, high_entropy_threshold=threshold, high_entropy_bits=6)
+    spec = QuantSpec(window_len=2, policy=policy)
+    meta = SimpleNamespace(token_id_at=tokens.__getitem__, entropy_at=entropies.__getitem__)
+    reference = QuantizedKVCache(spec, meta=meta)
+    _, logits = target.prefill(tokens, cache=reference)
+    probs = torch.softmax(logits / 0.8, -1)
+    rng = torch.Generator().manual_seed(17)
+
+    lane = CompressedKVDrafter(target, spec)
+    lane.sample_temperature = 0.8
+    lane.seed_request(17)
+    drafts, rows = lane.propose_with_probs(tokens, 1)
+    assert drafts == [int(torch.multinomial(probs, 1, generator=rng))]
+    torch.testing.assert_close(rows[0], probs, rtol=0, atol=0)
+    for got, want in zip(lane._state.cache._kq + lane._state.cache._vq, reference._kq + reference._vq, strict=True):
+        assert torch.equal(got.bits_per_token, want.bits_per_token)
+        assert torch.equal(got.q, want.q)
+
+
+def test_compressed_entropy_failed_read_keeps_hidden_state(monkeypatch):
+    from dart.drafters.compressed_kv import CompressedKVDrafter
+    from tests.conftest import build_tiny_target, random_prompt
+
+    target = build_tiny_target()
+    target.record_hidden = True
+    policy = PrecisionPolicy(high_entropy_threshold=1.0)
+    lane = CompressedKVDrafter(target, QuantSpec(window_len=16, policy=policy))
+    ids = random_prompt(48, 6)
+    lane.propose(ids, 1)
+    hidden = target.last_hidden_block
+
+    def fail(tokens):
+        target.last_hidden_block = None
+        raise RuntimeError("entropy unavailable")
+
+    with monkeypatch.context() as scoped:
+        scoped.setattr(target, "all_logits", fail)
+        with pytest.raises(RuntimeError, match="entropy unavailable"):
+            lane.entropy_at(2)
+    assert target.last_hidden_block is hidden
+    assert lane.entropy_at(2) == pytest.approx(_prompt_entropies(target, ids)[2], abs=2e-5)
 
 
 # --------------------------- token drop ------------------------------ #

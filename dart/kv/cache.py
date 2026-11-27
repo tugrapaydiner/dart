@@ -31,7 +31,7 @@ from torch import Tensor
 try:
     from transformers.cache_utils import DynamicCache
 except ImportError as e:  # pragma: no cover
-    raise ImportError("dart requires `transformers>=4.40`") from e
+    raise ImportError("dart requires `transformers>=5.16.1`") from e
 
 _IMPL_VERSION = 2  # bumped when cache semantics change (sync sanity marker)
 
@@ -43,6 +43,8 @@ def quantize_blockwise(x: Tensor, bits: int) -> tuple[Tensor, Tensor, Tensor]:
     """x [B, H, T, D] -> (q uint8 [B,H,T,D], scale [B,H,T,1], zero [B,H,T,1])."""
     if bits < 2 or bits > 8:
         raise ValueError("bits must be in [2, 8]")
+    if x.dtype == torch.float16:
+        x = x.float()  # The range of two half values can overflow FP16.
     levels = (1 << bits) - 1
     mn = x.amin(dim=-1, keepdim=True)
     mx = x.amax(dim=-1, keepdim=True)
@@ -53,6 +55,19 @@ def quantize_blockwise(x: Tensor, bits: int) -> tuple[Tensor, Tensor, Tensor]:
 
 def dequantize_blockwise(q: Tensor, scale: Tensor, zero: Tensor, dtype) -> Tensor:
     return (q.to(torch.float32) * scale + zero).to(dtype)
+
+
+def _compact_cache_view(view: Tensor) -> Tensor:
+    """Release the old allocation when a trimmed view keeps half or less."""
+    if type(view) is not Tensor or view.layout != torch.strided or view.device.type not in ("cpu", "cuda"):
+        return view
+    try:
+        backing = view.untyped_storage().nbytes()
+    except (RuntimeError, NotImplementedError):
+        return view  # Some tensor transforms hide their storage.
+    if backing and backing >= 2 * view.nbytes:
+        return view.clone(memory_format=torch.contiguous_format)
+    return view
 
 
 @runtime_checkable
@@ -113,18 +128,43 @@ class QuantStore:
         if length == 0:
             self.q = self.scale = self.zero = self.bits_per_token = None
             return
-        self.q = self.q[..., :length, :]
-        self.scale = self.scale[..., :length, :]
-        self.zero = self.zero[..., :length, :]
-        self.bits_per_token = self.bits_per_token[:length]
+        self.q, self.scale, self.zero, self.bits_per_token = (
+            _compact_cache_view(self.q[..., :length, :]),
+            _compact_cache_view(self.scale[..., :length, :]),
+            _compact_cache_view(self.zero[..., :length, :]),
+            _compact_cache_view(self.bits_per_token[:length]),
+        )
 
     def logical_bytes(self) -> int:
         if self.q is None:
             return 0
+        bits = int(self.bits_per_token.to(torch.int64).sum().item())
+        return self._bytes_from_bits(bits)
+
+    def _bytes_from_bits(self, bits: int) -> int:
         b, h, t, d = self.q.shape
-        data_bits = int(self.bits_per_token.to(torch.int64).sum().item()) * b * h * d
-        meta = b * h * t * 2 * 4  # scale + zero, fp32
-        return data_bits // 8 + meta
+        return bits * b * h * d // 8 + b * h * t * 8  # Scale and zero are FP32.
+
+
+_NATIVE_LOGICAL_BYTES = QuantStore.logical_bytes
+
+
+def _store_bytes(stores) -> int:
+    if QuantStore.logical_bytes is _NATIVE_LOGICAL_BYTES and all(
+        type(s) is QuantStore and "logical_bytes" not in vars(s) for s in stores
+    ):
+        live = [s for s in stores if s.q is not None]
+        if len(live) > 1:
+            widths = [s.bits_per_token for s in live]
+            first = widths[0]
+            if type(first) is Tensor and first.device.type in ("cpu", "cuda") and all(
+                type(w) is Tensor and w.ndim == 1 and w.layout == torch.strided
+                and w.dtype == torch.uint8 and w.shape == first.shape and w.device == first.device
+                for w in widths
+            ):
+                totals = torch.stack(widths).sum(dim=1, dtype=torch.int64).tolist()  # One host read.
+                return sum(s._bytes_from_bits(bits) for s, bits in zip(live, totals))
+    return sum(s.logical_bytes() for s in stores)
 
 
 @dataclass
@@ -260,8 +300,10 @@ class QuantizedKVCache(DynamicCache):
         if kw is None or kw.size(-2) <= spec.window_len:
             return
         n_out = kw.size(-2) - spec.window_len
-        k_out, self._kw[layer_idx] = kw[..., :n_out, :], kw[..., n_out:, :]
-        v_out, self._vw[layer_idx] = vw[..., :n_out, :], vw[..., n_out:, :]
+        k_out, v_out = kw[..., :n_out, :], vw[..., :n_out, :]
+        self._kw[layer_idx], self._vw[layer_idx] = (
+            _compact_cache_view(kw[..., n_out:, :]), _compact_cache_view(vw[..., n_out:, :]),
+        )
 
         start = self._kq[layer_idx].length  # absolute position of first aged token
         bits = [self._bits_at(start + i, layer_idx) for i in range(n_out)]
@@ -277,7 +319,7 @@ class QuantizedKVCache(DynamicCache):
     # -------------------------------------------------------------- #
     # transformers Cache API (v4.40+ and v5 names)
     # -------------------------------------------------------------- #
-    def update(self, key_states, value_states, layer_idx, cache_kwargs=None):
+    def update(self, key_states, value_states, layer_idx, cache_kwargs=None, *, kwargs=None):
         self._ensure_layer(layer_idx)
         if self._kw[layer_idx] is None:
             self._kw[layer_idx] = key_states
@@ -331,12 +373,14 @@ class QuantizedKVCache(DynamicCache):
             else:
                 keep_w = max_length - qlen
                 if self._kw[li] is not None and self._kw[li].size(-2) > keep_w:
-                    self._kw[li] = self._kw[li][..., :keep_w, :]
-                    self._vw[li] = self._vw[li][..., :keep_w, :]
+                    self._kw[li], self._vw[li] = (
+                        _compact_cache_view(self._kw[li][..., :keep_w, :]),
+                        _compact_cache_view(self._vw[li][..., :keep_w, :]),
+                    )
 
     # -------------------------------------------------------------- #
     def stats(self) -> dict:
-        logical = sum(s.logical_bytes() for s in self._kq + self._vq)
+        logical = _store_bytes(self._kq + self._vq)
         fp_bytes = sum(
             t.numel() * t.element_size()
             for t in self._kw + self._vw

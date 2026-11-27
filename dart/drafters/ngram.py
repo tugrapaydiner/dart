@@ -14,8 +14,35 @@ the single verify pass can accept whichever one the target picks.
 
 from __future__ import annotations
 
+from collections.abc import Callable, Collection, Iterator
+from numbers import Integral
+
 from dart.runtime.types import VerifyResult
 from dart.verification.tree_verify import DraftTree
+
+_RECENT_WINDOW = 32
+
+
+def _recent_first_index(committed: list[int], start: int, end: int) -> Callable[[int, int, int], int]:
+    split = end - _RECENT_WINDOW
+    recent = committed[end - 1:split - 1:-1]
+    older = None
+
+    def index(token: int, lower: int, upper: int) -> int:
+        nonlocal older
+        if lower < _RECENT_WINDOW:
+            try:
+                return recent.index(token, lower, upper)
+            except ValueError:
+                if upper <= _RECENT_WINDOW:
+                    raise
+        if older is None:
+            before = start - 1 if start else None
+            older = committed[split - 1:before:-1]  # Load older tokens on a miss.
+        offset = older.index(token, max(0, lower - _RECENT_WINDOW), upper - _RECENT_WINDOW)
+        return _RECENT_WINDOW + offset
+
+    return index
 
 
 class NGramDrafter:
@@ -37,56 +64,76 @@ class NGramDrafter:
         scans the full context (v0.1 behavior)."""
         if min_ngram < 1 or max_ngram < min_ngram:
             raise ValueError("require 1 <= min_ngram <= max_ngram")
-        if tree_width < 1:
-            raise ValueError("tree_width must be >= 1")
+        if isinstance(tree_width, bool) or not isinstance(tree_width, Integral) or tree_width < 1:
+            raise ValueError("tree_width must be an integer >= 1")
         if max_scan is not None and max_scan < 1:
             raise ValueError("max_scan must be >= 1 (or None for unbounded)")
         self.max_ngram = max_ngram
         self.min_ngram = min_ngram
-        self.tree_width = tree_width
+        self.tree_width = int(tree_width)
         self.max_scan = max_scan
 
     def _continuations(
-        self, committed: list[int], max_tokens: int, limit: int
-    ) -> list[list[int]]:
+        self, committed: list[int], max_tokens: int, limit: int, eos_token_ids: Collection[int] = ()
+    ) -> Iterator[list[int]]:
         """Up to ``limit`` distinct continuations of the current suffix,
         longest n-gram first, most recent occurrence first within an n."""
+        if max_tokens <= 0:
+            return
         seq_len = len(committed)
         scan_from = 0 if self.max_scan is None else max(0, seq_len - self.max_scan)
-        candidates = committed[scan_from:seq_len - 1]
-        candidates.reverse()
+        stop = seq_len - scan_from - self.min_ngram
+        if stop <= 0:
+            return
+        window_size = seq_len - 1 - scan_from
+        if window_size > 256:
+            index = _recent_first_index(committed, scan_from, seq_len - 1)
+        else:
+            candidates = committed[scan_from:seq_len - 1]
+            candidates.reverse()
+            index = candidates.index
+        last = committed[-1]
+        try:
+            first = index(last, 0, stop)  # Every suffix ends in this token.
+        except ValueError:
+            return
         found: list[list[int]] = []
-        for n in range(min(self.max_ngram, seq_len - 1), self.min_ngram - 1, -1):
+        longest = min(self.max_ngram, window_size - first)
+        for n in range(longest, self.min_ngram - 1, -1):
             pattern = committed[seq_len - n :]
-            cursor, stop = 0, len(candidates) - n + 1
-            while cursor < stop:
-                try:
-                    offset = candidates.index(pattern[-1], cursor, stop)  # Skip impossible suffix endings.
-                except ValueError:
-                    break
+            offset, stop = first, window_size - n + 1
+            while True:
                 start = seq_len - n - 1 - offset
-                cursor = offset + 1
                 if committed[start : start + n] == pattern:
                     cont = committed[start + n : start + n + max_tokens]
+                    if eos_token_ids:
+                        for i, token in enumerate(cont):
+                            if int(token) in eos_token_ids:
+                                cont = cont[:i + 1]  # Keep EOS as the last candidate.
+                                break
                     if cont and cont not in found:
                         found.append(cont)
+                        yield cont
                         if len(found) >= limit:
-                            return found
+                            return
+                if offset + 1 >= stop:
+                    break
+                try:
+                    offset = index(last, offset + 1, stop)
+                except ValueError:
+                    break
             if found:
                 break  # branches from one n keep the recency semantics clean
-        return found
 
     def propose(self, committed: list[int], max_tokens: int) -> list[int]:
-        if max_tokens <= 0:
-            return []
-        found = self._continuations(committed, max_tokens, limit=1)
-        return found[0] if found else []
+        return next(self._continuations(committed, max_tokens, limit=1), [])
 
-    def propose_tree(self, committed: list[int], max_tokens: int) -> DraftTree:
-        if max_tokens <= 0:
-            return DraftTree([], [])
-        branches = self._continuations(committed, max_tokens, self.tree_width)
-        return DraftTree.from_branches(branches)
+    def propose_tree(
+        self, committed: list[int], max_tokens: int, *, max_nodes: int | None = None,
+        eos_token_ids: Collection[int] = (),
+    ) -> DraftTree:
+        branches = self._continuations(committed, max_tokens, self.tree_width, eos_token_ids)
+        return DraftTree.from_branches(branches, max_nodes=max_nodes)
 
     def observe(self, result: VerifyResult) -> None:
         pass

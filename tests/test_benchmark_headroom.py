@@ -4,6 +4,7 @@ import json
 import sys
 
 import pytest
+import torch
 
 from benchmarks import run_bench
 from benchmarks.headroom import PrecomputedDrafter, draft_budget, measure_headroom
@@ -40,11 +41,21 @@ def test_draft_budget_uses_fastest_baseline_and_preserves_negative_room(perfect_
 
 @pytest.mark.parametrize("device", DEVICES)
 @pytest.mark.parametrize("early_eos", [False, True])
-def test_headroom_replays_full_matches_including_eos(device, early_eos):
+def test_headroom_replays_full_matches_including_eos(device, early_eos, monkeypatch):
     target = TargetModel(build_tiny_target().model, device=device)
     prompts = [[7, 8, 9], [9, 8, 7]]
     if early_eos:
         target.eos_token_ids = frozenset(target.greedy_generate(p, 1)[0] for p in prompts)
+    softmax = torch.softmax
+    entropy_rows = 0
+
+    def count_softmax(scores, *args, **kwargs):
+        nonlocal entropy_rows
+        if scores.shape == (target.model.config.vocab_size,):
+            entropy_rows += 1
+        return softmax(scores, *args, **kwargs)
+
+    monkeypatch.setattr(torch, "softmax", count_softmax)
     cfg = DecodeConfig(max_new_tokens=8, draft_len=4)
     with DartEngine(target) as engine:
         report = measure_headroom({
@@ -52,6 +63,7 @@ def test_headroom_replays_full_matches_including_eos(device, early_eos):
             "target_greedy": run_bench.build_target_method(target, 8),
             "target_only": lambda p: engine.generate(p, cfg),
         }, prompts, target, cfg, warmup=1, repeats=2)
+    assert entropy_rows == 0
     assert "not deployable" in report["scope"]
     assert len(report["timing"]["samples"]) == 16
     for index in range(2):

@@ -7,10 +7,48 @@ from statistics import mean
 from unittest.mock import patch
 
 from benchmarks.timing import Method, synchronize, tokens
+from dart.models.replay import CapacityBuckets, CudaGraphTarget
 from dart.models.target import TargetModel
 from dart.runtime.engine import DartEngine
 from dart.runtime.metrics import output_hash
 from dart.runtime.types import GenerationOutput
+
+
+def _verifier_work(stack, target):
+    targets = target.buckets if isinstance(target, CapacityBuckets) else (target,)
+    fields = ("verify_target_calls", "verify_input_positions")
+    if any(type(item) not in (TargetModel, CudaGraphTarget) for item in targets):
+        return dict.fromkeys(fields), lambda verify: verify
+    totals = dict.fromkeys(fields, 0)
+    verifying = False
+
+    def observe(forward):
+        @wraps(forward)
+        def counted(state, input_ids, **kwargs):
+            if verifying:
+                totals["verify_target_calls"] += 1
+                totals["verify_input_positions"] += input_ids.numel()
+            return forward(state, input_ids=input_ids, **kwargs)
+        counted._profiled_method = forward
+        return counted
+
+    for item in targets:
+        names = ("_run_model", "_run_replay_block") if isinstance(item, CudaGraphTarget) else ("_run_model",)
+        for name in names:  # Count the selected dispatch without changing verifier routing.
+            stack.enter_context(patch.object(item, name, observe(getattr(item, name))))
+
+    def during_verification(verify):
+        @wraps(verify)
+        def run(*args, **kwargs):
+            nonlocal verifying
+            previous, verifying = verifying, True
+            try:
+                return verify(*args, **kwargs)
+            finally:
+                verifying = previous
+        return run
+
+    return totals, during_verification
 
 
 def profile_methods(
@@ -25,12 +63,19 @@ def profile_methods(
     engines = engines or {}
     if reference not in methods or not prompts or type(repeats) is not int or repeats < 1:
         raise ValueError("profiling needs a reference, prompts, and repeats >= 1")
-    if any(engine.target is not target or engine.verifier_name != "block" for engine in engines.values()):
-        raise ValueError("profiling requires block engines sharing the target")
+    if any(engine.target is not target for engine in engines.values()):
+        raise ValueError("profiling requires engines sharing the target")
 
     def stamp():
         synchronize(target.device)
         return time.perf_counter()
+
+    def timed_resolver(resolve, timer, observe):
+        @wraps(resolve)
+        def wrapped(*args, **kwargs):
+            return timer(observe(resolve(*args, **kwargs)), "verify_ms")
+        wrapped._profiled_method = resolve
+        return wrapped
 
     expected = [list(tokens(methods[reference](prompt))) for prompt in prompts]
     samples = []
@@ -56,15 +101,19 @@ def profile_methods(
                             return call(*args, **kwargs)
                         finally:
                             totals[phase] += (stamp() - start) * 1_000
+                    run._profiled_method = call
                     return run
 
+                before_forward._dart_observer = after_forward._dart_observer = True
                 with ExitStack() as stack:
                     stack.callback(target.model.register_forward_pre_hook(before_forward).remove)
                     stack.callback(target.model.register_forward_hook(after_forward).remove)
                     engine = engines.get(name)
+                    work, observe = _verifier_work(stack, target if engine is not None else None)
                     if engine is not None:
-                        stack.enter_context(patch.object(engine, "_propose", timed(engine._propose, "draft_ms")))
-                        stack.enter_context(patch.object(engine, "verify", timed(engine.verify, "verify_ms")))
+                        stack.enter_context(patch.object(engine, "_round_drafts", timed(engine._round_drafts, "draft_ms")))
+                        resolver = timed_resolver(engine._resolve_verifier, timed, observe)
+                        stack.enter_context(patch.object(engine, "_resolve_verifier", resolver))
                     start = stamp()
                     output = method(prompt)
                     end = stamp()
@@ -82,8 +131,10 @@ def profile_methods(
                     "prefill_ms": (prefill[1] - prefill[0]) * 1_000,
                     "decode_ms": (end - prefill[1]) * 1_000,
                     **(phases if engine is not None else {key: None for key in phases}),
+                    **work,
                 })
-    fields = ("request_ms", "setup_ms", "prefill_ms", "decode_ms", "draft_ms", "verify_ms")
+    fields = ("request_ms", "setup_ms", "prefill_ms", "decode_ms", "draft_ms", "verify_ms",
+              "verify_target_calls", "verify_input_positions")
     summary = {}
     for name in methods:
         rows = [row for row in samples if row["method"] == name]
@@ -95,6 +146,8 @@ def profile_methods(
         "scope": "separate diagnostic requests with synchronized phase barriers; excluded from headline latency",
         "prefill_scope": "first target model forward, including cache construction inside the model",
         "decode_scope": "everything after that forward, including first-token selection and output decoding",
-        "draft_verify_scope": "engine proposal and verification calls; subsets of decode time, null for baselines without an engine",
+        "draft_verify_scope": "engine draft construction and verification calls; subsets of decode time, null for baselines without an engine",
+        "verify_work_scope": "target forwards and input token positions during verification on built-in eager and replay targets",
+        "policy_scope": "phase barriers can change adaptive decisions; these requests are separate from headline timing",
         "repeats": repeats, "samples": samples, "summary": summary,
     }

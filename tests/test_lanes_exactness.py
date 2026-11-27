@@ -10,6 +10,7 @@ import torch
 from dart.diffusion.reconciliation import ReconcilePolicy
 from dart.drafters.ar_draft import ARDrafter
 from dart.drafters.base import NullDrafter
+from dart.drafters.block_sparse_kv import BlockSparseKVDrafter
 from dart.drafters.compressed_kv import CompressedKVDrafter
 from dart.drafters.diffusion_small import (
     DiffusionDrafter,
@@ -88,8 +89,6 @@ def test_sparse_kv_lane_exact(tiny_target, seed, plen):
 
 @pytest.mark.parametrize("seed,plen", PROMPTS)
 def test_block_sparse_kv_lane_exact(tiny_target, seed, plen):
-    from dart.drafters.block_sparse_kv import BlockSparseKVDrafter
-
     # Small blocks + budget so generation actually crosses into compaction.
     drafter = BlockSparseKVDrafter(
         tiny_target, block_size=4, top_k=2, sink_blocks=1, recent_blocks=2
@@ -97,6 +96,26 @@ def test_block_sparse_kv_lane_exact(tiny_target, seed, plen):
     _check_lane(tiny_target, drafter, seed, plen)
     if plen >= 28:  # long enough that block selection actually fired
         assert drafter.compacted_last_round
+
+
+@pytest.mark.parametrize("tokens,top_k,expected", [
+    ([1, 3, 8, 10, 30, 30, 4, 2, 6], 1, [1, 3, 30, 30, 6]),
+    ([31, 32, 1, 2, 4, 5, 6, 7, 8, 9], 1, [31, 32, 8, 9]),
+    ([6, 5, 4, 3, 2, 1, 9], 0, [6, 5, 9]),
+])
+def test_sparse_compaction_skips_scalar_reads(tiny_target, monkeypatch, tokens, top_k, expected):
+    embedding = torch.nn.Embedding.from_pretrained(torch.arange(33, dtype=torch.float32).view(-1, 1))
+    monkeypatch.setattr(tiny_target.model, "get_input_embeddings", lambda: embedding)
+    drafter = BlockSparseKVDrafter(tiny_target, block_size=2, top_k=top_k, sink_blocks=1, recent_blocks=1)
+    truth = torch.Tensor.__bool__
+
+    def check_read(tensor):
+        if tensor.ndim == 0 and tensor.dtype == torch.bool:
+            pytest.fail("compaction read a token mask one scalar at a time")
+        return truth(tensor)
+
+    monkeypatch.setattr(torch.Tensor, "__bool__", check_read)
+    assert drafter._select(tokens) == (expected, True)
 
 
 def _diffusion_drafter(mode: str, seed: int = 5) -> DiffusionDrafter:

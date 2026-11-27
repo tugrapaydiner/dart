@@ -44,6 +44,11 @@ def summarize_samples(samples: list[dict], reference: str, seed: int = 17) -> di
     rng = np.random.default_rng(seed)
     indices = rng.integers(0, len(repeats), size=(2_000, len(repeats)))
     bootstrap = {name: values[indices].mean(axis=1) for name, values in means.items()}
+    cases = _case_means(samples, methods)
+    case_bootstrap = None
+    if cases is not None and cases[reference].size > 1:  # Drawn after repeats so their interval is unchanged.
+        draws = rng.integers(0, cases[reference].size, size=(2_000, cases[reference].size))
+        case_bootstrap = {name: values[draws].mean(axis=1) for name, values in cases.items()}
     summary = {}
     for name, rows in grouped.items():
         latency = [sample["latency_ms"] for sample in rows]
@@ -55,8 +60,26 @@ def summarize_samples(samples: list[dict], reference: str, seed: int = 17) -> di
             "peak_gpu_bytes": max(sample["peak_gpu_bytes"] for sample in rows),
             "speedup": float(means[reference].mean() / means[name].mean()),
             "ci95_speedup": np.quantile(bootstrap[reference] / bootstrap[name], [0.025, 0.975]).tolist(),
+            "case_speedup_geomean": None if cases is None else float(np.exp(np.log(cases[reference] / cases[name]).mean())),
+            "case_ci95_speedup": None if case_bootstrap is None else
+            np.quantile(case_bootstrap[reference] / case_bootstrap[name], [0.025, 0.975]).tolist(),
         }
     return summary
+
+
+def _case_means(samples: list[dict], methods: list[str]) -> dict | None:
+    """Mean latency per method and prompt, or None without a complete prompt grid."""
+    if any("prompt_index" not in sample for sample in samples):
+        return None
+    prompts = sorted({sample["prompt_index"] for sample in samples})
+    counts = Counter((sample["method"], sample["prompt_index"]) for sample in samples)
+    if len(counts) != len(methods) * len(prompts) or len(set(counts.values())) != 1:
+        return None
+    totals = Counter()
+    for sample in samples:
+        totals[sample["method"], sample["prompt_index"]] += sample["latency_ms"]
+    return {name: np.array([totals[name, prompt] for prompt in prompts]) / counts[name, prompts[0]]
+            for name in methods}
 
 
 def measure_methods(
@@ -128,5 +151,6 @@ def measure_methods(
     return {
         "reference": reference, "warmup": warmup, "repeats": repeats,
         "samples": samples, "summary": summarize_samples(samples, reference, seed),
-        "confidence_method": "paired bootstrap over repeat means, 2000 resamples, 95% percentile interval",
+        "confidence_method": "paired bootstrap over repeat means, 2000 resamples, 95% percentile interval; "
+                             "case interval resamples prompts, case speedup is the geometric mean of prompt ratios",
     }

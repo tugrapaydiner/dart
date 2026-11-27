@@ -10,6 +10,7 @@ diffused, or simply wrong.
 
 from __future__ import annotations
 
+from collections.abc import Iterable
 from typing import Protocol, runtime_checkable
 
 from dart.runtime.types import VerifyResult
@@ -17,15 +18,32 @@ from dart.runtime.types import VerifyResult
 
 @runtime_checkable
 class Drafter(Protocol):
-    """Protocol implemented by every draft lane."""
+    """Protocol implemented by every draft lane.
+
+    The engine also uses these optional members when a drafter defines them:
+
+      * ``propose_tree(committed, max_tokens)`` returns a DraftTree for tree rounds.
+        Declare a ``max_nodes`` keyword to limit the tree while building it.
+        Declare ``eos_token_ids`` to receive the target's stop IDs as a frozen set.
+      * ``propose_with_probs(committed, max_tokens)`` returns drafts and the rows
+        they were sampled from, for exact sampling.
+      * ``after_prefill()`` and ``after_verify(result)`` see rounds run by other lanes.
+      * ``finish_request()`` releases request data after execution, including
+        errors, without resetting statistics or the sampling generator.
+      * ``seed_request(seed)`` reseeds that generator when a request sets
+        DecodeConfig.seed, so seeded requests repeat exactly.
+      * ``close()`` releases resources an engine that owns the drafter closes.
+      * ``requires_entropy = False`` skips entropy work no observer needs.
+      * ``uses_canvas = True`` gives the lane DecodeConfig.canvas_len instead of draft_len.
+    """
 
     name: str
 
-    def propose(self, committed: list[int], max_tokens: int) -> list[int]:
+    def propose(self, committed: list[int], max_tokens: int) -> Iterable[int]:
         """Propose up to ``max_tokens`` continuation tokens for ``committed``.
 
-        Returning fewer tokens (or none) is always legal; the engine falls
-        back to a plain target step.
+        The engine reads at most max_tokens items. Returning an empty
+        iterable falls back to a plain target step.
         """
         ...
 

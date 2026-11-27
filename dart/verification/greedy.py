@@ -24,10 +24,48 @@ Postcondition (L = len(result.committed)):
 
 from __future__ import annotations
 
+import operator
+
 import torch
 
 from dart.models.target import TargetModel, TargetState
 from dart.runtime.types import VerifyResult
+
+
+def _scalar_token_id(token) -> int | None:
+    if type(token) is int:
+        return token
+    if isinstance(token, int) and type(token) is not bool:
+        if type(token).__eq__ is int.__eq__ and type(token).__int__ is int.__int__:
+            return int(token)
+    if (type(token) is torch.Tensor and token.device.type == "cpu" and token.ndim == 0
+            and token.layout == torch.strided and token.dtype != torch.bool):
+        try:
+            return operator.index(token)
+        except TypeError:
+            pass
+    return None
+
+
+def _cpu_greedy_indices(rows: torch.Tensor) -> torch.Tensor:
+    if (type(rows) is torch.Tensor and rows.dtype == torch.float32
+            and rows.layout == torch.strided and rows.stride(-1) == 1):
+        return torch.max(rows, dim=-1).indices
+    return torch.argmax(rows, dim=-1)
+
+
+def _restore_failed_round(target, state, length):
+    if not isinstance(state, TargetState) or state._failed:
+        return
+    try:
+        if state.seq_len == length:
+            return
+        target.last_hidden_block = None
+        target.crop(state, length)
+        if state.seq_len != length:
+            state._failed = True
+    except BaseException:
+        state._failed = True  # Keep the original verification error.
 
 
 def verify_greedy_reference(
@@ -40,6 +78,15 @@ def verify_greedy_reference(
     pending_block = [pending] if isinstance(pending, int) else list(pending)
     if not pending_block:
         raise ValueError("pending block must contain at least one token")
+    length = state.seq_len if isinstance(state, TargetState) else None
+    try:
+        return _verify_tokens(target, state, pending_block, draft_tokens)
+    except BaseException:
+        _restore_failed_round(target, state, length)
+        raise
+
+
+def _verify_tokens(target, state, pending_block, draft_tokens):
     k = len(draft_tokens)
 
     # Feed the pending block one token at a time, auditing divergence of
@@ -56,8 +103,8 @@ def verify_greedy_reference(
     for i in range(k):
         if draft_tokens[i] != pred:
             break
-        accepted.append(draft_tokens[i])
-        if draft_tokens[i] in target.eos_token_ids:
+        accepted.append(pred)
+        if pred in target.eos_token_ids:
             # EOS accepted: stop here; no correction/bonus token needed.
             return VerifyResult(
                 committed=list(accepted),
@@ -67,7 +114,7 @@ def verify_greedy_reference(
                 finished=True,
                 pending_divergence=divergence,
             )
-        logits = target.forward_block(state, [draft_tokens[i]])
+        logits = target.forward_block(state, [pred])
         pred = int(torch.argmax(logits[-1]).item())
 
     m = len(accepted)

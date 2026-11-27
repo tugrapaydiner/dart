@@ -21,7 +21,7 @@ import torch
 try:
     from transformers.cache_utils import DynamicCache
 except ImportError as e:  # pragma: no cover
-    raise ImportError("dart requires `transformers>=4.40`") from e
+    raise ImportError("dart requires `transformers>=5.16.1`") from e
 
 Residency = Literal["gpu", "cpu_pinned"]
 
@@ -62,23 +62,35 @@ def _layer_slots(cache: DynamicCache):
             )
 
 
-def move_cache(cache: DynamicCache, device: str, pin: bool = False) -> ResidencyStats:
+def move_cache(cache: DynamicCache, device: str | torch.device, pin: bool = False) -> ResidencyStats:
     """Synchronously move a DynamicCache's tensors; returns transfer stats.
 
     Stats count only tensors actually moved, so metadata like
     ``kv_residency_moved_mb`` reflects real transfers, never intent.
     """
     stats = ResidencyStats()
-    if not torch.cuda.is_available() and device != "cpu":
+    target = torch.device(device)
+    to_host = target.type == "cpu"
+    if not to_host and not torch.cuda.is_available():
         return stats  # nothing to do on CPU-only hosts
+    if target.type == "cuda" and target.index is None:
+        target = torch.device("cuda", torch.cuda.current_device())  # Tensors report an explicit index.
+    host_slots = []
+    sources = set()
     for get, set_ in _layer_slots(cache):
         t = get()
-        if t is None or not isinstance(t, torch.Tensor) or str(t.device) == device:
+        if t is None or not isinstance(t, torch.Tensor) or t.device == target:
             continue
-        moved = t.to(device, non_blocking=True)
-        if pin and device == "cpu":
-            moved = moved.pin_memory()
-        set_(moved)
+        if to_host and t.device.type == "cuda":
+            host_slots.append((set_, t.to(device, non_blocking=True)))
+            sources.add(t.device)
+        else:
+            moved = t.to(device, non_blocking=not to_host)
+            set_(moved.pin_memory() if pin and to_host else moved)
         stats.moved_tensors += 1
         stats.moved_bytes += t.numel() * t.element_size()
+    for source in sources:
+        torch.cuda.current_stream(source).synchronize()  # Wait once for this device's copies.
+    for set_, moved in host_slots:
+        set_(moved.pin_memory() if pin else moved)
     return stats

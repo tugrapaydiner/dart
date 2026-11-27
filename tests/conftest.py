@@ -19,6 +19,10 @@ EOS_ID = 2
 FIRST_SAFE_ID = 5  # prompt tokens drawn from [FIRST_SAFE_ID, VOCAB) avoid specials
 
 
+def hf_cache(fields):
+    return fields["cache"] if "cache" in fields else fields["past_key_values"]
+
+
 def build_tiny_target(seed: int = 1234) -> TargetModel:
     torch.manual_seed(seed)
     cfg = LlamaConfig(

@@ -18,17 +18,45 @@ Batch size is fixed at 1 for interactive serving
 from __future__ import annotations
 
 import inspect
-from dataclasses import dataclass
+from array import array
+from dataclasses import dataclass, field
+from importlib.metadata import version
 from typing import Optional
 
 import torch
+from packaging.version import Version
 from torch import Tensor
 
-try:  # transformers >= 4.40
-    from transformers import AutoModelForCausalLM, AutoTokenizer
-    from transformers.cache_utils import DynamicCache
+from dart.attention.verifier_mask import tree_mask
+
+try:
+    from transformers import (
+        AutoModelForCausalLM,
+        AutoTokenizer,
+        LlamaForCausalLM,
+        LlamaModel,
+    )
+    from transformers.cache_utils import DynamicCache, DynamicLayer
 except ImportError as e:  # pragma: no cover
-    raise ImportError("dart requires `transformers>=4.40`") from e
+    raise ImportError("dart requires `transformers>=5.16.1`") from e
+
+
+_LLAMA_LM_FORWARD = LlamaForCausalLM.forward
+_LLAMA_MODEL_FORWARD = LlamaModel.forward
+
+
+def _native_method(method, target, original):
+    return getattr(method, "__self__", None) is target and getattr(method, "__func__", None) is original
+
+
+def _accepts_logits_to_keep(forward):
+    try:
+        parameter = inspect.signature(forward).parameters.get("logits_to_keep")
+    except (TypeError, ValueError):
+        return False
+    return parameter is not None and parameter.kind in (
+        inspect.Parameter.POSITIONAL_OR_KEYWORD, inspect.Parameter.KEYWORD_ONLY
+    )
 
 
 @dataclass
@@ -38,9 +66,17 @@ class TargetState:
     ``cache`` covers the first ``seq_len`` tokens of the sequence.  Under the
     decode-loop invariant (see dart/runtime/types.py) this is everything but
     the pending token.
+
+    A failed forward or cache update invalidates this state. Start a new prefill instead
+    of reusing a cache whose layers may have been only partly updated.
     """
 
     cache: DynamicCache
+    _failed: bool = field(default=False, init=False, repr=False)
+
+    def _check_usable(self) -> None:
+        if self._failed:
+            raise RuntimeError("request cache is invalid after a failed forward or cache update; start a new prefill")
 
     @property
     def seq_len(self) -> int:
@@ -74,6 +110,7 @@ class TargetModel:
         self.tokenizer = tokenizer
         self.device = device
         self.dtype = dtype
+        self._cpu_llama = torch.device(device).type == "cpu" and type(model) is LlamaForCausalLM
         self.eos_token_ids = self._collect_eos_ids()
         # Opt-in tap for drafters that condition on target hidden states
         # (MTP heads, trained diffusion drafters).  When enabled, the final
@@ -83,14 +120,9 @@ class TargetModel:
         # belong to rejected drafts and are off-trajectory.
         self.record_hidden = record_hidden
         self.last_hidden_block: Optional[Tensor] = None
-        try:
-            parameter = inspect.signature(self.model.forward).parameters.get("logits_to_keep")
-            self._last_prefill_logits = (
-                torch.device(self.device).type == "cpu" and parameter is not None  # Only CPU showed a consistent gain.
-                and parameter.kind in (inspect.Parameter.POSITIONAL_OR_KEYWORD, inspect.Parameter.KEYWORD_ONLY)
-            )
-        except (TypeError, ValueError):
-            self._last_prefill_logits = False
+        forward = self.model.forward
+        self._prefill_method = getattr(forward, "__func__", None)
+        self._last_prefill_logits = torch.device(self.device).type == "cpu" and _accepts_logits_to_keep(forward)
 
     # ------------------------------------------------------------------ #
     # Construction
@@ -109,9 +141,10 @@ class TargetModel:
     ) -> "TargetModel":
         if dtype is None:
             dtype = torch.float32 if device == "cpu" else torch.bfloat16
+        dtype_option = "dtype" if Version(version("transformers")) >= Version("5") else "torch_dtype"  # 5.x deprecates torch_dtype.
         model = AutoModelForCausalLM.from_pretrained(
             name_or_path,
-            torch_dtype=dtype,
+            **{dtype_option: dtype},
             attn_implementation=attn_implementation,
             trust_remote_code=trust_remote_code,
             local_files_only=local_files_only,
@@ -139,6 +172,11 @@ class TargetModel:
     # ------------------------------------------------------------------ #
     # Core forward primitives
     # ------------------------------------------------------------------ #
+    @property
+    def context_limit(self) -> Optional[int]:
+        """Longest sequence this target can hold, or None when unbounded."""
+        return getattr(self.model.config, "max_position_embeddings", None)
+
     def _check_context_length(self, length: int) -> None:
         limit = getattr(self.model.config, "max_position_embeddings", None)
         if limit is not None and length > limit:
@@ -151,16 +189,39 @@ class TargetModel:
             raise ValueError("max_new_tokens must be an integer >= 0")
         self._check_context_length(prompt_len + max_new_tokens)
 
+    def validate_prompt(self, prompt_ids: list[int] | Tensor) -> None:
+        """Check prompt admission without executing the model."""
+        ids = self._ids(prompt_ids)
+        self.validate_generation(ids.size(1), 0)
+
+    def _check_vocabulary(self, ids: Tensor) -> None:
+        low, high = torch.aminmax(ids)
+        if low.item() < 0 or high.item() >= self.model.config.vocab_size:
+            raise ValueError("token id is outside the model vocabulary")
+
     def _ids(self, tokens: list[int] | Tensor) -> Tensor:
+        if isinstance(tokens, (list, tuple)) and tokens and all(type(token) is int for token in tokens):
+            if min(tokens) < 0 or max(tokens) >= self.model.config.vocab_size:
+                raise ValueError("token id is outside the model vocabulary")
+            return torch.tensor([tokens], device=self.device, dtype=torch.long)  # Check host IDs before transfer.
         if isinstance(tokens, Tensor):
-            t = tokens.to(device=self.device, dtype=torch.long)
+            t = tokens.to(dtype=torch.long)
         else:
-            t = torch.tensor(tokens, device=self.device, dtype=torch.long)
+            t = torch.tensor(tokens, device="cpu", dtype=torch.long)
         if t.dim() == 1:
             t = t.unsqueeze(0)
         if t.dim() != 2 or t.size(0) != 1:
             raise ValueError(f"expected [T] or [1, T] token ids, got {tuple(t.shape)}")
-        return t
+        if t.numel():
+            self._check_vocabulary(t)
+        return t.to(device=self.device)
+
+    def _native_cpu_llama(self) -> bool:
+        return (
+            self._cpu_llama and self.model.config._attn_implementation in ("eager", "sdpa")
+            and _native_method(self.model.forward, self.model, _LLAMA_LM_FORWARD)
+            and _native_method(self.model.model.forward, self.model.model, _LLAMA_MODEL_FORWARD)
+        )
 
     @torch.inference_mode()
     def prefill(
@@ -188,26 +249,56 @@ class TargetModel:
         return self._forward(state, self._ids(tokens))
 
     def _forward(self, state: TargetState, input_ids: Tensor, *, last_logits_only: bool = False) -> Tensor:
+        state._check_usable()
+        if input_ids.size(1) == 0:
+            raise ValueError("token block must contain at least one token")
         past_len = state.seq_len
         total_len = past_len + input_ids.size(1)
         self._check_context_length(total_len)
-        attention_mask = torch.ones(
-            (1, total_len), device=self.device, dtype=torch.long
-        )
-        logits_options = {"logits_to_keep": 1} if last_logits_only and self._last_prefill_logits else {}
-        out = self.model(
+        attention_mask = None  # Llama builds its causal mask from the growing cache.
+        if not (
+            self._native_cpu_llama()
+            and type(state.cache) is DynamicCache and state.cache.layer_class_to_replicate is DynamicLayer
+        ):
+            attention_mask = torch.ones((1, total_len), device=self.device, dtype=torch.long)
+        return self._run_model(
+            state,
             input_ids=input_ids,
             attention_mask=attention_mask,
-            past_key_values=state.cache,
-            use_cache=True,
-            output_hidden_states=self.record_hidden,
-            **logits_options,
+            last_logits_only=last_logits_only,
         )
-        # Re-bind: some transformers versions return a new cache object.
-        state.cache = out.past_key_values
-        if self.record_hidden:
-            self.last_hidden_block = out.hidden_states[-1][0].detach()
-        return out.logits[0].float()
+
+    def _can_limit_prefill_logits(self) -> bool:
+        forward = self.model.forward
+        if self._prefill_method is not None and _native_method(forward, self.model, self._prefill_method):
+            return self._last_prefill_logits
+        return torch.device(self.device).type == "cpu" and _accepts_logits_to_keep(forward)
+
+    def _run_model(self, state: TargetState | None, *, last_logits_only: bool = False, **kwargs) -> Tensor:
+        try:
+            if last_logits_only and self._can_limit_prefill_logits():
+                kwargs["logits_to_keep"] = 1
+            cache = state.cache if state is not None else None
+            out = self.model(past_key_values=cache, use_cache=state is not None,
+                             output_hidden_states=self.record_hidden, **kwargs)
+            if state is not None:
+                state.cache = out.past_key_values  # Some models return a new cache.
+            if self.record_hidden:
+                self.last_hidden_block = out.hidden_states[-1][0].detach()
+            rows = out.logits[0]
+            if last_logits_only:
+                rows = rows[-1:]
+                if rows.dtype == torch.float32 and (
+                    type(rows) is not Tensor or rows.layout != torch.strided
+                    or rows.untyped_storage().nbytes() > rows.nbytes
+                ):
+                    return rows.clone()  # A single row can still share the full prompt buffer.
+            return rows.float()
+        except BaseException:
+            if state is not None:
+                state._failed = True
+            self.last_hidden_block = None
+            raise
 
     @torch.inference_mode()
     def forward_tree(
@@ -231,6 +322,7 @@ class TargetModel:
         Requires a model that honors custom 4D attention masks and explicit
         ``position_ids`` (e.g. Llama-family, eager attention).
         """
+        state._check_usable()
         p_len, n = len(pending), len(tree_tokens)
         if p_len == 0:
             raise ValueError("pending block must contain at least one token")
@@ -241,46 +333,27 @@ class TargetModel:
         kv_len = base_len + q_len
         depths: list[int] = []
         for i, p in enumerate(parent):
-            if p < -1 or p >= i:
+            if type(p) is not int or p < -1 or p >= i:
                 raise ValueError("tree parents must be -1 or a preceding index")
             depths.append(0 if p < 0 else depths[p] + 1)
         self._check_context_length(base_len + p_len + max(depths, default=-1) + 1)
 
-        allow = torch.zeros(q_len, kv_len, dtype=torch.bool, device=self.device)
-        allow[:, :base_len] = True  # everything sees the committed cache
-        for i in range(p_len):      # pending block: ordinary causal
-            allow[i, base_len : base_len + i + 1] = True
-        for i in range(n):
-            row = p_len + i
-            allow[row, base_len : base_len + p_len] = True  # full pending
-            allow[row, base_len + row] = True               # itself
-            j = parent[i]
-            while j >= 0:
-                allow[row, base_len + p_len + j] = True     # ancestors
-                j = parent[j]
-
-        mask = torch.zeros(
-            (1, 1, q_len, kv_len), dtype=self.dtype, device=self.device
-        )
-        mask.masked_fill_(~allow, torch.finfo(self.dtype).min)
+        mask_parents = [i - 1 for i in range(p_len)] + [
+            p_len - 1 if p < 0 else p_len + p for p in parent
+        ]  # The pending block is the common ancestor chain.
+        mask = tree_mask(mask_parents, base_len, device=self.device, dtype=self.dtype).view(1, 1, q_len, kv_len)
 
         positions = list(range(base_len, base_len + p_len)) + [
             base_len + p_len + d for d in depths
         ]
         position_ids = torch.tensor([positions], device=self.device)
 
-        out = self.model(
+        return self._run_model(
+            state,
             input_ids=self._ids(pending + list(tree_tokens)),
             attention_mask=mask,
             position_ids=position_ids,
-            past_key_values=state.cache,
-            use_cache=True,
-            output_hidden_states=self.record_hidden,
         )
-        state.cache = out.past_key_values
-        if self.record_hidden:
-            self.last_hidden_block = out.hidden_states[-1][0].detach()
-        return out.logits[0].float()
 
     def gather_tree_tail(
         self, state: TargetState, keep_len: int, path: list[int]
@@ -292,22 +365,43 @@ class TargetModel:
         Valid because a packed node's K/V depend only on tokens its mask
         let it attend to — the prefix and its ancestors — so the surviving
         entries are exactly those of a linear forward over that branch.
+        Cropping a contiguous prefix avoids a copy but retains its backing allocation.
         """
-        idx = torch.tensor(
-            list(range(keep_len)) + [keep_len + p for p in path],
-            device=self.device,
-            dtype=torch.long,
-        )
+        state._check_usable()
+        current_length = state.seq_len
+        if type(keep_len) is not int or not 0 <= keep_len <= current_length:
+            raise ValueError("keep_len must be an integer within the current cache")
+        if not isinstance(path, (list, tuple)) or any(
+            type(offset) is not int or not 0 <= offset < current_length - keep_len for offset in path
+        ):
+            raise ValueError("path must contain integer offsets within the tree tail")
+        if all(offset == index for index, offset in enumerate(path)):
+            self.crop(state, keep_len + len(path))
+            return
+        self._gather_tree_rows(state, keep_len, path)
+
+    def _gather_tree_rows(self, state, keep_len, path):
+        indices = array("q", range(keep_len))
+        indices.extend(keep_len + p for p in path)
+        if indices.itemsize == 8:
+            idx = torch.frombuffer(indices, dtype=torch.long).to(self.device)  # The tensor keeps the buffer alive.
+        else:
+            idx = torch.tensor(list(indices), device=self.device, dtype=torch.long)
         cache = state.cache
-        layers = getattr(cache, "layers", None)
-        if layers is not None:  # transformers >= 4.54 layout
-            for layer in layers:
-                layer.keys = layer.keys.index_select(2, idx)
-                layer.values = layer.values.index_select(2, idx)
-        else:  # legacy list-of-tensors layout
-            for i in range(len(cache.key_cache)):
-                cache.key_cache[i] = cache.key_cache[i].index_select(2, idx)
-                cache.value_cache[i] = cache.value_cache[i].index_select(2, idx)
+        try:
+            layers = getattr(cache, "layers", None)
+            if layers is not None:  # transformers >= 4.54 layout
+                for layer in layers:
+                    layer.keys = layer.keys.index_select(2, idx)
+                    layer.values = layer.values.index_select(2, idx)
+            else:  # legacy list-of-tensors layout
+                for i in range(len(cache.key_cache)):
+                    cache.key_cache[i] = cache.key_cache[i].index_select(2, idx)
+                    cache.value_cache[i] = cache.value_cache[i].index_select(2, idx)
+        except BaseException:
+            state._failed = True
+            self.last_hidden_block = None
+            raise
 
     @torch.inference_mode()
     def all_logits(self, tokens: list[int] | Tensor) -> Tensor:
@@ -322,13 +416,21 @@ class TargetModel:
 
     def crop(self, state: TargetState, length: int) -> None:
         """Roll the KV state back so it covers only the first ``length`` tokens."""
+        state._check_usable()
         current_length = state.seq_len
+        if type(length) is not int:
+            raise ValueError("cache length must be an integer")
         if length < 0 or length > current_length:
             raise ValueError(
                 f"cannot crop cache of length {current_length} to {length}"
             )
         if length < current_length:
-            state.cache.crop(length - current_length)  # HF accepts negative removal counts.
+            try:
+                state.cache.crop(length - current_length)  # HF accepts negative removal counts.
+            except BaseException:
+                state._failed = True
+                self.last_hidden_block = None
+                raise
 
     # ------------------------------------------------------------------ #
     # Trusted baseline
@@ -344,7 +446,10 @@ class TargetModel:
         """
         input_ids = self._ids(prompt_ids)
         self.validate_generation(input_ids.size(1), max_new_tokens)
-        state, logits = self.prefill(input_ids)
+        if max_new_tokens == 0:
+            self.validate_prompt(input_ids)
+            return []
+        state, logits = prefill_for_generation(self, input_ids, max_new_tokens)
         generated: list[int] = []
         next_token = int(torch.argmax(logits).item())
         for _ in range(max_new_tokens):
@@ -356,3 +461,24 @@ class TargetModel:
             step_logits = self.forward_block(state, [next_token])
             next_token = int(torch.argmax(step_logits[-1]).item())
         return generated
+
+
+_TARGET_PREFILL = TargetModel.prefill
+_TARGET_FORWARD = TargetModel._forward
+
+
+@torch.inference_mode()
+def prefill_for_generation(
+    target: TargetModel, prompt_ids: list[int] | Tensor, max_new_tokens: int
+) -> tuple[TargetState | None, Tensor]:
+    """Keep the prompt cache only if the native target can use it in a later round."""
+    if (
+        max_new_tokens == 1 and type(target) is TargetModel and target.dtype == torch.float32
+        and target._native_cpu_llama() and _native_method(target.prefill, target, _TARGET_PREFILL)
+        and _native_method(target._forward, target, _TARGET_FORWARD)
+    ):
+        ids = target._ids(prompt_ids)
+        target.validate_generation(ids.size(1), 0)
+        rows = target._run_model(None, input_ids=ids, attention_mask=None, last_logits_only=True)
+        return None, rows[-1]
+    return target.prefill(prompt_ids)

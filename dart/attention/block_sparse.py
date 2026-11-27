@@ -26,17 +26,25 @@ def score_blocks(q: Tensor, k: Tensor, block_size: int) -> Tensor:
     return block_means @ q_mean
 
 
-def select_blocks(
+def select_block_ids(
     scores: Tensor, top_k: int, always_first: int = 1, always_last: int = 1
-) -> Tensor:
-    """Indices of blocks to keep: top-k by score plus mandatory sink/recent."""
+) -> list[int]:
+    """Sorted block IDs for the top scores and mandatory sink and recent blocks."""
     n = scores.numel()
     keep = set(range(min(always_first, n))) | {
         n - 1 - i for i in range(min(always_last, n))
     }
     k = min(top_k, n)
     keep |= set(torch.topk(scores, k).indices.tolist())
-    return torch.tensor(sorted(keep), dtype=torch.long, device=scores.device)
+    return sorted(keep)
+
+
+def select_blocks(
+    scores: Tensor, top_k: int, always_first: int = 1, always_last: int = 1
+) -> Tensor:
+    """Indices of the selected blocks on the same device as the scores."""
+    ids = select_block_ids(scores, top_k, always_first, always_last)
+    return torch.tensor(ids, dtype=torch.long, device=scores.device)
 
 
 def block_sparse_mask(

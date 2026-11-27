@@ -22,8 +22,35 @@ from __future__ import annotations
 
 import torch
 
-from dart.models.target import TargetModel, TargetState
+from dart.models.replay import CudaGraphTarget
+from dart.models.target import TargetModel, TargetState, _native_method
 from dart.runtime.types import VerifyResult
+from dart.verification.greedy import (
+    _cpu_greedy_indices,
+    _restore_failed_round,
+    _scalar_token_id,
+)
+
+
+def _draft_before_eos(target, base_len: int, pending_len: int, draft_tokens: list[int]) -> list[int]:
+    if len(draft_tokens) == 0 or not target.eos_token_ids:
+        return draft_tokens
+    for index, token in enumerate(draft_tokens):
+        token_id = token if type(token) is int else _scalar_token_id(token)
+        if token_id is not None and token_id in target.eos_token_ids:
+            config = getattr(getattr(target, "model", None), "config", None)
+            vocab_size = getattr(config, "vocab_size", None)
+            context = getattr(target, "context_limit", getattr(config, "max_position_embeddings", None))
+            block = getattr(target, "max_block_tokens", None)
+            width = pending_len + len(draft_tokens)
+            fits_context = context is None or (type(context) is int and base_len + width <= context)
+            fits_block = block is None or (type(block) is int and width <= block)
+            if fits_context and fits_block and type(vocab_size) is int and all(
+                value is not None and 0 <= value < vocab_size for value in map(_scalar_token_id, draft_tokens[index:])
+            ):
+                return draft_tokens[:index]  # EOS and its tail need no forward.
+            break  # The full forward handles bounds and invalid IDs.
+    return draft_tokens
 
 
 def verify_block_greedy(
@@ -35,58 +62,99 @@ def verify_block_greedy(
     compute_entropy: bool = True,
 ) -> VerifyResult:
     """Set compute_entropy=False when no consumer needs the entropy signal."""
-    pending_block = [pending] if isinstance(pending, int) else list(pending)
-    if not pending_block:
+    tokens = [pending] if isinstance(pending, int) else list(pending)
+    if not tokens:
         raise ValueError("pending block must contain at least one token")
-    p_len = len(pending_block)
-    k = len(draft_tokens)
+    p_len = len(tokens)
     base_len = state.seq_len  # cache length before this round
 
-    logits = target.forward_block(state, pending_block + list(draft_tokens))
-    preds = torch.argmax(logits, dim=-1).tolist()  # preds[i] follows input[i]
+    forward_drafts = _draft_before_eos(target, base_len, p_len, draft_tokens)
+    tokens.extend(forward_drafts)
+    compact = not compute_entropy and getattr(target, "capture_predictions", False)
+    forward = target.forward_predictions if compact else target.forward_block
 
+    def decide(logits, predictions):
+        if predictions is None:
+            predictions = _block_predictions(logits, p_len, forward_drafts)
+        result = _block_result(tokens, p_len, draft_tokens, predictions, target.eos_token_ids,
+                               logits if compute_entropy else None)
+        return p_len - 1 + len(result.committed), result
+
+    if (type(target) is CudaGraphTarget and base_len and (forward_drafts or not compact)
+            and type(draft_tokens) is list and all(type(token) is int for token in tokens)
+            and _native_method(forward, target, CudaGraphTarget._native_predictions if compact else CudaGraphTarget._native_block)
+            and _native_method(target._forward, target, CudaGraphTarget._native_forward)
+            and _native_method(target.crop, target, CudaGraphTarget._native_crop)):
+        return target._verify_block(state, tokens, decide)
+
+    try:
+        output = forward(state, tokens)
+        kept, result = decide(None, output) if compact else decide(output, None)
+        target.crop(state, base_len + kept)
+        return result
+    except BaseException:
+        _restore_failed_round(target, state, base_len)
+        raise
+
+
+def _block_predictions(logits, p_len, drafts):
+    if logits.device.type != "cpu" or logits.size(-1) < 32_000 or torch.get_num_threads() != 1:
+        return torch.argmax(logits, dim=-1).tolist()
+
+    if len(drafts) >= 3 and type(drafts[0]) is int:
+        predictions = _cpu_greedy_indices(logits[:p_len]).tolist()
+        if predictions[-1] != drafts[0]:
+            return predictions
+        start = p_len
+        if (len(drafts) >= 6 and type(logits) is torch.Tensor and type(drafts) is list
+                and type(drafts[1]) is int and type(drafts[2]) is int):
+            next_two = _cpu_greedy_indices(logits[start:start + 2]).tolist()
+            predictions.extend(next_two)
+            if next_two != drafts[1:3]:  # A mismatch makes the remaining rows unnecessary.
+                return predictions
+            start += 2
+        predictions.extend(_cpu_greedy_indices(logits[start:]).tolist())
+        return predictions
+    return _cpu_greedy_indices(logits).tolist()
+
+
+def _block_result(tokens, p_len, draft_tokens, preds, eos_ids, logits=None):
+    k = len(draft_tokens)
     # Divergence audit of unverified pending tokens (approx mode only).
     divergence = sum(
-        1 for j in range(1, p_len) if pending_block[j] != preds[j - 1]
+        1 for j in range(1, p_len) if tokens[j] != preds[j - 1]
     )
 
     off = p_len - 1  # preds[off + i] is the target's choice for drafts[i]
     m = 0
+    committed = []
     accepted_eos = False
     while m < k and draft_tokens[m] == preds[off + m]:
-        is_eos = draft_tokens[m] in target.eos_token_ids
+        token = int(preds[off + m])
+        committed.append(token)
         m += 1
-        if is_eos:
+        if token in eos_ids:
             accepted_eos = True
             break
 
-    if accepted_eos:
-        committed = list(draft_tokens[:m])
-        finished = True
-        n_accepted = m
-    else:
-        committed = list(draft_tokens[:m]) + [preds[off + m]]
-        finished = committed[-1] in target.eos_token_ids
-        n_accepted = m
+    if not accepted_eos:
+        committed.append(int(preds[off + m]))
+    finished = committed[-1] in eos_ids
 
     # Predictive entropy at the decided (on-trajectory) position - drives the
     # scheduler's entropy gate.  Row off+m produced the correction/bonus token;
     # rows after it are off-trajectory (conditioned on a rejected draft).
-    if accepted_eos or not compute_entropy:
+    if accepted_eos or logits is None:
         entropy = 0.0
     else:
         dist = torch.softmax(logits[off + m].float(), dim=-1)
         entropy = float(-(dist * dist.clamp_min(1e-12).log()).sum())
 
-    # Roll back KV entries of rejected draft tokens.  Postcondition: the
-    # cache covers all committed tokens except the new pending one.
-    target.crop(state, base_len + p_len - 1 + len(committed))
-
     return VerifyResult(
         committed=committed,
         n_draft_proposed=k,
-        n_draft_accepted=n_accepted,
-        all_accepted=(n_accepted == k),
+        n_draft_accepted=m,
+        all_accepted=(m == k),
         finished=finished,
         pending_divergence=divergence,
         entropy=entropy,

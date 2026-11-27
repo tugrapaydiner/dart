@@ -13,9 +13,9 @@ Precision policy (14.3): the drafter is the per-position metadata source
 for the cache's PrecisionPolicy.  It always supplies token ids (so syntax
 tokens - braces, JSON punctuation, tool-call delimiters - can be kept at
 higher precision at zero extra cost), and, only when the policy actually
-uses an entropy threshold, it supplies per-token predictive entropy from a
-single full forward.  Either way the verifier runs on full KV, so precision
-choices move acceptance, never correctness.
+uses an entropy threshold, it supplies per-token predictive entropy from the
+committed prefix when tokens can leave the full-precision window. The verifier
+uses full KV for every precision setting.
 
 Inherits the incremental sync/roll/crop machinery from ARDrafter; the only
 difference is the cache the drafts run on.
@@ -29,7 +29,7 @@ import torch
 
 from dart.drafters.ar_draft import ARDrafter
 from dart.kv.cache import QuantizedKVCache, QuantSpec
-from dart.models.target import TargetModel
+from dart.models.target import TargetModel, TargetState
 
 
 class CompressedKVDrafter(ARDrafter):
@@ -46,7 +46,7 @@ class CompressedKVDrafter(ARDrafter):
         self.store_factory = store_factory
         self._committed_ids: list[int] = []
         self._entropy: Optional[list[float]] = None
-        self._entropy_len = -1
+        self.last_kv_stats: dict = {}
 
     # ---- PrecisionPolicy metadata provider (docs/design.md §9.4) ------ #
     def token_id_at(self, pos: int) -> Optional[int]:
@@ -54,8 +54,18 @@ class CompressedKVDrafter(ARDrafter):
         return ids[pos] if 0 <= pos < len(ids) else None
 
     def entropy_at(self, pos: int) -> Optional[float]:
-        e = self._entropy
-        return e[pos] if e is not None and 0 <= pos < len(e) else None
+        if self._entropy is None or not 0 <= pos < len(self._committed_ids):
+            return None
+        if pos >= len(self._entropy):
+            hidden = self.dm.last_hidden_block
+            try:
+                with torch.inference_mode():
+                    logits = self.dm.all_logits(self._committed_ids)
+                    logp = torch.log_softmax(logits, dim=-1)
+                    self._entropy = [0.0] + (-(logp.exp() * logp).sum(dim=-1)).tolist()
+            finally:
+                self.dm.last_hidden_block = hidden  # Keep the live request's hidden states.
+        return self._entropy[pos]
 
     def _uses_entropy(self) -> bool:
         p = self.spec.policy
@@ -65,24 +75,54 @@ class CompressedKVDrafter(ARDrafter):
         return QuantizedKVCache(self.spec, store_factory=self.store_factory, meta=self)
 
     @torch.inference_mode()
-    def propose(self, committed: list[int], max_tokens: int) -> list[int]:
-        # Refresh per-position metadata *before* drafting so the cache sees it
-        # while aging tokens out during this round's forward.
-        self._committed_ids = list(committed)
-        if self._uses_entropy():
-            if len(committed) != self._entropy_len:
-                logits = self.dm.all_logits(committed)  # [T, V]
-                logp = torch.log_softmax(logits, dim=-1)
-                h = -(logp.exp() * logp).sum(dim=-1)  # [T]
-                # entropy_at(p) = uncertainty of the distribution that produced
-                # token p (row p-1); position 0 has no predecessor.
-                self._entropy = [0.0] + h[:-1].tolist()
-                self._entropy_len = len(committed)
-        else:
+    def _reuse_verified_prefix(self, source: TargetState, committed: list[int], width: int) -> None:
+        length = len(committed) - 1  # The pending token still needs a draft forward.
+        if (self._state is not None or width < 1 or length < 1 or length + width > self.spec.window_len
+                or self.store_factory is not None):
+            return
+        layers = self._verified_layers(source, length, _COMPRESSED_PROPOSE, _MAKE_CACHE)
+        if not layers:
+            return
+        cache = self._make_cache()
+        for i, layer in enumerate(layers):
+            cache.update(layer.keys.clone(), layer.values.clone(), i)
+        self._state, self._processed = TargetState(cache), committed[:-1]
+
+    def _prepare_metadata(self, committed: list[int], max_tokens: int) -> None:
+        ids = list(committed)
+        if not self._uses_entropy():
             self._entropy = None
+        elif self._entropy is None or ids[:len(self._committed_ids)] != self._committed_ids:
+            self._entropy = [0.0]
+        self._committed_ids = ids
+        if self._entropy is not None:
+            width = self._budget(committed, max_tokens)
+            if width > 0:
+                aged = min(len(ids), len(ids) + width - 1 - self.spec.window_len)
+                if aged > len(self._entropy):
+                    self.entropy_at(aged - 1)  # Fill missing rows before the cache can age them out.
+
+    def propose(self, committed: list[int], max_tokens: int) -> list[int]:
+        self._prepare_metadata(committed, max_tokens)
         return super().propose(committed, max_tokens)
+
+    def propose_with_probs(self, committed: list[int], max_tokens: int) -> tuple[list[int], Optional[torch.Tensor]]:
+        self._prepare_metadata(committed, max_tokens)
+        return super().propose_with_probs(committed, max_tokens)
 
     def kv_stats(self) -> dict:
         if self._state is None or not isinstance(self._state.cache, QuantizedKVCache):
             return {}
         return self._state.cache.stats()
+
+    def finish_request(self) -> None:
+        try:
+            self.last_kv_stats = self.kv_stats()
+        finally:
+            super().finish_request()
+            self._committed_ids = []
+            self._entropy = None
+
+
+_COMPRESSED_PROPOSE = CompressedKVDrafter.propose
+_MAKE_CACHE = CompressedKVDrafter._make_cache
