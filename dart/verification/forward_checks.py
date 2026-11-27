@@ -12,6 +12,7 @@ from dart.verification.state_checks import (
     _cache_pairs,
     _check_reference_storage,
     _reference_forward,
+    _score_failure,
     _validate_tolerances,
 )
 
@@ -85,11 +86,15 @@ def _reference_snapshot(output, width, length, vocab, *, prefill_logits=None):
     return snapshot
 
 
+def _same_bits(actual, expected):
+    return torch.equal(actual.contiguous().view(torch.uint8), expected.contiguous().view(torch.uint8))
+
+
 def _equal(actual, expected, *, atol, rtol):
     if actual.shape != expected.shape or actual.dtype != expected.dtype:
         return False, False
     actual = actual.to(expected.device)
-    bitwise = torch.equal(actual.contiguous().view(torch.uint8), expected.contiguous().view(torch.uint8))
+    bitwise = _same_bits(actual, expected)
     close = (bool(torch.isfinite(actual).all()) and bool(torch.isfinite(expected).all())
              and torch.allclose(actual, expected, atol=atol, rtol=rtol))
     return close, bitwise
@@ -112,16 +117,16 @@ def _compare_cache(pairs, length, expected, *, atol, rtol):
 
 
 def _compare_logits(actual, expected, *, atol, rtol, prefix=""):
-    failures = []
-    close, bitwise = _equal(actual, expected, atol=atol, rtol=rtol)
     if actual.shape != expected.shape:
-        failures.append(CheckFailure(prefix + "logits_shape", detail="logit shapes differ"))
-    else:
-        if actual.argmax(-1).tolist() != expected.argmax(-1).tolist():
-            failures.append(CheckFailure(prefix + "tokens", detail="next-token IDs differ"))
-        if not close:
-            failures.append(CheckFailure(prefix + "logits", detail="logit dtype, finiteness or values differ"))
-    return failures, bitwise
+        return [CheckFailure(prefix + "logits_shape", detail="logit shapes differ")], False
+    actual = actual.to(expected.device)
+    failures = []
+    if actual.argmax(-1).tolist() != expected.argmax(-1).tolist():
+        failures.append(CheckFailure(prefix + "tokens", detail="next-token IDs differ"))
+    failure = _score_failure(actual, expected, prefix + "logits", atol=atol, rtol=rtol)
+    if failure is not None:
+        failures.append(failure)
+    return failures, actual.dtype == expected.dtype and _same_bits(actual, expected)
 
 
 def _compare(actual, expected, *, atol, rtol):

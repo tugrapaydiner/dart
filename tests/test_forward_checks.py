@@ -550,3 +550,35 @@ def test_compact_forward_check_propagates_cancellation(monkeypatch):
             check_forward_paths(target, reference, (3, 5, 7), (11, 13))
     finally:
         target.close()
+
+
+@pytest.mark.parametrize("prefill", [False, True])
+def test_forward_check_locates_first_bad_score(monkeypatch, prefill):
+    target, reference = models()
+    if prefill:
+        original = target.prefill
+
+        def prefill_scores(*args, **kwargs):
+            state, logits = original(*args, **kwargs)
+            logits = logits.clone()
+            logits[11] = -5000
+            return state, logits
+
+        monkeypatch.setattr(target, "prefill", prefill_scores)
+    else:
+        original = target.forward_block
+
+        def block_scores(*args, **kwargs):
+            logits = original(*args, **kwargs).clone()
+            logits[1, 11] = logits[2, 3] = -5000
+            return logits
+
+        monkeypatch.setattr(target, "forward_block", block_scores)
+
+    report = check_forward_paths(target, reference, (5, 6), (7, 8, 9))
+    assert report.incremental_full.passed
+    kind = "prefill_logits" if prefill else "logits"
+    for check in (report.candidate_full, report.candidate_incremental):
+        failure, = (f for f in check.failures if f.kind == kind)
+        assert failure.index == (0 if prefill else 1)
+        assert "vocabulary index 11" in failure.detail and "-5000" in failure.detail

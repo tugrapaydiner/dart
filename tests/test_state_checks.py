@@ -344,3 +344,20 @@ def test_context_and_branch_validation(models):
         check_verifier_state(*models, branch, verifier="block")
     with pytest.raises(ValueError, match="preceding"):
         replace(case, parents=(1, -1, 0, 1))
+
+
+@pytest.mark.parametrize("value", [float("inf"), -float("inf")])
+def test_shared_nonfinite_tree_scores_are_rejected(models, value):
+    target, reference = models
+    case = sample(models)
+
+    def poison(module, args, output):
+        output = output.clone()
+        output[..., 5] = value
+        return output
+
+    with target.model.lm_head.register_forward_hook(poison), reference.lm_head.register_forward_hook(poison):
+        report = check_verifier_state(target, reference, case, verifier="tree", inspect_tree=True)
+    failures = [f for f in report.failures if f.kind == "tree_logits"]
+    assert [f.index for f in failures] == list(range(1 + len(case.drafts)))
+    assert all("vocabulary index 5" in f.detail for f in failures)

@@ -168,6 +168,20 @@ def _validate_tolerances(atol, rtol):
             raise ValueError("tolerances must be finite and nonnegative")
 
 
+def _score_failure(actual, expected, kind, *, atol, rtol, row=None):
+    if actual.dtype != expected.dtype:
+        return CheckFailure(kind, row, "logit dtypes differ")
+    valid = torch.isclose(actual, expected, atol=atol, rtol=rtol)
+    valid &= torch.isfinite(actual) & torch.isfinite(expected)
+    if valid.all():
+        return None
+    offset = int(valid.reshape(-1).byte().argmin().item())  # First failing score in row order.
+    index, token = divmod(offset, expected.size(-1))
+    position = (index, token) if expected.ndim == 2 else (token,)
+    got, wanted = actual[position].item(), expected[position].item()
+    return CheckFailure(kind, index if row is None else row, f"vocabulary index {token} has {got}, expected {wanted}")
+
+
 def _inspect_tree_rows(target, reference_model, case, *, atol, rtol):
     paths = [(case.pending,)]
     for token, parent in zip(case.drafts, case.parents):
@@ -196,8 +210,9 @@ def _inspect_tree_rows(target, reference_model, case, *, atol, rtol):
             actual = logits[row].to(wanted.device)
             if actual.argmax().item() != wanted.argmax().item():
                 failures.append(CheckFailure("tree_token", row, "packed row argmax differs"))
-            if not torch.allclose(actual, wanted, atol=atol, rtol=rtol):
-                failures.append(CheckFailure("tree_logits", row, "packed row logits differ beyond tolerance"))
+            failure = _score_failure(actual, wanted, "tree_logits", atol=atol, rtol=rtol, row=row)
+            if failure is not None:
+                failures.append(failure)
             if len(pairs) != len(expected_pairs):
                 failures.append(CheckFailure("tree_cache_layers", row, "cache layer counts differ"))
             for layer, (actual_pair, expected_pair) in enumerate(zip(pairs, expected_pairs)):
